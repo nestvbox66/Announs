@@ -1,0 +1,6 @@
+{
+  "name": "Announs",
+  "description": "Aplicación de escritorio compañera de anuncios e interacción con pasajeros para simuladores de vuelo (MSFS).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
