@@ -1,0 +1,3 @@
+Para levantar el entorno: 
+Abrir la terminal integrada y ejecutar: npx tauri dev
+
