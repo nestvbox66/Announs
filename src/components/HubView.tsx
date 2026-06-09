@@ -4,6 +4,7 @@
  */
 
 import React, { useState } from "react";
+import { supabase } from "../lib/supabase";
 import { 
   Award, 
   Clock, 
@@ -25,7 +26,9 @@ import {
   Map,
   Lock,
   LogIn,
-  Mail
+  Mail,
+  Eye,
+  EyeOff
 } from "lucide-react";
 import { VueloReciente, Logro } from "../types";
 import PassportView from "./PassportView";
@@ -53,6 +56,11 @@ export default function HubView({
   const [subView, setSubView] = useState<"overview" | "stats" | "passport" | "account">("overview");
   const [selectedFlight, setSelectedFlight] = useState<VueloReciente | null>(null);
   const [flightReportTab, setFlightReportTab] = useState<"overview" | "telemetry">("overview");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
 
   const getAircraftByFlight = (codigo: string, aerolinea: string) => {
     const code = (codigo || "").toUpperCase();
@@ -373,8 +381,16 @@ export default function HubView({
   }
 
   if (!isLoggedIn) {
-    const handleLocalLogin = (e: React.FormEvent) => {
+    const handleLocalLogin = async (e: React.FormEvent) => {
       e.preventDefault();
+      setAuthError(null);
+      setLoading(true);
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      setLoading(false);
+      if (error) {
+        setAuthError(error.message);
+        return;
+      }
       if (onLogin) onLogin();
     };
 
@@ -408,7 +424,8 @@ export default function HubView({
                 </span>
                 <input
                   type="email"
-                  defaultValue="nsassano@gmail.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
                   required
                   className="w-full bg-[#00172e] text-white font-mono text-xs pl-9 pr-3 py-2.5 rounded border border-[#3B7EB2]/40 focus:outline-none focus:border-[#45AFFF] transition-all"
                   placeholder="ejemplo@piloto.com"
@@ -426,21 +443,43 @@ export default function HubView({
                   <Lock className="w-3.5 h-3.5 text-[#45AFFF]/60" />
                 </span>
                 <input
-                  type="password"
-                  defaultValue="passwordpilot123"
+                  type={showPassword ? "text" : "password"}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
                   required
-                  className="w-full bg-[#00172e] text-white font-mono text-xs pl-9 pr-3 py-2.5 rounded border border-[#3B7EB2]/40 focus:outline-none focus:border-[#45AFFF] transition-all"
+                  className="w-full bg-[#00172e] text-white font-mono text-xs pl-9 pr-9 py-2.5 rounded border border-[#3B7EB2]/40 focus:outline-none focus:border-[#45AFFF] transition-all"
                   placeholder="••••••••"
                 />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute inset-y-0 right-0 flex items-center pr-3 cursor-pointer"
+                  tabIndex={-1}
+                >
+                  {showPassword ? (
+                    <EyeOff className="w-3.5 h-3.5 text-[#45AFFF]/60 hover:text-[#45AFFF] transition-colors" />
+                  ) : (
+                    <Eye className="w-3.5 h-3.5 text-[#45AFFF]/60 hover:text-[#45AFFF] transition-colors" />
+                  )}
+                </button>
               </div>
             </div>
 
             {/* Ingresar button */}
             <button
               type="submit"
-              className="w-full bg-[#45AFFF] hover:bg-[#45AFFF]/85 active:scale-[0.98] text-[#00345C] border border-[#45AFFF]/30 py-3 rounded font-mono font-extrabold text-xs transition-all uppercase tracking-widest cursor-pointer shadow-md flex items-center justify-center gap-2"
+              disabled={loading}
+              className="w-full bg-[#45AFFF] hover:bg-[#45AFFF]/85 active:scale-[0.98] text-[#00345C] border border-[#45AFFF]/30 py-3 rounded font-mono font-extrabold text-xs transition-all uppercase tracking-widest cursor-pointer shadow-md flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <LogIn className="w-4 h-4" /> INGRESAR CON MI PILOTO ID
+              {loading ? (
+                <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+              ) : (
+                <LogIn className="w-4 h-4" />
+              )}
+              {loading ? "AUTENTICANDO..." : "INGRESAR CON MI PILOTO ID"}
             </button>
           </form>
 
@@ -451,20 +490,42 @@ export default function HubView({
             <div className="flex-1 h-[1px] bg-white/10"></div>
           </div>
 
+          {authError && (
+            <div className="bg-red-900/30 border border-red-500/40 rounded px-3 py-2 text-[11px] font-mono text-red-300 flex items-center gap-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-red-400 shrink-0"></span>
+              {authError}
+            </div>
+          )}
+
           {/* Google SSO Login */}
           <button
             type="button"
-            onClick={onLogin}
-            className="w-full bg-[#00172e]/60 hover:bg-[#00345C]/50 border border-[#3B7EB2]/40 hover:border-[#45AFFF]/40 text-white py-3 rounded font-mono font-bold text-xs transition-all uppercase tracking-widest cursor-pointer shadow-sm flex items-center justify-center gap-2"
+            disabled={loading}
+            onClick={async () => {
+              setAuthError(null);
+              setLoading(true);
+              const { error } = await supabase.auth.signInWithOAuth({ provider: "google" });
+              setLoading(false);
+              if (error) {
+                setAuthError(error.message);
+              }
+            }}
+            className="w-full bg-[#00172e]/60 hover:bg-[#00345C]/50 border border-[#3B7EB2]/40 hover:border-[#45AFFF]/40 text-white py-3 rounded font-mono font-bold text-xs transition-all uppercase tracking-widest cursor-pointer shadow-sm flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {/* Custom Google Logo Representation */}
-            <svg className="w-4 h-4" viewBox="0 0 24 24">
-              <path
-                fill="#EA4335"
-                d="M12.24 10.285V14.4h6.887c-.648 2.41-2.519 4.2-5.137 4.2a5.7 5.7 0 0 1-5.7-5.7 5.7 5.7 0 0 1 5.7-5.7c2.14 0 3.987.818 5.353 2.15l3.1-3.1C20.35 4.3 16.59 2.5 12.24 2.5a10 10 0 0 0-10 10 10 10 0 0 0 10 10c5.38 0 9.8-3.9 9.8-9.8 0-.6-.05-1.15-.16-1.715h-9.64z"
-              />
-            </svg>
-            ACCEDER CON GOOGLE
+            {loading ? (
+              <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+            ) : (
+              <svg className="w-4 h-4" viewBox="0 0 24 24">
+                <path
+                  fill="#EA4335"
+                  d="M12.24 10.285V14.4h6.887c-.648 2.41-2.519 4.2-5.137 4.2a5.7 5.7 0 0 1-5.7-5.7 5.7 5.7 0 0 1 5.7-5.7c2.14 0 3.987.818 5.353 2.15l3.1-3.1C20.35 4.3 16.59 2.5 12.24 2.5a10 10 0 0 0-10 10 10 10 0 0 0 10 10c5.38 0 9.8-3.9 9.8-9.8 0-.6-.05-1.15-.16-1.715h-9.64z"
+                />
+              </svg>
+            )}
+            {loading ? "AUTENTICANDO..." : "ACCEDER CON GOOGLE"}
           </button>
 
           {/* Secure disclaimer footer */}

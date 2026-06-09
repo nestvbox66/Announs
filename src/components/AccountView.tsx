@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect } from "react";
+import { supabase } from "../lib/supabase";
 import { 
   User, 
   Mail, 
@@ -34,80 +35,107 @@ interface AccountData {
   username: string;
   email: string;
   avatarUrl: string;
-  subscriptionType: "Base" | "Lite" | "Pro";
+  subscriptionType: string;
   pilotSince: string;
   subscriptionExpiry: string;
   userLevel: number;
   userXP: number;
   simbriefPilotId: string;
   simbriefUnits: "KGS" | "LBS";
+  preferredLanguage: string;
 }
 
-// Predefined beautiful professional aviation avatars
-const PRESET_AVATARS = [
-  { id: "captain", name: "Capitán", emoji: "👨‍✈️", bg: "bg-[#00345C]" },
-  { id: "copilot", name: "Copiloto", emoji: "👩‍✈️", bg: "bg-[#2C6591]" },
-  { id: "dispatch", name: "Despachador", emoji: "🎧", bg: "bg-[#1E293B]" },
-  { id: "mechanic", name: "Ing. Vuelo", emoji: "🔧", bg: "bg-slate-700" },
-  { id: "legend", name: "Piloto Jet", emoji: "🦅", bg: "bg-[#45AFFF]/20" },
-  { id: "space", name: "Astronauta", emoji: "🧑‍🚀", bg: "bg-[#E68B00]/20" }
-];
-
-const DEFAULT_ACCOUNT: AccountData = {
-  username: "nsassano",
-  email: "nsassano@gmail.com",
-  avatarUrl: "👨‍✈️", // default simple caption avatar emoji
-  subscriptionType: "Base",
-  pilotSince: "12/10/2023",
-  subscriptionExpiry: "12/10/2027",
-  userLevel: 42,
-  userXP: 24500,
-  simbriefPilotId: "249811",
-  simbriefUnits: "KGS"
+const formatDate = (dateStr: string) => {
+  if (!dateStr) return "---";
+  try {
+    const date = new Date(dateStr);
+    if (isNaN(date.getTime())) return dateStr;
+    const day = String(date.getDate()).padStart(2, "0");
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const year = date.getFullYear();
+    return `${day}/${month}/${year}`;
+  } catch (e) {
+    return dateStr;
+  }
 };
 
 export default function AccountView({ onBack, onLogout }: AccountViewProps) {
-  // Load initial state from LocalStorage or use default
-  const [savedData, setSavedData] = useState<AccountData>(() => {
-    try {
-      const stored = localStorage.getItem("pilot_account_settings");
-      if (stored) {
-        return JSON.parse(stored);
-      }
-    } catch (e) {
-      console.error("Error reading pilot_account_settings", e);
-    }
-    return DEFAULT_ACCOUNT;
-  });
+  const [dbData, setDbData] = useState<AccountData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [userId, setUserId] = useState<string | null>(null);
 
-  // Form states
-  const [username, setUsername] = useState(savedData.username);
-  const [avatarUrl, setAvatarUrl] = useState(savedData.avatarUrl);
-  const [subscriptionType, setSubscriptionType] = useState(savedData.subscriptionType);
-  const [simbriefPilotId, setSimbriefPilotId] = useState(savedData.simbriefPilotId);
-  const [simbriefUnits, setSimbriefUnits] = useState(savedData.simbriefUnits);
-  const [userLevel, setUserLevel] = useState(savedData.userLevel);
-  const [userXP, setUserXP] = useState(savedData.userXP);
-  
+  // Form states (editable)
+  const [username, setUsername] = useState("");
+  const [avatarUrl, setAvatarUrl] = useState("");
+  const [simbriefPilotId, setSimbriefPilotId] = useState("");
+  const [simbriefUnits, setSimbriefUnits] = useState<"KGS" | "LBS">("KGS");
+  const [preferredLanguage, setPreferredLanguage] = useState("es");
+
   // Custom avatar input helper
   const [customAvatarInput, setCustomAvatarInput] = useState("");
   const [showNotification, setShowNotification] = useState(false);
-  const [isUploading, setIsUploading] = useState(false);
+  const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
 
-  // Synchronize when savedData changes (for example if reset happens)
   useEffect(() => {
-    setUsername(savedData.username);
-    setAvatarUrl(savedData.avatarUrl);
-    setSubscriptionType(savedData.subscriptionType);
-    setSimbriefPilotId(savedData.simbriefPilotId);
-    setSimbriefUnits(savedData.simbriefUnits);
-    setUserLevel(savedData.userLevel);
-    setUserXP(savedData.userXP);
-  }, [savedData]);
+    let cancelled = false;
 
-  // Handle simulated pilot account logout
+    const loadData = async () => {
+      setLoading(true);
+      const { data: { user }, error: authError } = await supabase.auth.getUser();
+      if (cancelled) return;
+      if (authError || !user) {
+        setLoading(false);
+        return;
+      }
+
+      const uid = user.id;
+      setUserId(uid);
+
+      const { data, error } = await supabase
+        .from("users")
+        .select("*")
+        .eq("id", uid)
+        .maybeSingle();
+
+      if (cancelled) return;
+      if (error) {
+        setLoading(false);
+        return;
+      }
+
+      const row: AccountData = {
+        username: data?.username || "",
+        email: data?.email || user.email || "",
+        avatarUrl: data?.avatar || "👨‍✈️",
+        subscriptionType: data?.subscription_tier || "base",
+        pilotSince: data?.created_at || "",
+        subscriptionExpiry: data?.subscription_enddate || "",
+        userLevel: data?.user_level ?? 1,
+        userXP: data?.user_xp ?? 0,
+        simbriefPilotId: data?.simbrief_pilot_id || "",
+        simbriefUnits: data?.simbrief_units || "KGS",
+        preferredLanguage: data?.preferred_language || "es"
+      };
+
+      if (!cancelled) {
+        setDbData(row);
+        setUsername(row.username);
+        setAvatarUrl(row.avatarUrl);
+        setSimbriefPilotId(row.simbriefPilotId);
+        setSimbriefUnits(row.simbriefUnits);
+        setPreferredLanguage(row.preferredLanguage);
+        setLoading(false);
+      }
+    };
+
+    loadData();
+
+    return () => { cancelled = true; };
+  }, []);
+
+  // Handle pilot account logout
   const handleLogout = () => {
-    localStorage.removeItem("pilot_account_settings");
     if (onLogout) {
       onLogout();
     } else {
@@ -115,38 +143,81 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
     }
   };
 
-  // Handle local avatar file mock "upload"
-  const handleAvatarFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (files && files.length > 0) {
-      setIsUploading(true);
-      const file = files[0];
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setAvatarUrl(reader.result as string);
-        setIsUploading(false);
-      };
-      reader.readAsDataURL(file);
+  // Handle local avatar upload
+  const handleAvatarUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file || !userId) return;
+
+    setIsUploadingAvatar(true);
+    try {
+      const fileExt = file.name.split(".").pop()?.toLowerCase() || "png";
+      const filePath = `${userId}-${Date.now()}.${fileExt}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from("avatars")
+        .upload(filePath, file, { upsert: true });
+
+      if (uploadError) {
+        console.error("Error al subir avatar:", uploadError);
+        return;
+      }
+
+      const { data: urlData } = supabase.storage
+        .from("avatars")
+        .getPublicUrl(filePath);
+
+      if (urlData?.publicUrl) {
+        setAvatarUrl(urlData.publicUrl);
+      }
+    } catch (err) {
+      console.error("Error inesperado al subir avatar:", err);
+    } finally {
+      setIsUploadingAvatar(false);
     }
   };
 
   // Save handler
-  const handleSave = () => {
-    const newData: AccountData = {
-      ...savedData,
+  const handleSave = async () => {
+    if (!userId) return;
+    setSaving(true);
+
+    const simbriefPilotIdNum = simbriefPilotId.trim()
+      ? parseInt(simbriefPilotId, 10) || null
+      : null;
+
+    const updatePayload = {
       username,
-      avatarUrl,
-      subscriptionType,
-      simbriefPilotId,
-      simbriefUnits,
-      userLevel,
-      userXP
+      avatar: avatarUrl,
+      simbrief_units: simbriefUnits,
+      simbrief_pilot_id: simbriefPilotIdNum,
+      preferred_language: preferredLanguage
     };
 
-    localStorage.setItem("pilot_account_settings", JSON.stringify(newData));
-    setSavedData(newData);
-    
-    // Show success notification banner
+    console.log("Payload a guardar:", updatePayload);
+
+    const { error } = await supabase
+      .from("users")
+      .update(updatePayload)
+      .eq("id", userId);
+
+    setSaving(false);
+
+    if (error) {
+      return;
+    }
+
+    // Refresh local data after save
+    if (dbData) {
+      setDbData({
+        ...dbData,
+        username,
+        avatarUrl,
+        simbriefPilotId,
+        simbriefUnits,
+        preferredLanguage
+      });
+    }
+
     setShowNotification(true);
     setTimeout(() => {
       setShowNotification(false);
@@ -155,21 +226,22 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
 
   // Revert all form states to currently saved state
   const handleCancel = () => {
-    setUsername(savedData.username);
-    setAvatarUrl(savedData.avatarUrl);
-    setSubscriptionType(savedData.subscriptionType);
-    setSimbriefPilotId(savedData.simbriefPilotId);
-    setSimbriefUnits(savedData.simbriefUnits);
-    setUserLevel(savedData.userLevel);
-    setUserXP(savedData.userXP);
+    if (dbData) {
+      setUsername(dbData.username);
+      setAvatarUrl(dbData.avatarUrl);
+      setSimbriefPilotId(dbData.simbriefPilotId);
+      setSimbriefUnits(dbData.simbriefUnits);
+    }
     setCustomAvatarInput("");
-    onBack(); // go back on cancel
+    onBack();
   };
 
   // Progress percentage calculation for visual feedback
-  const xpNextLevel = (userLevel + 1) * 1000;
-  const xpCurrentLevelFloor = userLevel * 1000;
-  const levelProgressPercent = Math.max(0, Math.min(100, Math.round(((userXP - xpCurrentLevelFloor) / (xpNextLevel - xpCurrentLevelFloor)) * 100)));
+  const currentLevel = dbData?.userLevel ?? 1;
+  const currentXP = dbData?.userXP ?? 0;
+  const xpNextLevel = (currentLevel + 1) * 1000;
+  const xpCurrentLevelFloor = currentLevel * 1000;
+  const levelProgressPercent = Math.max(0, Math.min(100, Math.round(((currentXP - xpCurrentLevelFloor) / (xpNextLevel - xpCurrentLevelFloor)) * 100)));
 
   return (
     <div className="space-y-6 animate-fadeIn pb-12" id="account-settings-container">
@@ -198,7 +270,7 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
         <div id="toast-success-banner" className="bg-[#43E600]/15 border border-[#43E600] text-white p-3 rounded-[4px] flex items-center justify-between text-xs font-mono animate-scaleUp">
           <div className="flex items-center gap-2">
             <ShieldCheck className="w-4 h-4 text-[#43E600] animate-bounce" />
-            <span>AJUSTES DEL PILOTO GUARDADOS EN EL REGISTRO LOCAL DE SIMULACIÓN</span>
+            <span>AJUSTES DEL PILOTO GUARDADOS EN LA BASE DE DATOS</span>
           </div>
           <button onClick={() => setShowNotification(false)} className="text-white/60 hover:text-white">
             <X className="w-3.5 h-3.5" />
@@ -229,7 +301,7 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
               ) : (
                 <span className="select-none text-5xl transform group-hover:scale-110 transition-transform">{avatarUrl || "👨‍✈️"}</span>
               )}
-              {isUploading && (
+              {isUploadingAvatar && (
                 <div className="absolute inset-0 bg-black/60 flex items-center justify-center text-[10px] font-mono text-[#45AFFF]">
                   Cargando...
                 </div>
@@ -238,30 +310,10 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
 
             <div className="space-y-1">
               <span className="text-sm font-bold text-white font-mono uppercase tracking-wider">{username}</span>
-              <p className="text-[10px] text-white/50 font-mono tracking-tight">{savedData.email}</p>
+              <p className="text-[10px] text-white/50 font-mono tracking-tight">{dbData?.email}</p>
             </div>
 
-            {/* Presets Grid */}
-            <div className="space-y-3">
-              <label className="text-[10px] text-[#45AFFF] font-mono uppercase tracking-wider block text-left">
-                Selecciona insignia de vuelo:
-              </label>
-              <div className="grid grid-cols-3 gap-2">
-                {PRESET_AVATARS.map((av) => (
-                  <button
-                    key={av.id}
-                    onClick={() => setAvatarUrl(av.emoji)}
-                    className={`p-2 rounded text-2xl cursor-pointer transition-all border ${
-                      avatarUrl === av.emoji 
-                        ? "border-[#45AFFF] bg-white/10 scale-105 shadow-inner" 
-                        : "border-white/10 hover:border-white/30 hover:bg-white/5 bg-transparent"
-                    }`}
-                    title={av.name}
-                  >
-                    {av.emoji}
-                  </button>
-                ))}
-              </div>
+
 
               {/* URL or Upload option */}
               <div className="pt-2 border-t border-white/5 space-y-2 text-left">
@@ -275,7 +327,7 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
                     <input 
                       type="file" 
                       accept="image/*" 
-                      onChange={handleAvatarFileChange} 
+                      onChange={handleAvatarUpload} 
                       className="hidden" 
                     />
                   </label>
@@ -307,14 +359,13 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
                   </button>
                 </div>
               </div>
-            </div>
           </div>
 
           {/* Level and XP progress displays as requested */}
           <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-5 shadow-md space-y-4">
             <h3 className="text-xs font-mono font-bold text-[#45AFFF] uppercase tracking-wider border-b border-white/10 pb-2 flex items-center justify-between">
               <span>NIVEL Y EXPERIENCIA</span>
-              <span className="text-[#43E600] font-mono text-xs">LVL {userLevel}</span>
+              <span className="text-[#43E600] font-mono text-xs">LVL {dbData?.userLevel ?? 1}</span>
             </h3>
 
             {/* Beautiful visual XP Progress Bar */}
@@ -331,7 +382,7 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
               </div>
               <div className="flex justify-between text-[10px] font-mono text-white/50">
                 <span>{xpCurrentLevelFloor} XP</span>
-                <span className="text-[#43E600] font-semibold">{userXP} XP total</span>
+                <span className="text-[#43E600] font-semibold">{dbData?.userXP ?? 0} XP total</span>
                 <span>{xpNextLevel} XP</span>
               </div>
             </div>
@@ -368,7 +419,7 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
                   Correo Electrónico
                 </label>
                 <div className="w-full bg-black/40 text-white/50 font-mono text-xs px-3 py-2 rounded border border-white/5 cursor-not-allowed flex items-center justify-between">
-                  <span>{savedData.email}</span>
+                  <span>{dbData?.email}</span>
                   <span className="text-[8px] bg-white/5 text-white/30 px-1.5 py-0.5 rounded uppercase">Verificado</span>
                 </div>
               </div>
@@ -380,7 +431,7 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
                 </label>
                 <div className="w-full bg-[#00172e]/50 text-white/80 font-mono text-xs px-3 py-2 rounded border border-white/10 flex items-center gap-2">
                   <Calendar className="w-3.5 h-3.5 text-[#E68B00]" />
-                  <span>{savedData.pilotSince}</span>
+                  <span>{formatDate(dbData?.pilotSince || "")}</span>
                 </div>
               </div>
 
@@ -391,9 +442,24 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
                 </label>
                 <div className="w-full bg-[#00172e]/50 text-[#43E600] font-mono text-xs px-3 py-2 rounded border border-white/10 flex items-center gap-2">
                   <ShieldCheck className="w-3.5 h-3.5 text-[#43E600]" />
-                  <span>{savedData.subscriptionExpiry}</span>
+                  <span>{formatDate(dbData?.subscriptionExpiry || "")}</span>
                 </div>
               </div>
+              </div>
+
+            {/* Idioma de preferencia */}
+            <div className="space-y-1.5">
+              <label className="text-xs text-[#45AFFF]/90 font-mono font-bold uppercase tracking-wider block">
+                Idioma de Preferencia
+              </label>
+              <select
+                value={preferredLanguage}
+                onChange={(e) => setPreferredLanguage(e.target.value)}
+                className="w-full bg-black/25 text-white font-mono text-xs px-3 py-2 rounded border border-white/10 focus:outline-none focus:border-[#45AFFF]/50 appearance-none cursor-pointer"
+              >
+                <option value="es" className="bg-[#00345C]">Español</option>
+                <option value="en" className="bg-[#00345C]">English</option>
+              </select>
             </div>
 
             {/* Subscription Type selection area */}
@@ -402,90 +468,82 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
                 Tipo de Suscripción
               </label>
               
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                {/* Subscription Card 1: Base */}
-                <button
-                  type="button"
-                  onClick={() => setSubscriptionType("Base")}
-                  className={`p-4 rounded border text-left cursor-pointer transition-all flex flex-col justify-between h-28 ${
-                    subscriptionType === "Base"
-                      ? "bg-black/30 border-[#45AFFF] ring-1 ring-[#45AFFF]/30"
-                      : "bg-black/10 border-white/5 hover:bg-black/15"
-                  }`}
-                >
-                  <div className="w-full flex justify-between items-start">
-                    <span className="text-xs font-mono text-white/60 uppercase">MATE BASE</span>
-                    {subscriptionType === "Base" && <span className="w-2.5 h-2.5 rounded-full bg-[#45AFFF]"></span>}
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-bold text-white uppercase font-mono">Plan Standard</h4>
-                    <p className="text-[9px] text-white/40 font-mono leading-none mt-1">Bitácora simple MSFS</p>
-                  </div>
-                </button>
+              {(() => {
+                const subscription_tier = (dbData?.subscriptionType || "base").toLowerCase();
+                return (
+                  <>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      {/* Subscription Card 1: Base */}
+                      <div
+                        className={`p-4 rounded border text-left flex flex-col justify-between h-28 select-none transition-all duration-300 ${
+                          subscription_tier === "base"
+                            ? "bg-black/30 border-[#45AFFF] ring-1 ring-[#45AFFF]/30"
+                            : "bg-black/10 border-white/5 opacity-40"
+                        }`}
+                      >
+                        <div className="w-full flex justify-between items-start">
+                          <span className="text-xs font-mono text-white/60 uppercase">MATE BASE</span>
+                          {subscription_tier === "base" && <span className="w-2.5 h-2.5 rounded-full bg-[#45AFFF]"></span>}
+                        </div>
+                        <div>
+                          <h4 className="text-sm font-bold text-white uppercase font-mono">Plan Standard</h4>
+                          <p className="text-[9px] text-white/40 font-mono leading-none mt-1">Bitácora simple MSFS</p>
+                        </div>
+                      </div>
 
-                {/* Subscription Card 2: Lite */}
-                <button
-                  type="button"
-                  onClick={() => setSubscriptionType("Lite")}
-                  className={`p-4 rounded border text-left cursor-pointer transition-all flex flex-col justify-between h-28 ${
-                    subscriptionType === "Lite"
-                      ? "bg-[#E68B00]/10 border-[#E68B00] ring-1 ring-[#E68B00]/30"
-                      : "bg-black/10 border-white/5 hover:bg-black/15"
-                  }`}
-                >
-                  <div className="w-full flex justify-between items-start">
-                    <span className="text-xs font-mono text-[#E68B00] uppercase font-bold">LITE EDITION</span>
-                    {subscriptionType === "Lite" && <span className="w-2.5 h-2.5 rounded-full bg-[#E68B00]"></span>}
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-bold text-white uppercase font-mono">Plan Intermedio</h4>
-                    <p className="text-[9px] text-white/40 font-mono leading-none mt-1">Soporta rutas y logs básicos</p>
-                  </div>
-                </button>
+                      {/* Subscription Card 2: Lite */}
+                      <div
+                        className={`p-4 rounded border text-left flex flex-col justify-between h-28 select-none transition-all duration-300 ${
+                          subscription_tier === "lite"
+                            ? "bg-[#E68B00]/10 border-[#E68B00] ring-1 ring-[#E68B00]/30"
+                            : "bg-black/10 border-white/5 opacity-40"
+                        }`}
+                      >
+                        <div className="w-full flex justify-between items-start">
+                          <span className="text-xs font-mono text-[#E68B00] uppercase font-bold">LITE EDITION</span>
+                          {subscription_tier === "lite" && <span className="w-2.5 h-2.5 rounded-full bg-[#E68B00]"></span>}
+                        </div>
+                        <div>
+                          <h4 className="text-sm font-bold text-white uppercase font-mono">Plan Intermedio</h4>
+                          <p className="text-[9px] text-white/40 font-mono leading-none mt-1">Soporta rutas y logs básicos</p>
+                        </div>
+                      </div>
 
-                {/* Subscription Card 3: Pro */}
-                <button
-                  type="button"
-                  onClick={() => setSubscriptionType("Pro")}
-                  className={`p-4 rounded border text-left cursor-pointer transition-all flex flex-col justify-between h-28 ${
-                    subscriptionType === "Pro"
-                      ? "bg-[#43E600]/10 border-[#43E600] ring-1 ring-[#43E600]/30"
-                      : "bg-black/10 border-white/5 hover:bg-black/15"
-                  }`}
-                >
-                  <div className="w-full flex justify-between items-start">
-                    <span className="text-xs font-mono text-[#43E600] uppercase font-bold">FLIGHT CO-PILOT PRO</span>
-                    {subscriptionType === "Pro" && <span className="w-2.5 h-2.5 rounded-full bg-[#43E600] animate-pulse"></span>}
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-bold text-white uppercase font-mono">Premium Unlimited</h4>
-                    <p className="text-[9px] text-white/40 font-mono leading-none mt-1">Pasaporte, despachador inteligente</p>
-                  </div>
-                </button>
-              </div>
+                      {/* Subscription Card 3: Pro */}
+                      <div
+                        className={`p-4 rounded border text-left flex flex-col justify-between h-28 select-none transition-all duration-300 ${
+                          subscription_tier === "pro"
+                            ? "bg-[#43E600]/10 border-[#43E600] ring-1 ring-[#43E600]/30"
+                            : "bg-black/10 border-white/5 opacity-40"
+                        }`}
+                      >
+                        <div className="w-full flex justify-between items-start">
+                          <span className="text-xs font-mono text-[#43E600] uppercase font-bold">FLIGHT CO-PILOT PRO</span>
+                          {subscription_tier === "pro" && <span className="w-2.5 h-2.5 rounded-full bg-[#43E600] animate-pulse"></span>}
+                        </div>
+                        <div>
+                          <h4 className="text-sm font-bold text-white uppercase font-mono">Premium Unlimited</h4>
+                          <p className="text-[9px] text-white/40 font-mono leading-none mt-1">Pasaporte, despachador inteligente</p>
+                        </div>
+                      </div>
+                    </div>
 
-              {/* Call-to-action (CTA) to upgrade / change plan */}
-              <div className="bg-[#00172e]/55 border border-[#43E600]/30 rounded p-4 mt-1 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-                <div className="space-y-1">
-                  <span className="text-xs font-mono font-bold text-[#43E600] uppercase tracking-wider flex items-center gap-1.5">
-                    <Sparkles className="w-3.5 h-3.5 text-[#43E600]" /> ¿Deseas ampliar tus privilegios de tripulación?
-                  </span>
-                  <p className="text-[10px] text-white/70 font-mono leading-relaxed">
-                    Sube de nivel para desbloquear la sincronización multicloud, el despachador meteorológico de SimBrief avanzado, cartas aeronáuticas mundiales Navigraph integradas y herramientas extendidas de voz ATC.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSubscriptionType("Pro");
-                    // Trigger the notification banner so the user gets feedback
-                    setShowNotification(true);
-                  }}
-                  className="bg-[#43E600] hover:bg-[#43E600]/85 text-slate-900 border border-[#43E600]/30 px-4 py-2 rounded font-mono font-bold text-[10px] transition-all uppercase tracking-wider whitespace-nowrap self-start sm:self-center cursor-pointer shadow-md"
-                >
-                  Mejorar Plan a Pro ➔
-                </button>
-              </div>
+                    {/* Call-to-action (CTA) to upgrade / change plan */}
+                    <div className="bg-[#00172e]/55 border border-[#43E600]/30 rounded p-4 mt-1 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 select-none">
+                      <p className="text-[10px] text-white/70 font-mono leading-relaxed">
+                        Si quieres modificar tu plan, utiliza el botón para ver las opciones?
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setShowNotification(true)}
+                        className="bg-[#43E600] hover:bg-[#43E600]/85 text-slate-900 border border-[#43E600]/30 px-4 py-2 rounded font-mono font-bold text-[10px] transition-all uppercase tracking-wider whitespace-nowrap self-start sm:self-center cursor-pointer shadow-md"
+                      >
+                        MEJORAR PLAN A PRO ➔
+                      </button>
+                    </div>
+                  </>
+                );
+              })()}
             </div>
 
             {/* INTEGRATIONS SUBSECTION: SimBrief settings */}
@@ -543,10 +601,6 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
                         LBS (Imperial)
                       </button>
                     </div>
-
-                    <span className="text-[10px] font-mono text-white/50 leading-tight">
-                      Calculadora de peso en despachos: <span className="text-white font-bold">{simbriefUnits}</span>
-                    </span>
                   </div>
                 </div>
               </div>
@@ -565,9 +619,18 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
               <button
                 type="button"
                 onClick={handleSave}
-                className="bg-[#43E600] hover:bg-[#43E600]/85 text-slate-900 border border-[#43E600]/50 px-8 py-2.5 rounded-[4px] font-mono font-extrabold text-xs transition-all uppercase tracking-widest cursor-pointer shadow-lg flex items-center gap-1.5"
+                disabled={saving}
+                className="bg-[#43E600] hover:bg-[#43E600]/85 text-slate-900 border border-[#43E600]/50 px-8 py-2.5 rounded-[4px] font-mono font-extrabold text-xs transition-all uppercase tracking-widest cursor-pointer shadow-lg flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <Save className="w-3.5 h-3.5" /> Guardar Cambios
+                {saving ? (
+                  <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                ) : (
+                  <Save className="w-3.5 h-3.5" />
+                )}
+                {saving ? "GUARDANDO..." : "Guardar Cambios"}
               </button>
             </div>
 

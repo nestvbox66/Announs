@@ -1,3 +1,12 @@
 Para levantar el entorno: 
 Abrir la terminal integrada y ejecutar: npx tauri dev
 
+Para subir una versión a GitHub
+# 1. Preparar todos los archivos modificados o nuevos
+git add .
+
+# 2. Empaquetar los cambios con un título descriptivo
+git commit -m "Escribe aquí lo que modificaste"
+
+# 3. Subir el paquete a la nube (GitHub)
+git push
