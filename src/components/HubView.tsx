@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { supabase } from "../lib/supabase";
 import { 
   Award, 
@@ -53,6 +54,7 @@ export default function HubView({
   onLogin,
   onLogout
 }: HubViewProps) {
+  const { t, i18n } = useTranslation();
   const [subView, setSubView] = useState<"overview" | "stats" | "passport" | "account">("overview");
   const [selectedFlight, setSelectedFlight] = useState<VueloReciente | null>(null);
   const [flightReportTab, setFlightReportTab] = useState<"overview" | "telemetry">("overview");
@@ -61,6 +63,40 @@ export default function HubView({
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [userProfile, setUserProfile] = useState<{ username: string; avatar: string; createdAt: string } | null>(null);
+
+  useEffect(() => {
+    if (!isLoggedIn) return;
+
+    let cancelled = false;
+
+    const loadProfile = async () => {
+      const { data: { user }, error: authErr } = await supabase.auth.getUser();
+      if (cancelled || authErr || !user) return;
+
+      const { data, error } = await supabase
+        .from("users")
+        .select("username, avatar, created_at, preferred_language")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      if (cancelled || error || !data) return;
+
+      setUserProfile({
+        username: data.username || "",
+        avatar: data.avatar || "",
+        createdAt: data.created_at || "",
+      });
+
+      if (data.preferred_language) {
+        i18n.changeLanguage(data.preferred_language);
+        localStorage.setItem("announs_language", data.preferred_language);
+      }
+    };
+
+    loadProfile();
+    return () => { cancelled = true; };
+  }, [isLoggedIn]);
 
   const getAircraftByFlight = (codigo: string, aerolinea: string) => {
     const code = (codigo || "").toUpperCase();
@@ -95,6 +131,14 @@ export default function HubView({
   const totalHoras = 158;
   const averageSatisfaccion = Math.round(vuelos.reduce((sum, v) => sum + v.satisfaccionMedia, 0) / vuelos.length);
   const averageFPM = Math.round(vuelos.reduce((sum, v) => sum + v.fpmLanding, 0) / vuelos.length);
+
+  const avatarInitials = userProfile?.username
+    ? userProfile.username.split(" ").map(n => n[0]).join("").toUpperCase().slice(0, 2)
+    : "--";
+
+  const memberSince = userProfile?.createdAt
+    ? new Intl.DateTimeFormat(i18n.language, { month: "short", year: "numeric" }).format(new Date(userProfile.createdAt))
+    : "---";
 
   const getAirlineBadge = (aerolinea: string) => {
     const cleanName = aerolinea ? aerolinea.toLowerCase() : "";
@@ -405,10 +449,10 @@ export default function HubView({
               <Lock className="w-7 h-7 text-[#45AFFF] animate-pulse" />
             </div>
             <h2 className="font-display font-black text-lg tracking-wider text-[#45AFFF] uppercase mt-2">
-              CABINA DE ACCESO AL PILOTO
+              {t("login.title")}
             </h2>
             <p className="text-[11px] text-white/60 font-mono max-w-xs mx-auto">
-              Sincroniza tu bitácora de vuelo en tiempo real y gestiona la satisfacción de tu tripulación con Announs Companion.
+              {t("login.description")}
             </p>
           </div>
 
@@ -416,7 +460,7 @@ export default function HubView({
             {/* Campo correo */}
             <div className="space-y-1.5">
               <label className="text-[10px] text-white/70 font-mono font-bold uppercase tracking-wider block">
-                CORREO ELECTRÓNICO (ID DE PILOTO)
+                {t("login.email_label")}
               </label>
               <div className="relative">
                 <span className="absolute inset-y-0 left-0 flex items-center pl-3">
@@ -428,7 +472,7 @@ export default function HubView({
                   onChange={(e) => setEmail(e.target.value)}
                   required
                   className="w-full bg-[#00172e] text-white font-mono text-xs pl-9 pr-3 py-2.5 rounded border border-[#3B7EB2]/40 focus:outline-none focus:border-[#45AFFF] transition-all"
-                  placeholder="ejemplo@piloto.com"
+                  placeholder={t("login.email_placeholder")}
                 />
               </div>
             </div>
@@ -436,7 +480,7 @@ export default function HubView({
             {/* Campo contraseña */}
             <div className="space-y-1.5">
               <label className="text-[10px] text-white/70 font-mono font-bold uppercase tracking-wider block">
-                CONTRASEÑA
+                {t("login.password_label")}
               </label>
               <div className="relative">
                 <span className="absolute inset-y-0 left-0 flex items-center pl-3">
@@ -448,7 +492,7 @@ export default function HubView({
                   onChange={(e) => setPassword(e.target.value)}
                   required
                   className="w-full bg-[#00172e] text-white font-mono text-xs pl-9 pr-9 py-2.5 rounded border border-[#3B7EB2]/40 focus:outline-none focus:border-[#45AFFF] transition-all"
-                  placeholder="••••••••"
+                  placeholder={t("login.password_placeholder")}
                 />
                 <button
                   type="button"
@@ -479,14 +523,14 @@ export default function HubView({
               ) : (
                 <LogIn className="w-4 h-4" />
               )}
-              {loading ? "AUTENTICANDO..." : "INGRESAR CON MI PILOTO ID"}
+              {loading ? t("login.authenticating") : t("login.login_button")}
             </button>
           </form>
 
           {/* Separator block */}
           <div className="flex items-center gap-3">
             <div className="flex-1 h-[1px] bg-white/10"></div>
-            <span className="text-[9px] text-white/40 font-mono uppercase tracking-widest whitespace-nowrap">O CONTINUAR CON</span>
+            <span className="text-[9px] text-white/40 font-mono uppercase tracking-widest whitespace-nowrap">{t("login.or_continue_with")}</span>
             <div className="flex-1 h-[1px] bg-white/10"></div>
           </div>
 
@@ -525,12 +569,12 @@ export default function HubView({
                 />
               </svg>
             )}
-            {loading ? "AUTENTICANDO..." : "ACCEDER CON GOOGLE"}
+            {loading ? t("login.authenticating") : t("login.google_button")}
           </button>
 
           {/* Secure disclaimer footer */}
           <div className="text-[9px] text-white/45 font-mono text-center pt-2 leading-relaxed">
-            Announs utiliza encriptación de claves local (AES). Tus credenciales permanecen seguras dentro de tu instancia de simulador.
+                        {t("login.disclaimer")}
           </div>
         </div>
       </div>
@@ -542,9 +586,9 @@ export default function HubView({
       {/* Upper Info Grid banner */}
       <div id="hub-upper-banner" className="flex flex-col sm:flex-row sm:items-end justify-between border-b border-[#3B7EB2]/50 pb-4 gap-4">
         <div>
-          <div className="text-xs text-[#45AFFF]/60 font-mono tracking-widest uppercase mb-1">OPERACIÓN HUB</div>
+          <div className="text-xs text-[#45AFFF]/60 font-mono tracking-widest uppercase mb-1">{t("hub.subtitle")}</div>
           <h1 className="font-display font-extrabold text-3xl tracking-tight text-[#45AFFF]">
-            HUB DEL USUARIO
+            {t("hub.title")}
           </h1>
         </div>
         
@@ -558,7 +602,7 @@ export default function HubView({
                 : "text-white/60 hover:text-white hover:bg-white/5"
             }`}
           >
-            OVERVIEW
+            {t("hub.tabs.overview")}
           </button>
           <button
             onClick={() => setSubView("stats")}
@@ -568,7 +612,7 @@ export default function HubView({
                 : "text-white/60 hover:text-white hover:bg-white/5"
             }`}
           >
-            ESTADÍSTICAS
+{t("hub.tabs.stats")}
           </button>
           <button
             onClick={() => setSubView("passport")}
@@ -578,7 +622,7 @@ export default function HubView({
                 : "text-white/60 hover:text-white hover:bg-white/5"
             }`}
           >
-            PASAPORTE
+            {t("hub.tabs.passport")}
           </button>
           <button
             onClick={() => setSubView("account")}
@@ -588,7 +632,7 @@ export default function HubView({
                 : "text-white/60 hover:text-white hover:bg-white/5"
             }`}
           >
-            CUENTA
+            {t("hub.tabs.account")}
           </button>
         </div>
       </div>
@@ -603,55 +647,59 @@ export default function HubView({
             >
               <div>
                 <div className="flex items-center gap-4 border-b border-white/20 pb-4 mb-4">
-                  <div className="w-14 h-14 rounded-full bg-[#00345C] border border-white/80 flex items-center justify-center font-display font-bold text-xl text-[#45AFFF] shrink-0">
-                    NS
+                  <div className="w-14 h-14 rounded-full bg-[#00345C] border border-white/80 flex items-center justify-center font-display font-bold text-xl shrink-0 overflow-hidden">
+                    {userProfile?.avatar ? (
+                      <img src={userProfile.avatar} alt="" className="w-full h-full object-cover" />
+                    ) : (
+                      <User className="w-6 h-6 text-[#45AFFF]" />
+                    )}
                   </div>
                   <div>
                     <div className="flex items-center gap-1.5">
-                      <span className="font-bold text-base text-white">N. Sassano</span>
+                      <span className="font-bold text-base text-white">{userProfile?.username || "---"}</span>
                       <span className="bg-[#43E600]/25 text-[#43E600] border border-[#43E600]/40 text-[9px] font-mono font-bold px-1.5 py-0.5 rounded">
                         PRO
                       </span>
                     </div>
-                    <div className="text-xs text-[#45AFFF] font-mono">COMANDANTE PRINCIPAL</div>
-                    <div className="text-[10px] text-white/60">Miembro desde: Feb 2025</div>
+                    <div className="text-xs text-[#45AFFF] font-mono">{t("overview.rank_undefined")}</div>
+                    <div className="text-[10px] text-white/60">{t("overview.member_since", { date: memberSince })}</div>
                   </div>
                 </div>
 
-                <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider mb-3">Estadísticas de Carrera</h3>
+                <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider mb-3">{t("overview.career_stats")}</h3>
                 <div className="space-y-3">
                   <div className="flex items-center justify-between pb-2 border-b border-white/10">
                     <span className="text-xs text-white/80 flex items-center gap-1.5">
                       <Clock className="w-3.5 h-3.5 text-[#E68B00]" />
-                      Horas Totales:
+                      {t("overview.total_hours")}
                     </span>
                     <span className="font-mono text-sm font-bold text-white">{totalHoras} hrs</span>
                   </div>
                   <div className="flex items-center justify-between pb-2 border-b border-white/10">
                     <span className="text-xs text-white/80 flex items-center gap-1.5">
                       <Award className="w-3.5 h-3.5 text-[#45AFFF]" />
-                      Score Acumulado:
+                      {t("overview.total_score")}
                     </span>
                     <span className="font-mono text-sm font-bold text-[#45AFFF]">{totalXP.toLocaleString()} XP</span>
                   </div>
                   <div className="flex items-center justify-between pb-2 border-b border-white/10">
                     <span className="text-xs text-white/80 flex items-center gap-1.5">
                       <Users className="w-3.5 h-3.5 text-[#45AFFF]" />
-                      Pasajeros transportados:
+                      {t("overview.passengers")}
                     </span>
                     <span className="font-mono text-sm font-bold text-white">{totalPasajeros.toLocaleString()} pax</span>
                   </div>
                   <div className="flex items-center justify-between pb-2 border-b border-white/10">
                     <span className="text-xs text-white/80 flex items-center gap-1.5">
                       <Heart className="w-3.5 h-3.5 text-[#E600D2]" />
-                      Satisfacción Media:
+                      {t("overview.avg_satisfaction")}
                     </span>
                     <span className="font-mono text-sm font-bold text-[#43E600]">{averageSatisfaccion}%</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-xs text-white/80 flex items-center gap-1.5">
                       <TrendingUp className="w-3.5 h-3.5 text-[#43E600]" />
-                      Aterrizaje Promedio:
+                      {t("overview.avg_landing")}
                     </span>
                     <span className="font-mono text-sm font-bold text-[#45AFFF]">{averageFPM} FPM</span>
                   </div>

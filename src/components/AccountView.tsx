@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { supabase } from "../lib/supabase";
 import { 
   User, 
@@ -60,6 +61,7 @@ const formatDate = (dateStr: string) => {
 };
 
 export default function AccountView({ onBack, onLogout }: AccountViewProps) {
+  const { t, i18n } = useTranslation();
   const [dbData, setDbData] = useState<AccountData | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -181,9 +183,9 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
     if (!userId) return;
     setSaving(true);
 
-    const simbriefPilotIdNum = simbriefPilotId.trim()
-      ? parseInt(simbriefPilotId, 10) || null
-      : null;
+    const simbriefPilotIdStr = String(simbriefPilotId ?? "").trim();
+    const parsed = parseInt(simbriefPilotIdStr, 10);
+    const simbriefPilotIdNum = simbriefPilotIdStr && !isNaN(parsed) ? parsed : null;
 
     const updatePayload = {
       username,
@@ -250,17 +252,42 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
         <div className="flex items-center gap-3">
           <div>
             <h2 className="text-sm font-mono font-bold text-[#45AFFF] uppercase tracking-wider flex items-center gap-2">
-              <User className="w-4 h-4" /> PERFIL Y AJUSTES DE CUENTA
+              <User className="w-4 h-4" /> {t("account.title")}
             </h2>
-            <p className="text-[10px] text-white/50 font-mono">Configura tu Licencia, Membresía e Integraciones de SimBrief</p>
+            <p className="text-[10px] text-white/50 font-mono">{t("account.subtitle")}</p>
           </div>
         </div>
         <div className="flex items-center gap-2 self-end sm:self-center">
+            <button
+              type="button"
+              onClick={handleCancel}
+              className="bg-black/20 hover:bg-[#E600D2]/25 border border-white/10 text-white/80 hover:text-white px-4 py-2 rounded-[4px] font-mono font-bold text-[10px] transition-all uppercase tracking-wider cursor-pointer flex items-center gap-1.5"
+            >
+              <X className="w-3.5 h-3.5" /> {t("account.cancel")}
+            </button>
+
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={saving}
+              className="bg-[#43E600] hover:bg-[#43E600]/85 text-slate-900 border border-[#43E600]/50 px-4 py-2 rounded-[4px] font-mono font-extrabold text-[10px] transition-all uppercase tracking-widest cursor-pointer shadow-lg flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {saving ? (
+                <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+              ) : (
+                <Save className="w-3.5 h-3.5" />
+              )}
+              {saving ? t("account.saving") : t("account.save")}
+            </button>
+
           <button
             onClick={handleLogout}
             className="bg-red-950/40 border border-red-500/40 hover:bg-red-500/20 text-red-400 px-3 py-2 rounded-[4px] text-[10px] font-mono font-bold transition-all cursor-pointer flex items-center gap-1.5"
           >
-            <LogOut className="w-3.5 h-3.5" /> CERRAR SESIÓN
+            <LogOut className="w-3.5 h-3.5" /> {t("account.logout")}
           </button>
         </div>
       </div>
@@ -270,7 +297,7 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
         <div id="toast-success-banner" className="bg-[#43E600]/15 border border-[#43E600] text-white p-3 rounded-[4px] flex items-center justify-between text-xs font-mono animate-scaleUp">
           <div className="flex items-center gap-2">
             <ShieldCheck className="w-4 h-4 text-[#43E600] animate-bounce" />
-            <span>AJUSTES DEL PILOTO GUARDADOS EN LA BASE DE DATOS</span>
+            <span>{t("account.toast_saved")}</span>
           </div>
           <button onClick={() => setShowNotification(false)} className="text-white/60 hover:text-white">
             <X className="w-3.5 h-3.5" />
@@ -286,7 +313,7 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
           {/* Avatar selector card */}
           <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-5 shadow-md space-y-4 text-center">
             <h3 className="text-xs font-mono font-bold text-[#45AFFF] uppercase tracking-wider border-b border-white/10 pb-2 text-left">
-              IDENTIDAD DIGITAL
+              {t("account.identity")}
             </h3>
 
             {/* Simulated Live Avatar Frame */}
@@ -303,7 +330,7 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
               )}
               {isUploadingAvatar && (
                 <div className="absolute inset-0 bg-black/60 flex items-center justify-center text-[10px] font-mono text-[#45AFFF]">
-                  Cargando...
+                  {t("account.uploading")}
                 </div>
               )}
             </div>
@@ -317,12 +344,12 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
 
               {/* URL or Upload option */}
               <div className="pt-2 border-t border-white/5 space-y-2 text-left">
-                <span className="text-[10px] text-white/50 font-mono block">Subir desde dispositivo:</span>
+                <span className="text-[10px] text-white/50 font-mono block">{t("account.upload_from_device")}</span>
                 <div className="flex items-center justify-center w-full">
                   <label className="flex flex-col items-center justify-center w-full h-16 border-2 border-dashed border-[#3B7EB2]/40 hover:border-[#45AFFF]/50 cursor-pointer rounded bg-black/15 hover:bg-black/25 transition-all">
                     <div className="flex flex-col items-center justify-center pt-2 pb-2">
                       <Upload className="w-4 h-4 text-[#45AFFF] mb-1" />
-                      <p className="text-[9px] font-mono text-white/60">Seleccionar Imagen</p>
+                      <p className="text-[9px] font-mono text-white/60">{t("account.select_image")}</p>
                     </div>
                     <input 
                       type="file" 
@@ -336,13 +363,13 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
 
               {/* Manual URL link input */}
               <div className="text-left space-y-1 pt-1">
-                <span className="text-[9px] text-[#45AFFF] font-mono block">O pega URL externa de avatar:</span>
+                <span className="text-[9px] text-[#45AFFF] font-mono block">{t("account.or_paste_url")}</span>
                 <div className="flex gap-1.5">
                   <input
                     type="text"
                     value={customAvatarInput}
                     onChange={(e) => setCustomAvatarInput(e.target.value)}
-                    placeholder="https://..."
+                    placeholder={t("account.url_placeholder")}
                     className="flex-1 bg-black/25 text-white placeholder-white/30 font-mono text-[10px] px-2 py-1 rounded border border-white/10 focus:outline-none focus:border-[#45AFFF]"
                   />
                   <button
@@ -355,7 +382,7 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
                     }}
                     className="bg-[#00345C] hover:bg-[#45AFFF]/20 border border-[#3B7EB2]/40 text-[#45AFFF] px-2 text-[10px] rounded transition-all font-mono"
                   >
-                    Usar
+                    {t("account.use_url")}
                   </button>
                 </div>
               </div>
@@ -364,14 +391,14 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
           {/* Level and XP progress displays as requested */}
           <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-5 shadow-md space-y-4">
             <h3 className="text-xs font-mono font-bold text-[#45AFFF] uppercase tracking-wider border-b border-white/10 pb-2 flex items-center justify-between">
-              <span>NIVEL Y EXPERIENCIA</span>
+              <span>{t("account.level_xp")}</span>
               <span className="text-[#43E600] font-mono text-xs">LVL {dbData?.userLevel ?? 1}</span>
             </h3>
 
             {/* Beautiful visual XP Progress Bar */}
             <div className="space-y-2">
               <div className="flex justify-between items-end text-xs font-mono">
-                <span className="text-[#45AFFF] text-[10px]">PROGRESO AL SIGUIENTE NIVEL</span>
+                <span className="text-[#45AFFF] text-[10px]">{t("account.progress_next_level")}</span>
                 <span className="text-white text-[11px] font-bold">{levelProgressPercent}%</span>
               </div>
               <div className="w-full bg-black/30 rounded-full h-2.5 overflow-hidden border border-white/5">
@@ -382,7 +409,7 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
               </div>
               <div className="flex justify-between text-[10px] font-mono text-white/50">
                 <span>{xpCurrentLevelFloor} XP</span>
-                <span className="text-[#43E600] font-semibold">{dbData?.userXP ?? 0} XP total</span>
+                <span className="text-[#43E600] font-semibold">{dbData?.userXP ?? 0}{t("account.xp_total")}</span>
                 <span>{xpNextLevel} XP</span>
               </div>
             </div>
@@ -393,7 +420,7 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
         <div className="space-y-6 lg:col-span-2">
           <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-5 shadow-md space-y-6">
             <h3 className="text-xs font-mono font-bold text-[#45AFFF] uppercase tracking-wider border-b border-white/10 pb-2">
-              DATOS GENERALES DE USUARIO
+              {t("account.general_data")}
             </h3>
 
             {/* Form grid info */}
@@ -402,32 +429,32 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
               {/* Usuario */}
               <div className="space-y-1.5">
                 <label className="text-xs text-[#45AFFF]/90 font-mono font-bold uppercase tracking-wider block">
-                  Usuario
+{t("account.username")}
                 </label>
                 <input
                   type="text"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   className="w-full bg-black/25 text-white font-mono text-xs px-3 py-2 rounded border border-white/10 focus:outline-none focus:border-[#45AFFF]/50"
-                  placeholder="ID de piloto"
+                  placeholder={t("account.username_placeholder")}
                 />
               </div>
 
               {/* Correo */}
               <div className="space-y-1.5">
                 <label className="text-xs text-white/50 font-mono block font-bold uppercase tracking-wider">
-                  Correo Electrónico
+                  {t("account.email")}
                 </label>
                 <div className="w-full bg-black/40 text-white/50 font-mono text-xs px-3 py-2 rounded border border-white/5 cursor-not-allowed flex items-center justify-between">
                   <span>{dbData?.email}</span>
-                  <span className="text-[8px] bg-white/5 text-white/30 px-1.5 py-0.5 rounded uppercase">Verificado</span>
+                  <span className="text-[8px] bg-white/5 text-white/30 px-1.5 py-0.5 rounded uppercase">{t("account.verified")}</span>
                 </div>
               </div>
 
               {/* Piloto Desde */}
               <div className="space-y-1.5">
                 <label className="text-xs text-white/60 font-mono block font-bold uppercase tracking-wider">
-                  Piloto desde
+                  {t("account.pilot_since")}
                 </label>
                 <div className="w-full bg-[#00172e]/50 text-white/80 font-mono text-xs px-3 py-2 rounded border border-white/10 flex items-center gap-2">
                   <Calendar className="w-3.5 h-3.5 text-[#E68B00]" />
@@ -438,7 +465,7 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
               {/* Vencimiento de la suscripción - BADGE */}
               <div className="space-y-1.5">
                 <label className="text-xs text-white/60 font-mono block font-bold uppercase tracking-wider">
-                  Vencimiento de la suscripción
+{t("account.subscription_expiry")}
                 </label>
                 <div className="w-full bg-[#00172e]/50 text-[#43E600] font-mono text-xs px-3 py-2 rounded border border-white/10 flex items-center gap-2">
                   <ShieldCheck className="w-3.5 h-3.5 text-[#43E600]" />
@@ -450,22 +477,26 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
             {/* Idioma de preferencia */}
             <div className="space-y-1.5">
               <label className="text-xs text-[#45AFFF]/90 font-mono font-bold uppercase tracking-wider block">
-                Idioma de Preferencia
+                {t("account.language")}
               </label>
               <select
                 value={preferredLanguage}
-                onChange={(e) => setPreferredLanguage(e.target.value)}
+                onChange={(e) => {
+                  setPreferredLanguage(e.target.value);
+                  i18n.changeLanguage(e.target.value);
+                  localStorage.setItem("announs_language", e.target.value);
+                }}
                 className="w-full bg-black/25 text-white font-mono text-xs px-3 py-2 rounded border border-white/10 focus:outline-none focus:border-[#45AFFF]/50 appearance-none cursor-pointer"
               >
-                <option value="es" className="bg-[#00345C]">Español</option>
-                <option value="en" className="bg-[#00345C]">English</option>
+                <option value="es" className="bg-[#00345C]">{t("account.lang_es")}</option>
+                <option value="en" className="bg-[#00345C]">{t("account.lang_en")}</option>
               </select>
             </div>
 
             {/* Subscription Type selection area */}
             <div className="space-y-3 pt-2">
               <label className="text-xs text-[#45AFFF] font-mono font-bold uppercase tracking-wider block">
-                Tipo de Suscripción
+                {t("account.subscription_type")}
               </label>
               
               {(() => {
@@ -482,12 +513,12 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
                         }`}
                       >
                         <div className="w-full flex justify-between items-start">
-                          <span className="text-xs font-mono text-white/60 uppercase">MATE BASE</span>
+                          <span className="text-xs font-mono text-white/60 uppercase">{t("account.plan_base_title")}</span>
                           {subscription_tier === "base" && <span className="w-2.5 h-2.5 rounded-full bg-[#45AFFF]"></span>}
                         </div>
                         <div>
-                          <h4 className="text-sm font-bold text-white uppercase font-mono">Plan Standard</h4>
-                          <p className="text-[9px] text-white/40 font-mono leading-none mt-1">Bitácora simple MSFS</p>
+                          <h4 className="text-sm font-bold text-white uppercase font-mono">{t("account.plan_base_subtitle")}</h4>
+                          <p className="text-[9px] text-white/40 font-mono leading-none mt-1">{t("account.plan_base_desc")}</p>
                         </div>
                       </div>
 
@@ -500,12 +531,12 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
                         }`}
                       >
                         <div className="w-full flex justify-between items-start">
-                          <span className="text-xs font-mono text-[#E68B00] uppercase font-bold">LITE EDITION</span>
+                          <span className="text-xs font-mono text-[#E68B00] uppercase font-bold">{t("account.plan_lite_title")}</span>
                           {subscription_tier === "lite" && <span className="w-2.5 h-2.5 rounded-full bg-[#E68B00]"></span>}
                         </div>
                         <div>
-                          <h4 className="text-sm font-bold text-white uppercase font-mono">Plan Intermedio</h4>
-                          <p className="text-[9px] text-white/40 font-mono leading-none mt-1">Soporta rutas y logs básicos</p>
+                          <h4 className="text-sm font-bold text-white uppercase font-mono">{t("account.plan_lite_subtitle")}</h4>
+                          <p className="text-[9px] text-white/40 font-mono leading-none mt-1">{t("account.plan_lite_desc")}</p>
                         </div>
                       </div>
 
@@ -518,12 +549,12 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
                         }`}
                       >
                         <div className="w-full flex justify-between items-start">
-                          <span className="text-xs font-mono text-[#43E600] uppercase font-bold">FLIGHT CO-PILOT PRO</span>
+                          <span className="text-xs font-mono text-[#43E600] uppercase font-bold">{t("account.plan_pro_title")}</span>
                           {subscription_tier === "pro" && <span className="w-2.5 h-2.5 rounded-full bg-[#43E600] animate-pulse"></span>}
                         </div>
                         <div>
-                          <h4 className="text-sm font-bold text-white uppercase font-mono">Premium Unlimited</h4>
-                          <p className="text-[9px] text-white/40 font-mono leading-none mt-1">Pasaporte, despachador inteligente</p>
+                          <h4 className="text-sm font-bold text-white uppercase font-mono">{t("account.plan_pro_subtitle")}</h4>
+                          <p className="text-[9px] text-white/40 font-mono leading-none mt-1">{t("account.plan_pro_desc")}</p>
                         </div>
                       </div>
                     </div>
@@ -531,14 +562,14 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
                     {/* Call-to-action (CTA) to upgrade / change plan */}
                     <div className="bg-[#00172e]/55 border border-[#43E600]/30 rounded p-4 mt-1 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 select-none">
                       <p className="text-[10px] text-white/70 font-mono leading-relaxed">
-                        Si quieres modificar tu plan, utiliza el botón para ver las opciones?
+                        {t("account.upgrade_banner")}
                       </p>
                       <button
                         type="button"
                         onClick={() => setShowNotification(true)}
                         className="bg-[#43E600] hover:bg-[#43E600]/85 text-slate-900 border border-[#43E600]/30 px-4 py-2 rounded font-mono font-bold text-[10px] transition-all uppercase tracking-wider whitespace-nowrap self-start sm:self-center cursor-pointer shadow-md"
                       >
-                        MEJORAR PLAN A PRO ➔
+                        {t("account.upgrade_button")}
                       </button>
                     </div>
                   </>
@@ -549,31 +580,31 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
             {/* INTEGRATIONS SUBSECTION: SimBrief settings */}
             <div className="pt-4 border-t border-white/10 space-y-4">
               <h4 className="text-xs font-mono font-bold text-[#45AFFF] uppercase tracking-wider flex items-center gap-1.5">
-                <Database className="w-3.5 h-3.5 text-[#45AFFF]" /> INTEGRACIÓN SISTEMÁTICA CON SIMBRIEF
+                <Database className="w-3.5 h-3.5 text-[#45AFFF]" /> {t("account.simbrief_integration")}
               </h4>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-[#00172e]/30 p-4 rounded border border-[#3B7EB2]/15">
                 {/* ID de Piloto SimBrief */}
                 <div className="space-y-1.5">
                   <label className="text-xs text-white/80 font-mono block font-bold uppercase tracking-wider">
-                    ID de Piloto SimBrief
+{t("account.simbrief_id")}
                   </label>
                   <input
                     type="text"
                     value={simbriefPilotId}
                     onChange={(e) => setSimbriefPilotId(e.target.value)}
                     className="w-full bg-black/35 text-white font-mono text-xs px-3 py-2 rounded border border-white/10 focus:outline-none focus:border-[#45AFFF]/50"
-                    placeholder="Ej. 249811"
+                    placeholder={t("account.simbrief_id_placeholder")}
                   />
                   <span className="text-[9px] text-white/40 font-mono block">
-                    Utilizado para descargar planes de despacho (OFP) activos con un clic.
+                    {t("account.simbrief_id_helper")}
                   </span>
                 </div>
 
                 {/* Switch de Unidades SimBrief */}
                 <div className="space-y-1.5">
                   <label className="text-xs text-white/80 font-mono block font-bold uppercase tracking-wider">
-                    Unidades SimBrief
+{t("account.simbrief_units")}
                   </label>
                   <div className="flex items-center gap-3 pt-1">
                     {/* Selector Switch representation */}
@@ -587,7 +618,7 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
                             : "text-white/60 hover:text-white"
                         }`}
                       >
-                        KGS (Métrico)
+                        {t("account.simbrief_metric")}
                       </button>
                       <button
                         type="button"
@@ -598,47 +629,17 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
                             : "text-white/60 hover:text-white"
                         }`}
                       >
-                        LBS (Imperial)
+                        {t("account.simbrief_imperial")}
                       </button>
                     </div>
                   </div>
                 </div>
               </div>
             </div>
-
-            {/* ACTION FOOTER: Guardar | Cancelar */}
-            <div className="flex justify-end gap-3 pt-4 border-t border-white/10">
-              <button
-                type="button"
-                onClick={handleCancel}
-                className="bg-black/20 hover:bg-[#E600D2]/25 border border-white/10 text-white/80 hover:text-white px-6 py-2.5 rounded-[4px] font-mono font-bold text-xs transition-all uppercase tracking-wider cursor-pointer flex items-center gap-1.5"
-              >
-                <X className="w-3.5 h-3.5" /> Cancelar
-              </button>
-
-              <button
-                type="button"
-                onClick={handleSave}
-                disabled={saving}
-                className="bg-[#43E600] hover:bg-[#43E600]/85 text-slate-900 border border-[#43E600]/50 px-8 py-2.5 rounded-[4px] font-mono font-extrabold text-xs transition-all uppercase tracking-widest cursor-pointer shadow-lg flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {saving ? (
-                  <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                  </svg>
-                ) : (
-                  <Save className="w-3.5 h-3.5" />
-                )}
-                {saving ? "GUARDANDO..." : "Guardar Cambios"}
-              </button>
-            </div>
-
           </div>
         </div>
 
       </div>
-
     </div>
   );
 }
