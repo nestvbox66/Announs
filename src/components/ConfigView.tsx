@@ -4,6 +4,8 @@
  */
 
 import React, { useState, useEffect } from "react";
+import { useTranslation } from "react-i18next";
+import { supabase } from "../lib/supabase";
 import { 
   Sliders, 
   User, 
@@ -47,13 +49,14 @@ interface ConfigViewProps {
 // Preset definition matching requirements
 const CAPTAIN_PRESETS: Record<string, number[]> = {
   estandar: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-  vhf_radio: [0, 2, 4, 3, 0, -1, -3, -4, 0, 0],
-  intercom_muffled: [5, 6, 4, 2, -1, -3, -5, -6, -10, -12]
+  vhf: [-12, -12, -12, -5, 4, 6, 4, -2, -12, -12],
+  muffled_pa: [-2, 2, 5, 4, 0, -2, -5, -8, -10, -12]
 };
 
 const CREW_PRESETS: Record<string, number[]> = {
   estandar: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-  cabin_pa: [0, 0, 1, 2, 2, 0, -1, -1, 0, 0]
+  vhf: [-12, -12, -12, -5, 4, 6, 4, -2, -12, -12],
+  muffled_pa: [-2, 2, 5, 4, 0, -2, -5, -8, -10, -12]
 };
 
 const FREQUENCIES = ["31Hz", "62Hz", "125Hz", "250Hz", "500Hz", "1kHz", "2kHz", "4kHz", "8kHz", "16kHz"];
@@ -78,9 +81,112 @@ export default function ConfigView({
   onVoicesUpdate,
   onAudioUpdate
 }: ConfigViewProps) {
+  const { t } = useTranslation();
   // Top level tabs
   const [activeTab, setActiveTab] = useState<"generales" | "eventos" | "packages" | "voces">("generales");
   const [showSaveAlert, setShowSaveAlert] = useState(false);
+  const [userId, setUserId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadSettings = async () => {
+      const { data: { user }, error: authErr } = await supabase.auth.getUser();
+      if (cancelled || authErr || !user) return;
+
+      setUserId(user.id);
+
+      const { data, error } = await supabase
+        .from("setting_general")
+        .select("*")
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      if (cancelled || error) return;
+
+      if (data) {
+        if (data.passenger_boarding_time_seconds != null)
+          setPassengerBoardingTimeSeconds(data.passenger_boarding_time_seconds);
+        if (data.mute_ann_when_user_not_in_cabin != null)
+          setMuteAnnWhenNotInCabin(data.mute_ann_when_user_not_in_cabin);
+        if (data.auto_detect_flight_phase != null)
+          setAutoDetectFlightPhase(data.auto_detect_flight_phase);
+        if (data.start_after_simulator_connect != null)
+          setStartAfterSimulatorConnect(data.start_after_simulator_connect);
+        if (data.enable_cabin_voice_effect != null)
+          setEnableCabinVoiceEffect(data.enable_cabin_voice_effect);
+        if (data.disable_prompts_when_changing_flight_state_manually != null)
+          setDisablePromptsManually(data.disable_prompts_when_changing_flight_state_manually);
+        if (data.show_icao_codes != null)
+          setShowIcaoCodes(data.show_icao_codes);
+        if (data.save_language_settings != null)
+          setSaveLanguageSettings(data.save_language_settings);
+        if (data.show_local_time_of_simulator != null)
+          setShowLocalTimeSim(data.show_local_time_of_simulator);
+        if (data.show_ai_generation_progress_on_pre_flight_screen != null)
+          setShowAiProgressPreflight(data.show_ai_generation_progress_on_pre_flight_screen);
+        if (data.audio_3d_enabled != null)
+          setAudio3dEnabled(data.audio_3d_enabled);
+        if (data.eq_captain_preset != null)
+          setEqCaptainPreset(data.eq_captain_preset);
+        if (data.eq_captain_bands != null)
+          setEqCaptainBands(data.eq_captain_bands);
+        if (data.eq_crew_preset != null)
+          setEqCrewPreset(data.eq_crew_preset);
+        if (data.eq_crew_bands != null)
+          setEqCrewBands(data.eq_crew_bands);
+        if (data.custom_pilot_name_set != null)
+          setCustomPilotNameSet(data.custom_pilot_name_set);
+        if (data.custom_pilot_name != null)
+          setCustomPilotName(data.custom_pilot_name);
+        if (data.custom_crew_name_set != null)
+          setCustomCrewNameSet(data.custom_crew_name_set);
+        if (data.custom_crew_name != null)
+          setCustomCrewName(data.custom_crew_name);
+        if (data.gforce != null)
+          setPfGforce(data.gforce);
+        if (data.vertical_speed != null)
+          setPfVerticalSpeed(data.vertical_speed);
+        if (data.landing_force != null)
+          setPfLandingForce(data.landing_force);
+        if (data.irregular_ground_speed != null)
+          setPfIrregularGroundSpeed(data.irregular_ground_speed);
+        if (data.acceleration_ground_speed != null)
+          setPfAccelerationGroundSpeed(data.acceleration_ground_speed);
+        if (data.delay_feedback != null)
+          setPfDelayFeedback(data.delay_feedback);
+      } else {
+        setPassengerBoardingTimeSeconds(90);
+        setMuteAnnWhenNotInCabin(false);
+        setAutoDetectFlightPhase(true);
+        setStartAfterSimulatorConnect(false);
+        setEnableCabinVoiceEffect(true);
+        setDisablePromptsManually(false);
+        setShowIcaoCodes(true);
+        setSaveLanguageSettings(true);
+        setShowLocalTimeSim(true);
+        setShowAiProgressPreflight(true);
+        setAudio3dEnabled(false);
+        setEqCaptainPreset("estandar");
+        setEqCaptainBands([0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        setEqCrewPreset("estandar");
+        setEqCrewBands([0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        setCustomPilotNameSet(false);
+        setCustomPilotName("");
+        setCustomCrewNameSet(false);
+        setCustomCrewName("");
+        setPfGforce(true);
+        setPfVerticalSpeed(true);
+        setPfLandingForce(true);
+        setPfIrregularGroundSpeed(true);
+        setPfAccelerationGroundSpeed(true);
+        setPfDelayFeedback(true);
+      }
+    };
+
+    loadSettings();
+    return () => { cancelled = true; };
+  }, []);
 
   // NEW PACKAGES TAB STATES
   const [packagesDir, setPackagesDir] = useState<string>(() => {
@@ -212,10 +318,10 @@ export default function ConfigView({
   
   // Bloque 1: Preferencias - Generales del Sistema
   const [passengerBoardingTimeSeconds, setPassengerBoardingTimeSeconds] = useState<number>(() => {
-    return Number(localStorage.getItem("cfg_Passenger_Boarding_Time_Seconds") || "30");
+    return Number(localStorage.getItem("cfg_Passenger_Boarding_Time_Seconds") || "90");
   });
   const [muteAnnWhenNotInCabin, setMuteAnnWhenNotInCabin] = useState<boolean>(() => {
-    return localStorage.getItem("cfg_Mute_Ann_When_User_Not_In_Cabin") !== "false"; // default is true / false based on user preference
+    return localStorage.getItem("cfg_Mute_Ann_When_User_Not_In_Cabin") === "true";
   });
   const [autoDetectFlightPhase, setAutoDetectFlightPhase] = useState<boolean>(() => {
     return localStorage.getItem("cfg_Auto_Detect_Flight_Phase") !== "false"; // default true
@@ -273,18 +379,18 @@ export default function ConfigView({
     return localStorage.getItem("cfg_audio_3d_enabled") === "true"; // default false
   });
   const [eqCaptainPreset, setEqCaptainPreset] = useState<string>(() => {
-    return localStorage.getItem("cfg_eq_captain_preset") || "vhf_radio";
+    return localStorage.getItem("cfg_eq_captain_preset") || "estandar";
   });
   const [eqCaptainBands, setEqCaptainBands] = useState<number[]>(() => {
     const raw = localStorage.getItem("cfg_eq_captain_bands");
-    return raw ? JSON.parse(raw) : [0, 2, 4, 3, 0, -1, -3, -4, 0, 0];
+    return raw ? JSON.parse(raw) : [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
   });
   const [eqCrewPreset, setEqCrewPreset] = useState<string>(() => {
-    return localStorage.getItem("cfg_eq_crew_preset") || "cabin_pa";
+    return localStorage.getItem("cfg_eq_crew_preset") || "estandar";
   });
   const [eqCrewBands, setEqCrewBands] = useState<number[]>(() => {
     const raw = localStorage.getItem("cfg_eq_crew_bands");
-    return raw ? JSON.parse(raw) : [0, 0, 1, 2, 2, 0, -1, -1, 0, 0];
+    return raw ? JSON.parse(raw) : [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
   });
 
   // Bloque 3: Staff Config
@@ -292,13 +398,13 @@ export default function ConfigView({
     return localStorage.getItem("cfg_custom_pilot_name_set") === "true";
   });
   const [customPilotName, setCustomPilotName] = useState<string>(() => {
-    return localStorage.getItem("cfg_custom_pilot_name") || "Capitán Carlos";
+    return localStorage.getItem("cfg_custom_pilot_name") || "";
   });
   const [customCrewNameSet, setCustomCrewNameSet] = useState<boolean>(() => {
     return localStorage.getItem("cfg_custom_crew_name_set") === "true";
   });
   const [customCrewName, setCustomCrewName] = useState<string>(() => {
-    return localStorage.getItem("cfg_custom_crew_name") || "Sofía (Sobrecargo)";
+    return localStorage.getItem("cfg_custom_crew_name") || "";
   });
 
   // Bloque 4: Experiencia del Pasajero Trigger Switches
@@ -435,6 +541,51 @@ export default function ConfigView({
 
     setShowSaveAlert(true);
     setTimeout(() => setShowSaveAlert(false), 3000);
+
+    if (userId) {
+      (async () => {
+        try {
+          const upsertPayload = {
+            user_id: userId,
+            passenger_boarding_time_seconds: parseInt(String(passengerBoardingTimeSeconds), 10),
+            mute_ann_when_user_not_in_cabin: muteAnnWhenNotInCabin,
+            auto_detect_flight_phase: autoDetectFlightPhase,
+            start_after_simulator_connect: startAfterSimulatorConnect,
+            enable_cabin_voice_effect: enableCabinVoiceEffect,
+            disable_prompts_when_changing_flight_state_manually: disablePromptsManually,
+            show_icao_codes: showIcaoCodes,
+            save_language_settings: saveLanguageSettings,
+            show_local_time_of_simulator: showLocalTimeSim,
+            show_ai_generation_progress_on_pre_flight_screen: showAiProgressPreflight,
+            audio_3d_enabled: audio3dEnabled,
+            eq_captain_preset: eqCaptainPreset,
+            eq_captain_bands: eqCaptainBands,
+            eq_crew_preset: eqCrewPreset,
+            eq_crew_bands: eqCrewBands,
+            custom_pilot_name_set: customPilotNameSet,
+            custom_pilot_name: customPilotName,
+            custom_crew_name_set: customCrewNameSet,
+            custom_crew_name: customCrewName,
+            gforce: pfGforce,
+            vertical_speed: pfVerticalSpeed,
+            landing_force: pfLandingForce,
+            irregular_ground_speed: pfIrregularGroundSpeed,
+            acceleration_ground_speed: pfAccelerationGroundSpeed,
+            delay_feedback: pfDelayFeedback,
+          };
+
+          const { error } = await supabase
+            .from("setting_general")
+            .upsert(upsertPayload, { onConflict: "user_id" });
+
+          if (error) throw error;
+        } catch (err) {
+          console.error("Supabase save error:", err);
+          setToastNotification("⚠️ Error al guardar en la nube. Los cambios locales están seguros.");
+          setTimeout(() => setToastNotification(null), 5000);
+        }
+      })();
+    }
   };
 
   // Helper de sincronización al elegir Presets del Equalizer de Capitán
@@ -625,7 +776,7 @@ export default function ConfigView({
               : "text-white/60 hover:text-white hover:bg-white/5"
           }`}
         >
-          🎛️ Generales (Configuración de Sistema)
+          🎛️ {t("config.tab_generales")}
         </button>
         <button
           onClick={() => setActiveTab("eventos")}
@@ -673,17 +824,17 @@ export default function ConfigView({
               <div className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 shadow-md flex flex-col gap-4">
                 <div className="border-b border-white/10 pb-2.5">
                   <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider flex items-center gap-2 font-black">
-                    <SlidersHorizontal className="w-4.5 h-4.5 text-[#43E600]" /> PREFERENCIAS DEL SISTEMA
+                    <SlidersHorizontal className="w-4.5 h-4.5 text-[#43E600]" /> {t("config.system_preferences")}
                   </h3>
-                  <p className="text-[10px] text-white/50 font-mono mt-1">Variables básicas de embarque y automatización de procesos</p>
+                  <p className="text-[10px] text-white/50 font-mono mt-1">{t("config.system_preferences_desc")}</p>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   {/* Passenger Boarding Time Seconds */}
                   <div className="bg-black/35 p-3 rounded border border-white/5 flex flex-col justify-between">
                     <div>
-                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">TIEMPO DE EMBARQUE EN SEGUNDOS:</span>
-                      <span className="text-[9px] text-white/45 block mt-0.5">Demora de abordaje de pasajeros</span>
+                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">{t("config.boarding_time")}</span>
+                      <span className="text-[9px] text-white/45 block mt-0.5">{t("config.boarding_time_helper")}</span>
                     </div>
                     <div className="mt-2.5 flex items-center gap-2">
                       <input 
@@ -702,8 +853,8 @@ export default function ConfigView({
                   {/* Mute Ann When User Not In Cabin */}
                   <label className="bg-black/35 p-3 rounded border border-white/5 flex items-center justify-between cursor-pointer hover:bg-black/45 transition-colors">
                     <div className="pr-2">
-                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">MUTEAR AFUERA DE CABINA:</span>
-                      <span className="text-[9px] text-white/45 block mt-0.5">Silenciar si el usuario cambia el foco de la cámara</span>
+                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">{t("config.mute_outside_cabin")}</span>
+                      <span className="text-[9px] text-white/45 block mt-0.5">{t("config.mute_outside_cabin_helper")}</span>
                     </div>
                     <input 
                       type="checkbox"
@@ -716,8 +867,8 @@ export default function ConfigView({
                   {/* Auto_Detect_Flight_Phase */}
                   <label className="bg-black/35 p-3 rounded border border-white/5 flex items-center justify-between cursor-pointer hover:bg-black/45 transition-colors">
                     <div className="pr-2">
-                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">DETECCIÓN AUTOMÁTICA DE ETAPAS:</span>
-                      <span className="text-[9px] text-white/45 block mt-0.5">Avanza fases telemétricamente</span>
+                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">{t("config.auto_detect_phase")}</span>
+                      <span className="text-[9px] text-white/45 block mt-0.5">{t("config.auto_detect_phase_helper")}</span>
                     </div>
                     <input 
                       type="checkbox"
@@ -730,8 +881,8 @@ export default function ConfigView({
                   {/* start_after_simulator_connect */}
                   <label className="bg-black/35 p-3 rounded border border-white/5 flex items-center justify-between cursor-pointer hover:bg-black/45 transition-colors">
                     <div className="pr-2">
-                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">CONEXIÓN SIM DISPARADOR:</span>
-                      <span className="text-[9px] text-white/45 block mt-0.5">Iniciar simulación tras SimConnect</span>
+                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">{t("config.sim_connect_trigger")}</span>
+                      <span className="text-[9px] text-white/45 block mt-0.5">{t("config.sim_connect_trigger_helper")}</span>
                     </div>
                     <input 
                       type="checkbox"
@@ -744,8 +895,8 @@ export default function ConfigView({
                   {/* enable_cabin_voice_effect */}
                   <label className="bg-black/35 p-3 rounded border border-white/5 flex items-center justify-between cursor-pointer hover:bg-black/45 transition-colors">
                     <div className="pr-2">
-                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">EFECTO ACÚSTICO DE MEGÁFONO:</span>
-                      <span className="text-[9px] text-white/45 block mt-0.5">Aplica eco y filtro sutil PA</span>
+                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">{t("config.cabin_voice_effect")}</span>
+                      <span className="text-[9px] text-white/45 block mt-0.5">{t("config.cabin_voice_effect_helper")}</span>
                     </div>
                     <input 
                       type="checkbox"
@@ -758,8 +909,8 @@ export default function ConfigView({
                   {/* disable_prompts_when_changing_flight_state_manually */}
                   <label className="bg-black/35 p-3 rounded border border-white/5 flex items-center justify-between cursor-pointer hover:bg-black/45 transition-colors">
                     <div className="pr-2">
-                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">DESHABILITAR PROMPTS EN CAMBIOS MANUALES:</span>
-                      <span className="text-[9px] text-white/45 block mt-0.5">Deshabilitar los prompt cuando el usuario cambia manualmente el estado del vuelo</span>
+                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">{t("config.disable_manual_prompts")}</span>
+                      <span className="text-[9px] text-white/45 block mt-0.5">{t("config.disable_manual_prompts_helper")}</span>
                     </div>
                     <input 
                       type="checkbox"
@@ -772,8 +923,8 @@ export default function ConfigView({
                   {/* show_ICAO_codes */}
                   <label className="bg-black/35 p-3 rounded border border-white/5 flex items-center justify-between cursor-pointer hover:bg-black/45 transition-colors">
                     <div className="pr-2">
-                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">MOSTRAR CÓDIGOS ICAO:</span>
-                      <span className="text-[9px] text-white/45 block mt-0.5">muestra código ICAO/IATA</span>
+                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">{t("config.show_icao")}</span>
+                      <span className="text-[9px] text-white/45 block mt-0.5">{t("config.show_icao_helper")}</span>
                     </div>
                     <input 
                       type="checkbox"
@@ -786,8 +937,8 @@ export default function ConfigView({
                   {/* save_language_settings */}
                   <label className="bg-black/35 p-3 rounded border border-white/5 flex items-center justify-between cursor-pointer hover:bg-black/45 transition-colors">
                     <div className="pr-2">
-                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">GUARDAR AJUSTES DE IDIOMA:</span>
-                      <span className="text-[9px] text-white/45 block mt-0.5">Persistir lenguajes del Comandante/ATC</span>
+                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">{t("config.save_language")}</span>
+                      <span className="text-[9px] text-white/45 block mt-0.5">{t("config.save_language_helper")}</span>
                     </div>
                     <input 
                       type="checkbox"
@@ -800,8 +951,8 @@ export default function ConfigView({
                   {/* show_local_time_of_simulator */}
                   <label className="bg-black/35 p-3 rounded border border-white/5 flex items-center justify-between cursor-pointer hover:bg-black/45 transition-colors">
                     <div className="pr-2">
-                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">HORA LOCAL DEL SIMULADOR:</span>
-                      <span className="text-[9px] text-white/45 block mt-0.5">Mostrar hora del sim en vez de GMT/UTC</span>
+                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">{t("config.show_local_time")}</span>
+                      <span className="text-[9px] text-white/45 block mt-0.5">{t("config.show_local_time_helper")}</span>
                     </div>
                     <input 
                       type="checkbox"
@@ -814,8 +965,8 @@ export default function ConfigView({
                   {/* show_ai_generation_progress_on_pre_flight_screen */}
                   <label className="bg-black/35 p-3 rounded border border-white/5 flex items-center justify-between cursor-pointer hover:bg-black/45 transition-colors">
                     <div className="pr-2">
-                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">PROGRESO DIRECTO IA:</span>
-                      <span className="text-[9px] text-white/45 block mt-0.5">Ver barra de IA durante preflight</span>
+                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">{t("config.show_ai_progress")}</span>
+                      <span className="text-[9px] text-white/45 block mt-0.5">{t("config.show_ai_progress_helper")}</span>
                     </div>
                     <input 
                       type="checkbox"
@@ -832,7 +983,7 @@ export default function ConfigView({
               <div id="cfg-bloque-staff" className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 shadow-md flex flex-col gap-3">
                 <div className="border-b border-white/10 pb-2">
                   <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider flex items-center gap-2 font-black">
-                    <User className="w-4.5 h-4.5 text-[#43E600]" /> PERSONAL DE VUELO (STAFF)
+                    <User className="w-4.5 h-4.5 text-[#43E600]" /> {t("config.staff_title")}
                   </h3>
                 </div>
 
@@ -846,7 +997,7 @@ export default function ConfigView({
                         checked={customPilotNameSet}
                         onChange={(e) => setCustomPilotNameSet(e.target.checked)}
                       />
-                      <span>Personalizar nombre del Capitan</span>
+                      <span>{t("config.staff_pilot_label")}</span>
                     </label>
                     <div className="relative">
                       <User className="absolute left-3 top-2.5 h-3.5 w-3.5 text-[#45AFFF]/50" />
@@ -854,7 +1005,7 @@ export default function ConfigView({
                         type="text"
                         disabled={!customPilotNameSet}
                         className="w-full bg-[#00345C]/75 border border-[#3B7EB2]/60 rounded p-2 text-xs text-white pl-9 font-mono disabled:opacity-40 focus:outline-none"
-                        placeholder="Ej: Cap. Alberto Fernández"
+                        placeholder={t("config.staff_pilot_placeholder")}
                         value={customPilotName}
                         onChange={(e) => setCustomPilotName(e.target.value)}
                       />
@@ -870,7 +1021,7 @@ export default function ConfigView({
                         checked={customCrewNameSet}
                         onChange={(e) => setCustomCrewNameSet(e.target.checked)}
                       />
-                      <span>Personalizar nombre del responsable de tripulación</span>
+                      <span>{t("config.staff_crew_label")}</span>
                     </label>
                     <div className="relative">
                       <Users className="absolute left-3 top-2.5 h-3.5 w-3.5 text-[#45AFFF]/50" />
@@ -878,7 +1029,7 @@ export default function ConfigView({
                         type="text"
                         disabled={!customCrewNameSet}
                         className="w-full bg-[#00345C]/75 border border-[#3B7EB2]/60 rounded p-2 text-xs text-white pl-9 font-mono disabled:opacity-40 focus:outline-none"
-                        placeholder="Ej: Jefa de Cabina Sofía"
+                        placeholder={t("config.staff_crew_placeholder")}
                         value={customCrewName}
                         onChange={(e) => setCustomCrewName(e.target.value)}
                       />
@@ -896,7 +1047,7 @@ export default function ConfigView({
               <div id="cfg-bloque-audio" className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 shadow-md space-y-4">
                 <div className="border-b border-white/10 pb-2 flex justify-between items-center">
                   <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider flex items-center gap-2 font-black">
-                    <Headphones className="w-4.5 h-4.5 text-[#43E600]" /> MEZCLADOR & ECUALIZADORES DE SONIDO
+                    <Headphones className="w-4.5 h-4.5 text-[#43E600]" /> {t("config.mixer_title")}
                   </h3>
                   {/* audio_3d_enabled switch */}
                   <label className="inline-flex items-center gap-1.5 bg-black/40 border border-white/10 px-2.5 py-1 rounded-[4px] cursor-pointer text-[10px] text-white/80 font-mono">
@@ -906,7 +1057,7 @@ export default function ConfigView({
                       checked={audio3dEnabled}
                       onChange={(e) => setAudio3dEnabled(e.target.checked)}
                     />
-                    <span>AUDIO 3D ACTIVO</span>
+                    <span>{t("config.audio_3d")}</span>
                   </label>
                 </div>
 
@@ -914,31 +1065,31 @@ export default function ConfigView({
                   {/* EQ Comandante / Captain */}
                   <div className="space-y-1.5">
                     <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
-                      <span className="text-[11px] font-mono font-black text-[#ffab2d] uppercase">🎙️ ECUALIZADOR DEL COMANDANTE (CO-PILOTO / ATC):</span>
+                      <span className="text-[11px] font-mono font-black text-[#ffab2d] uppercase">🎙️ {t("config.eq_captain")}</span>
                       
                       {/* Presets dropdown */}
                       <div className="flex items-center gap-1.5 text-xs">
-                        <span className="text-[10px] text-white/50 font-mono">PRESET:</span>
+                        <span className="text-[10px] text-white/50 font-mono">{t("config.preset")}</span>
                         <select
                           className="bg-black/55 text-white text-[11px] font-mono border border-white/25 rounded px-2.5 py-1 focus:outline-none"
                           value={eqCaptainPreset}
                           onChange={(e) => handleCaptainPresetChange(e.target.value)}
                         >
-                          <option value="estandar">Elegir estándar</option>
-                          <option value="vhf_radio">Radio VHF (Cabina de Mando)</option>
-                          <option value="intercom_muffled">Megáfono Intercom sordo</option>
-                          <option value="custom">Ecualización Personalizada [Custom]</option>
+                          <option value="estandar">{t("config.preset_standard")}</option>
+                          <option value="vhf">{t("config.preset_vhf")}</option>
+                          <option value="muffled_pa">{t("config.preset_muffled")}</option>
+                          <option value="custom">{t("config.preset_custom")}</option>
                         </select>
                       </div>
                     </div>
 
                     {/* 10 Band Faders Visualizer */}
-                    <div className="bg-black/40 border border-white/10 rounded-lg p-3">
-                      <div className="grid grid-cols-10 gap-1.5 text-center items-center">
+                    <div className="bg-black/40 border border-white/10 rounded-lg p-3 overflow-hidden">
+                      <div className="grid grid-cols-10 gap-1 text-center items-center">
                         {eqCaptainBands.map((bandVal, index) => (
                           <div key={index} className="flex flex-col items-center gap-1.5 group">
                             <span className="text-[8px] font-mono text-white/40 block leading-none">{FREQUENCIES[index]}</span>
-                            <div className="h-20 sm:h-24 flex items-center justify-center">
+                            <div className="h-20 sm:h-24 flex items-center justify-center w-full">
                               <input 
                                 type="range"
                                 min="-12"
@@ -946,7 +1097,7 @@ export default function ConfigView({
                                 value={bandVal}
                                 orient="vertical"
                                 onChange={(e) => handleCaptainBandChange(index, Number(e.target.value))}
-                                className="h-full accent-[#ffab2d] cursor-ns-resize"
+                                className="h-full w-full max-w-[24px] accent-[#ffab2d] cursor-ns-resize"
                                 style={{ writingMode: "bt-lr", WebkitAppearance: "slider-vertical" } as any}
                               />
                             </div>
@@ -962,30 +1113,31 @@ export default function ConfigView({
                   {/* EQ Tripulantes / Cabin Crew */}
                   <div className="space-y-1.5 border-t border-white/5 pt-4">
                     <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
-                      <span className="text-[11px] font-mono font-black text-[#57b8ff] uppercase">🎙️ ECUALIZADOR DE TRIPULACIÓN (CABIN GENERAL PA):</span>
+                      <span className="text-[11px] font-mono font-black text-[#57b8ff] uppercase">🎙️ {t("config.eq_crew")}</span>
                       
                       {/* Presets dropdown */}
                       <div className="flex items-center gap-1.5 text-xs font-mono">
-                        <span className="text-[10px] text-white/50 block">PRESET:</span>
+                        <span className="text-[10px] text-white/50 block">{t("config.preset")}</span>
                         <select
                           className="bg-black/55 text-white text-[11px] font-mono border border-white/25 rounded px-2.5 py-1 focus:outline-none"
                           value={eqCrewPreset}
                           onChange={(e) => handleCrewPresetChange(e.target.value)}
                         >
-                          <option value="estandar">Elegir estándar</option>
-                          <option value="cabin_pa">Cabin PA System (Altavoz Techo)</option>
-                          <option value="custom">Ecualización Personalizada [Custom]</option>
+                          <option value="estandar">{t("config.preset_standard")}</option>
+                          <option value="vhf">{t("config.preset_vhf")}</option>
+                          <option value="muffled_pa">{t("config.preset_muffled")}</option>
+                          <option value="custom">{t("config.preset_custom")}</option>
                         </select>
                       </div>
                     </div>
 
                     {/* 10 Band Faders Visualizer */}
-                    <div className="bg-black/40 border border-white/10 rounded-lg p-3">
-                      <div className="grid grid-cols-10 gap-1.5 text-center items-center">
+                    <div className="bg-black/40 border border-white/10 rounded-lg p-3 overflow-hidden">
+                      <div className="grid grid-cols-10 gap-1 text-center items-center">
                         {eqCrewBands.map((bandVal, index) => (
                           <div key={index} className="flex flex-col items-center gap-1.5 group">
                             <span className="text-[8px] font-mono text-white/40 block leading-none">{FREQUENCIES[index]}</span>
-                            <div className="h-20 sm:h-24 flex items-center justify-center">
+                            <div className="h-20 sm:h-24 flex items-center justify-center w-full">
                               <input 
                                 type="range"
                                 min="-12"
@@ -993,7 +1145,7 @@ export default function ConfigView({
                                 value={bandVal}
                                 orient="vertical"
                                 onChange={(e) => handleCrewBandChange(index, Number(e.target.value))}
-                                className="h-full accent-[#57b8ff] cursor-ns-resize"
+                                className="h-full w-full max-w-[24px] accent-[#57b8ff] cursor-ns-resize"
                                 style={{ writingMode: "bt-lr", WebkitAppearance: "slider-vertical" } as any}
                               />
                             </div>
@@ -1013,14 +1165,14 @@ export default function ConfigView({
               <div id="cfg-bloque-passenger-exp" className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 shadow-md flex flex-col gap-3">
                 <div className="border-b border-white/10 pb-2">
                   <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider flex items-center gap-2 font-black">
-                    <Activity className="w-4.5 h-4.5 text-[#43E600]" /> EXPERIENCIA DEL PASAJERO - SENSORES FÍSICOS
+                    <Activity className="w-4.5 h-4.5 text-[#43E600]" /> {t("config.passenger_title")}
                   </h3>
-                  <p className="text-[10px] text-white/50 font-mono mt-1">Habilitar análisis dinámico de fuerzas físicas en cabina</p>
+                  <p className="text-[10px] text-white/50 font-mono mt-1">{t("config.passenger_desc")}</p>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3.5">
                   <label className="bg-black/25 p-2.5 rounded border border-white/5 hover:bg-black/45 flex items-center justify-between cursor-pointer transition-colors font-mono">
-                    <span className="text-[10px] text-white/90 uppercase font-black">G-Force Sensor:</span>
+                    <span className="text-[10px] text-white/90 uppercase font-black">{t("config.passenger_gforce")}</span>
                     <input 
                       type="checkbox"
                       className="accent-[#43E600] h-3.5 w-3.5"
@@ -1030,7 +1182,7 @@ export default function ConfigView({
                   </label>
 
                   <label className="bg-black/25 p-2.5 rounded border border-white/5 hover:bg-black/45 flex items-center justify-between cursor-pointer transition-colors font-mono">
-                    <span className="text-[10px] text-white/90 uppercase font-black">Velocidad Vertical:</span>
+                    <span className="text-[10px] text-white/90 uppercase font-black">{t("config.passenger_vertical_speed")}</span>
                     <input 
                       type="checkbox"
                       className="accent-[#43E600] h-3.5 w-3.5"
@@ -1040,7 +1192,7 @@ export default function ConfigView({
                   </label>
 
                   <label className="bg-black/25 p-2.5 rounded border border-white/5 hover:bg-black/45 flex items-center justify-between cursor-pointer transition-colors font-mono">
-                    <span className="text-[10px] text-white/90 uppercase font-black">Fuerza de Toque:</span>
+                    <span className="text-[10px] text-white/90 uppercase font-black">{t("config.passenger_landing_force")}</span>
                     <input 
                       type="checkbox"
                       className="accent-[#43E600] h-3.5 w-3.5"
@@ -1050,7 +1202,7 @@ export default function ConfigView({
                   </label>
 
                   <label className="bg-black/25 p-2.5 rounded border border-white/5 hover:bg-black/45 flex items-center justify-between cursor-pointer transition-colors font-mono">
-                    <span className="text-[10px] text-white/90 uppercase font-black">Rodadura Irregular:</span>
+                    <span className="text-[10px] text-white/90 uppercase font-black">{t("config.passenger_irregular_ground")}</span>
                     <input 
                       type="checkbox"
                       className="accent-[#43E600] h-3.5 w-3.5"
@@ -1060,7 +1212,7 @@ export default function ConfigView({
                   </label>
 
                   <label className="bg-black/25 p-2.5 rounded border border-white/5 hover:bg-black/45 flex items-center justify-between cursor-pointer transition-colors font-mono">
-                    <span className="text-[10px] text-white/90 uppercase font-black">Aceleración en Suelo:</span>
+                    <span className="text-[10px] text-white/90 uppercase font-black">{t("config.passenger_acceleration")}</span>
                     <input 
                       type="checkbox"
                       className="accent-[#43E600] h-3.5 w-3.5"
@@ -1069,11 +1221,14 @@ export default function ConfigView({
                     />
                   </label>
 
-                  <label className="bg-black/25 p-2.5 rounded border border-white/5 hover:bg-black/45 flex items-center justify-between cursor-pointer transition-colors font-mono">
-                    <span className="text-[10px] text-white/90 uppercase font-black font-semibold">Feedback Demo:</span>
+                  <label className="bg-black/25 p-2.5 rounded border border-white/5 hover:bg-black/45 flex items-center justify-between cursor-pointer transition-colors font-mono relative">
+                    <div className="pr-1">
+                      <span className="text-[10px] text-white/90 uppercase font-black block">{t("config.passenger_delay_feedback")}</span>
+                      <span className="text-[8px] text-white/40 font-normal block mt-0.5">{t("config.passenger_delay_feedback_helper")}</span>
+                    </div>
                     <input 
                       type="checkbox"
-                      className="accent-[#43E600] h-3.5 w-3.5"
+                      className="accent-[#43E600] h-3.5 w-3.5 shrink-0"
                       checked={pfDelayFeedback}
                       onChange={(e) => setPfDelayFeedback(e.target.checked)}
                     />
