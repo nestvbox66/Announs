@@ -475,7 +475,7 @@ export default function ConfigView({
 
   // Pestaña "Eventos" settings
   const [selectedPackage, setSelectedPackage] = useState<string>(() => {
-    return localStorage.getItem("cfg_selected_package") || "aerolineas";
+    return localStorage.getItem("cfg_selected_package") || "";
   });
   const [activeGroupTab, setActiveGroupTab] = useState<string>("immersion");
   const [announcementFlavor, setAnnouncementFlavor] = useState<"operative" | "cultural" | "scenic" | "casual">(() => {

@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: Apache-2.5
  */
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
+import { useTranslation } from "react-i18next";
+import { supabase } from "../lib/supabase";
 import { 
   Plane, 
   Download, 
@@ -105,6 +107,7 @@ export default function VueloActualView({
   onResetSimulation,
   onTriggerBriefImport
 }: VueloActualViewProps) {
+  const { t } = useTranslation();
   const [flightCode, setFlightCode] = useState(simBriefData.vueloCodigo);
   const [originICAO, setOriginICAO] = useState(simBriefData.origen);
   const [destICAO, setDestICAO] = useState(simBriefData.destino);
@@ -162,14 +165,6 @@ export default function VueloActualView({
     return () => clearInterval(interval);
   }, [currentState, captainLanguage, crewLanguage]);
 
-  const getBoardingText = (es: string, en: string) => {
-    const activeLang = showSecondaryLang ? (crewLanguage || "Ninguno") : (captainLanguage || "Español (ES)");
-    if (activeLang.toLowerCase().includes("español") || activeLang.toLowerCase().includes("castellano")) {
-      return es;
-    }
-    return en;
-  };
-
   // Block 2: Eventos Especiales
   const [specialEvents, setSpecialEvents] = useState<string>("");
 
@@ -204,52 +199,52 @@ export default function VueloActualView({
 
   interface ImmersionOption {
     key: string;
-    brief: string;
-    deep: string;
+    briefKey: string;
+    deepKey: string;
     defaultVal: boolean;
   }
 
   const immersionOptions: ImmersionOption[] = [
     {
       key: "play_chime_sound_before_ann",
-      brief: "Tono de aviso de cabina",
-      deep: "Reproduce el clásico tono de aviso de cabina (\"Ding\" o \"Ding-Dong\") justo un segundo antes de que comience cualquier anuncio de la tripulación o del capitán. Ayuda a captar la atención del jugador sobre el ruido de los motores.",
+      briefKey: "current_flight.not_started.immersion.chime.brief",
+      deepKey: "current_flight.not_started.immersion.chime.deep",
       defaultVal: true
     },
     {
       key: "play_ambient_sound_during_flight",
-      brief: "Sonido ambiente en vuelo",
-      deep: "Activa una pista de audio en bucle de muy bajo volumen que simula la vida en la cabina (murmullos sutiles, tintineo de vasos, pasos en el pasillo). Se reproduce de forma continua durante el vuelo, enmascarando el silencio absoluto si el simulador no tiene buenos sonidos internos.",
+      briefKey: "current_flight.not_started.immersion.ambient.brief",
+      deepKey: "current_flight.not_started.immersion.ambient.deep",
       defaultVal: true
     },
     {
       key: "crew_greeting_passengers_at_gate",
-      brief: "Saludos de cabina en puerta",
-      deep: "Habilita pequeñas locuciones aleatorias (\"Hola\", \"Bienvenidos\", \"Buenas tardes\") superpuestas al sonido ambiente de embarque, simulando a la jefa de cabina recibiendo a los pasajeros en la puerta del avión.",
+      briefKey: "current_flight.not_started.immersion.greeting.brief",
+      deepKey: "current_flight.not_started.immersion.greeting.deep",
       defaultVal: true
     },
     {
       key: "passenger_reaction_to_planes_movement",
-      brief: "Reacciones de pasajeros al movimiento",
-      deep: "Permite que el motor de simulación de pasajeros emita sonidos audibles (jadeos, exclamaciones, murmullos nerviosos) en respuesta a fuerzas G repentinas, turbulencia severa, caídas bruscas de altitud o frenadas intensas.",
+      briefKey: "current_flight.not_started.immersion.reaction.brief",
+      deepKey: "current_flight.not_started.immersion.reaction.deep",
       defaultVal: true
     },
     {
       key: "play_passenger_reaction_during_landing",
-      brief: "Reacciones al aterrizar",
-      deep: "Activa una respuesta sonora colectiva de la cabina inmediatamente después de que el avión toca la pista. Dependiendo de los pies por minuto (FPM) del aterrizaje, puede generar desde un clásico aplauso de alivio hasta quejas audibles.",
+      briefKey: "current_flight.not_started.immersion.landing.brief",
+      deepKey: "current_flight.not_started.immersion.landing.deep",
       defaultVal: true
     },
     {
       key: "play_boarding_music",
-      brief: "Música de embarque y desembarque",
-      deep: "Habilita la reproducción de una lista musical de fondo durante todo el proceso de embarque y desembarque, deteniéndose automáticamente cuando el capitán ordena armar las puertas. Ideal para establecer el clima de la aerolínea (desde música clásica relajante hasta synth-pop retro).",
+      briefKey: "current_flight.not_started.immersion.music.brief",
+      deepKey: "current_flight.not_started.immersion.music.deep",
       defaultVal: true
     },
     {
       key: "speed_kph",
-      brief: "Reporte de velocidad en km/h",
-      deep: "Define el sistema de unidades que utilizará la Inteligencia Artificial cuando deba mencionar la velocidad a los pasajeros (por ejemplo, en el reporte de mitad de vuelo). Si está activo, el capitán anunciará la velocidad en kilómetros por hora (km/h). Si está apagado, utilizará millas por hora (mph).",
+      briefKey: "current_flight.not_started.immersion.speed.brief",
+      deepKey: "current_flight.not_started.immersion.speed.deep",
       defaultVal: true
     }
   ];
@@ -291,55 +286,135 @@ export default function VueloActualView({
     common_crew_seatbelt: "IA"
   });
 
+  const [userId, setUserId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data: { user }, error: authErr } = await supabase.auth.getUser();
+      if (cancelled || authErr || !user) return;
+      setUserId(user.id);
+
+      const [genResult, annResult] = await Promise.all([
+        supabase.from("setting_general").select("*").eq("user_id", user.id).maybeSingle(),
+        supabase.from("setting_announcements").select("*").eq("user_id", user.id).maybeSingle(),
+      ]);
+
+      if (cancelled) return;
+
+      if (genResult.data) {
+        const d = genResult.data;
+        const immKeys: Record<string, string> = {
+          play_chime_sound_before_ann: "play_chime_sound_before_ann",
+          play_ambient_sound_during_flight: "play_ambient_sound_during_flight",
+          crew_greeting_passengers_at_gate: "crew_greeting_passengers_at_gate",
+          passenger_reaction_to_planes_movement: "passenger_reaction_to_planes_movement",
+          play_passenger_reaction_during_landing: "play_passenger_reaction_during_landing",
+          play_boarding_music: "play_boarding_music",
+          speed_kph: "speed_kph",
+        };
+        const newImm: Record<string, boolean> = {};
+        let immChanged = false;
+        for (const [stateKey, dbCol] of Object.entries(immKeys)) {
+          if ((d as any)[dbCol] != null) {
+            newImm[stateKey] = Boolean((d as any)[dbCol]);
+            immChanged = true;
+          }
+        }
+        if (immChanged) {
+          setImmersionConfig(prev => ({ ...prev, ...newImm }));
+        }
+        if ((d as any).active_package != null) {
+          setSelectedPackage((d as any).active_package);
+        }
+      }
+
+      if (annResult.data) {
+        const ad = annResult.data;
+        const dbKeys = [
+          "gate_crew_start_soon", "gate_crew_started", "common_crew_boarding",
+          "preflight_crew_welcome", "preflight_capt_welcome", "preflight_capt_delay",
+          "preflight_capt_basic_info", "preflight_crew_basic_info", "taxi_capt_armdoors",
+          "taxi_crew_safety_brief", "taxi_capt_dimlights", "taxi_crew_dimlights",
+          "takeoff_capt_prepare", "climb_crew_upcoming_service", "cruise_capt_general_info",
+          "cruise_crew_service_info1", "cruise_crew_service_info2", "cruise_crew_shopping_info",
+          "cruise_crew_customs_forms", "cruise_crew_service_info3", "descent_capt_close_desc",
+          "descent_capt_upcoming_actions", "descent_crew_upcoming_actions", "descent_capt_10kfeet",
+          "descent_crew_landing_fewmin", "final_capt_take_seats", "taxitogate_crew_welcome",
+          "taxitogate_crew_ramining_seating", "taxitogate_crew_delay_apologies",
+          "atgate_capt_disarm_doors", "atgate_crew_deboarding", "common_capt_seatbelt",
+          "common_crew_seatbelt"
+        ];
+        const annPayload: Record<string, "off" | "pack" | "IA"> = {};
+        for (const key of dbKeys) {
+          if ((ad as any)[key] != null) {
+            annPayload[key] = (ad as any)[key] as "off" | "pack" | "IA";
+          }
+        }
+        if (Object.keys(annPayload).length > 0) {
+          setEventConfig(prev => ({ ...prev, ...annPayload }));
+        }
+        if ((ad as any).announcement_flavor != null) {
+          const flavorMap: Record<string, number> = { operative: 1, cultural: 2, scenic: 3, casual: 4 };
+          const mapped = flavorMap[(ad as any).announcement_flavor];
+          if (mapped != null) setCommunicationStyle(mapped);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   interface EventDefinition {
     key: string;
     narrator: "Capitán" | "Tripulación";
     desc: string;
     phaseId: string;
+    descKey?: string;
+    narratorKey?: string;
   }  const eventDefinitionList: EventDefinition[] = [
 
 
     // Fase 1
-    { key: "gate_crew_start_soon", narrator: "Tripulación", desc: "Anuncio en la terminal indicando que el proceso de embarque comenzará en breve.", phaseId: "fase1" },
-    { key: "gate_crew_started", narrator: "Tripulación", desc: "Aviso oficial del inicio del abordaje por grupos o zonas.", phaseId: "fase1" },
-    { key: "common_crew_boarding", narrator: "Tripulación", desc: "Mensajes rutinarios emitidos dentro de la cabina mientras los pasajeros buscan sus asientos y guardan el equipaje.", phaseId: "fase1" },
+    { key: "gate_crew_start_soon", narrator: "Tripulación", desc: "Anuncio en la terminal indicando que el proceso de embarque comenzará en breve.", phaseId: "fase1", descKey: "current_flight.not_started.boarding.gate_crew_start_soon", narratorKey: "current_flight.not_started.events.narrator_crew" },
+    { key: "gate_crew_started", narrator: "Tripulación", desc: "Aviso oficial del inicio del abordaje por grupos o zonas.", phaseId: "fase1", descKey: "current_flight.not_started.boarding.gate_crew_started", narratorKey: "current_flight.not_started.events.narrator_crew" },
+    { key: "common_crew_boarding", narrator: "Tripulación", desc: "Mensajes rutinarios emitidos dentro de la cabina mientras los pasajeros buscan sus asientos y guardan el equipaje.", phaseId: "fase1", descKey: "current_flight.not_started.boarding.common_crew_boarding", narratorKey: "current_flight.not_started.events.narrator_crew" },
     // Fase 2
-    { key: "preflight_crew_welcome", narrator: "Tripulación", desc: "Mensaje inicial de bienvenida a bordo una vez que el flujo principal de pasajeros se ha estabilizado.", phaseId: "fase2" },
-    { key: "preflight_capt_welcome", narrator: "Capitán", desc: "Saludo inicial oficial desde la cabina de mando.", phaseId: "fase2" },
-    { key: "preflight_capt_delay", narrator: "Capitán", desc: "Explicación sobre posibles demoras por tráfico ATC o carga (anuncio condicional).", phaseId: "fase2" },
-    { key: "preflight_capt_basic_info", narrator: "Capitán", desc: "Resumen operativo detallando la altitud, tiempo en ruta y meteorología esperada.", phaseId: "fase2" },
-    { key: "preflight_crew_basic_info", narrator: "Tripulación", desc: "Complemento informativo repasando normas generales o disponibilidad de servicios.", phaseId: "fase2" },
+    { key: "preflight_crew_welcome", narrator: "Tripulación", desc: "Mensaje inicial de bienvenida a bordo una vez que el flujo principal de pasajeros se ha estabilizado.", phaseId: "fase2", descKey: "current_flight.not_started.preflight.crew_welcome", narratorKey: "current_flight.not_started.events.narrator_crew" },
+    { key: "preflight_capt_welcome", narrator: "Capitán", desc: "Saludo inicial oficial desde la cabina de mando.", phaseId: "fase2", descKey: "current_flight.not_started.preflight.capt_welcome", narratorKey: "current_flight.not_started.events.narrator_captain" },
+    { key: "preflight_capt_delay", narrator: "Capitán", desc: "Explicación sobre posibles demoras por tráfico ATC o carga (anuncio condicional).", phaseId: "fase2", descKey: "current_flight.not_started.preflight.capt_delay", narratorKey: "current_flight.not_started.events.narrator_captain" },
+    { key: "preflight_capt_basic_info", narrator: "Capitán", desc: "Resumen operativo detallando la altitud, tiempo en ruta y meteorología esperada.", phaseId: "fase2", descKey: "current_flight.not_started.preflight.capt_basic_info", narratorKey: "current_flight.not_started.events.narrator_captain" },
+    { key: "preflight_crew_basic_info", narrator: "Tripulación", desc: "Complemento informativo repasando normas generales o disponibilidad de servicios.", phaseId: "fase2", descKey: "current_flight.not_started.preflight.crew_basic_info", narratorKey: "current_flight.not_started.events.narrator_crew" },
     // Fase 3
-    { key: "taxi_capt_armdoors", narrator: "Capitán", desc: "Orden estricta a la tripulación para armar toboganes y verificar puertas cerradas (Cross-check).", phaseId: "fase3" },
-    { key: "taxi_crew_safety_brief", narrator: "Tripulación", desc: "Ejecución de la demostración de seguridad (manual o por pantallas).", phaseId: "fase3" },
-    { key: "taxi_capt_dimlights", narrator: "Capitán", desc: "Orden a la tripulación para reducir la iluminación general (típicamente en vuelos nocturnos).", phaseId: "fase3" },
-    { key: "taxi_crew_dimlights", narrator: "Tripulación", desc: "Aviso a los pasajeros sobre la atenuación de luces para el despegue.", phaseId: "fase3" },
-    { key: "takeoff_capt_prepare", narrator: "Capitán", desc: "Orden ejecutiva indicando a los tripulantes que tomen sus lugares para el despegue inminente.", phaseId: "fase3" },
+    { key: "taxi_capt_armdoors", narrator: "Capitán", desc: "Orden estricta a la tripulación para armar toboganes y verificar puertas cerradas (Cross-check).", phaseId: "fase3", descKey: "current_flight.not_started.taxi.capt_armdoors", narratorKey: "current_flight.not_started.events.narrator_captain" },
+    { key: "taxi_crew_safety_brief", narrator: "Tripulación", desc: "Ejecución de la demostración de seguridad (manual o por pantallas).", phaseId: "fase3", descKey: "current_flight.not_started.taxi.crew_safety_brief", narratorKey: "current_flight.not_started.events.narrator_crew" },
+    { key: "taxi_capt_dimlights", narrator: "Capitán", desc: "Orden a la tripulación para reducir la iluminación general (típicamente en vuelos nocturnos).", phaseId: "fase3", descKey: "current_flight.not_started.taxi.capt_dimlights", narratorKey: "current_flight.not_started.events.narrator_captain" },
+    { key: "taxi_crew_dimlights", narrator: "Tripulación", desc: "Aviso a los pasajeros sobre la atenuación de luces para el despegue.", phaseId: "fase3", descKey: "current_flight.not_started.taxi.crew_dimlights", narratorKey: "current_flight.not_started.events.narrator_crew" },
+    { key: "takeoff_capt_prepare", narrator: "Capitán", desc: "Orden ejecutiva indicando a los tripulantes que tomen sus lugares para el despegue inminente.", phaseId: "fase3", descKey: "current_flight.not_started.taxi.capt_prepare", narratorKey: "current_flight.not_started.events.narrator_captain" },
     // Fase 4
-    { key: "climb_crew_upcoming_service", narrator: "Tripulación", desc: "Aviso sobre los servicios a bordo que se ofrecerán, emitido generalmente al superar los 10.000 pies.", phaseId: "fase4" },
-    { key: "cruise_capt_general_info", narrator: "Capitán", desc: "Actualización a mitad del vuelo sobre el progreso, puntos de interés geográficos o cambios en la ruta.", phaseId: "fase4" },
-    { key: "cruise_crew_service_info1", narrator: "Tripulación", desc: "Inicio del servicio primario de comidas o bebidas.", phaseId: "fase4" },
-    { key: "cruise_crew_service_info2", narrator: "Tripulación", desc: "Segundo pase en cabina (recolección de bandejas, oferta de té/café).", phaseId: "fase4" },
-    { key: "cruise_crew_shopping_info", narrator: "Tripulación", desc: "Promoción de la venta a bordo (Duty Free). Al maquetar la UI y vincularla a este evento, hay que asegurarse de que si estas ventas se marcan como opcionales, la lógica no saltee la pantalla de pago ni falle al actualizar la variable del monto al confirmar una transacción.", phaseId: "fase4" },
-    { key: "cruise_crew_customs_forms", narrator: "Tripulación", desc: "Aviso sobre la distribución de los formularios de migraciones y aduanas para vuelos internacionales.", phaseId: "fase4" },
-    { key: "cruise_crew_service_info3", narrator: "Tripulación", desc: "Tercer servicio ocasional, típicamente un desayuno o snack en vuelos de largo radio antes del descenso.", phaseId: "fase4" },
+    { key: "climb_crew_upcoming_service", narrator: "Tripulación", desc: "Aviso sobre los servicios a bordo que se ofrecerán, emitido generalmente al superar los 10.000 pies.", phaseId: "fase4", descKey: "current_flight.not_started.cruise.crew_upcoming_service", narratorKey: "current_flight.not_started.events.narrator_crew" },
+    { key: "cruise_capt_general_info", narrator: "Capitán", desc: "Actualización a mitad del vuelo sobre el progreso, puntos de interés geográficos o cambios en la ruta.", phaseId: "fase4", descKey: "current_flight.not_started.cruise.capt_general_info", narratorKey: "current_flight.not_started.events.narrator_captain" },
+    { key: "cruise_crew_service_info1", narrator: "Tripulación", desc: "Inicio del servicio primario de comidas o bebidas.", phaseId: "fase4", descKey: "current_flight.not_started.cruise.crew_service_info1", narratorKey: "current_flight.not_started.events.narrator_crew" },
+    { key: "cruise_crew_service_info2", narrator: "Tripulación", desc: "Segundo pase en cabina (recolección de bandejas, oferta de té/café).", phaseId: "fase4", descKey: "current_flight.not_started.cruise.crew_service_info2", narratorKey: "current_flight.not_started.events.narrator_crew" },
+    { key: "cruise_crew_shopping_info", narrator: "Tripulación", desc: "Promoción de la venta a bordo (Duty Free).", phaseId: "fase4", descKey: "current_flight.not_started.cruise.crew_shopping_info", narratorKey: "current_flight.not_started.events.narrator_crew" },
+    { key: "cruise_crew_customs_forms", narrator: "Tripulación", desc: "Aviso sobre la distribución de los formularios de migraciones y aduanas para vuelos internacionales.", phaseId: "fase4", descKey: "current_flight.not_started.cruise.crew_customs_forms", narratorKey: "current_flight.not_started.events.narrator_crew" },
+    { key: "cruise_crew_service_info3", narrator: "Tripulación", desc: "Tercer servicio ocasional, típicamente un desayuno o snack en vuelos de largo radio antes del descenso.", phaseId: "fase4", descKey: "current_flight.not_started.cruise.crew_service_info3", narratorKey: "current_flight.not_started.events.narrator_crew" },
     // Fase 5
-    { key: "descent_capt_close_desc", narrator: "Capitán", desc: "Aviso previo informando que el avión está a punto de abandonar la altitud de crucero (Top of Descent).", phaseId: "fase5" },
-    { key: "descent_capt_upcoming_actions", narrator: "Capitán", desc: "Detalles finales sobre la pista de aterrizaje, terminal asignada y clima local en destino.", phaseId: "fase5" },
-    { key: "descent_crew_upcoming_actions", narrator: "Tripulación", desc: "Solicitud a los pasajeros de guardar mesas, enderezar respaldos y prepararse para la llegada.", phaseId: "fase5" },
-    { key: "descent_capt_10kfeet", narrator: "Capitán", desc: "Señal acústica o verbal al cruzar 10.000 pies hacia abajo, indicando el inicio de la cabina estéril.", phaseId: "fase5" },
-    { key: "descent_crew_landing_fewmin", narrator: "Tripulación", desc: "Chequeo final de cabina y confirmación de que el aterrizaje ocurrirá en breves minutos.", phaseId: "fase5" },
-    { key: "final_capt_take_seats", narrator: "Capitán", desc: "Orden perentoria a la tripulación de ocupar sus transportines para el aterrizaje.", phaseId: "fase5" },
+    { key: "descent_capt_close_desc", narrator: "Capitán", desc: "Aviso previo informando que el avión está a punto de abandonar la altitud de crucero (Top of Descent).", phaseId: "fase5", descKey: "current_flight.not_started.descent.capt_close_desc", narratorKey: "current_flight.not_started.events.narrator_captain" },
+    { key: "descent_capt_upcoming_actions", narrator: "Capitán", desc: "Detalles finales sobre la pista de aterrizaje, terminal asignada y clima local en destino.", phaseId: "fase5", descKey: "current_flight.not_started.descent.capt_upcoming_actions", narratorKey: "current_flight.not_started.events.narrator_captain" },
+    { key: "descent_crew_upcoming_actions", narrator: "Tripulación", desc: "Solicitud a los pasajeros de guardar mesas, enderezar respaldos y prepararse para la llegada.", phaseId: "fase5", descKey: "current_flight.not_started.descent.crew_upcoming_actions", narratorKey: "current_flight.not_started.events.narrator_crew" },
+    { key: "descent_capt_10kfeet", narrator: "Capitán", desc: "Señal acústica o verbal al cruzar 10.000 pies hacia abajo, indicando el inicio de la cabina estéril.", phaseId: "fase5", descKey: "current_flight.not_started.descent.capt_10kfeet", narratorKey: "current_flight.not_started.events.narrator_captain" },
+    { key: "descent_crew_landing_fewmin", narrator: "Tripulación", desc: "Chequeo final de cabina y confirmación de que el aterrizaje ocurrirá en breves minutos.", phaseId: "fase5", descKey: "current_flight.not_started.descent.crew_landing_fewmin", narratorKey: "current_flight.not_started.events.narrator_crew" },
+    { key: "final_capt_take_seats", narrator: "Capitán", desc: "Orden perentoria a la tripulación de ocupar sus transportines para el aterrizaje.", phaseId: "fase5", descKey: "current_flight.not_started.descent.capt_take_seats", narratorKey: "current_flight.not_started.events.narrator_captain" },
     // Fase 6
-    { key: "taxitogate_crew_welcome", narrator: "Tripulación", desc: "Anuncio protocolar dando la bienvenida oficial al destino y confirmando la hora local.", phaseId: "fase6" },
-    { key: "taxitogate_crew_ramining_seating", narrator: "Tripulación", desc: "Recordatorio preventivo para que nadie se levante antes de que se apague la señal correspondiente.", phaseId: "fase6" },
-    { key: "taxitogate_crew_delay_apologies", narrator: "Tripulación", desc: "Mensaje para gestionar la impaciencia si la puerta de desembarque está ocupada y hay demoras en plataforma (condicional).", phaseId: "fase6" },
+    { key: "taxitogate_crew_welcome", narrator: "Tripulación", desc: "Anuncio protocolar dando la bienvenida oficial al destino y confirmando la hora local.", phaseId: "fase6", descKey: "current_flight.not_started.taxitogate.crew_welcome", narratorKey: "current_flight.not_started.events.narrator_crew" },
+    { key: "taxitogate_crew_ramining_seating", narrator: "Tripulación", desc: "Recordatorio preventivo para que nadie se levante antes de que se apague la señal correspondiente.", phaseId: "fase6", descKey: "current_flight.not_started.taxitogate.crew_ramining_seating", narratorKey: "current_flight.not_started.events.narrator_crew" },
+    { key: "taxitogate_crew_delay_apologies", narrator: "Tripulación", desc: "Mensaje para gestionar la impaciencia si la puerta de desembarque está ocupada y hay demoras en plataforma (condicional).", phaseId: "fase6", descKey: "current_flight.not_started.taxitogate.crew_delay_apologies", narratorKey: "current_flight.not_started.events.narrator_crew" },
     // Fase 7
-    { key: "atgate_capt_disarm_doors", narrator: "Capitán", desc: "Orden ejecutiva para desarmar los toboganes de evacuación una vez detenidos por completo.", phaseId: "fase7" },
-    { key: "atgate_crew_deboarding", narrator: "Tripulación", desc: "Instrucciones finales sobre el flujo de salida, despedida y recordatorio sobre objetos personales.", phaseId: "fase7" },
+    { key: "atgate_capt_disarm_doors", narrator: "Capitán", desc: "Orden ejecutiva para desarmar los toboganes de evacuación una vez detenidos por completo.", phaseId: "fase7", descKey: "current_flight.not_started.atgate.capt_disarm_doors", narratorKey: "current_flight.not_started.events.narrator_captain" },
+    { key: "atgate_crew_deboarding", narrator: "Tripulación", desc: "Instrucciones finales sobre el flujo de salida, despedida y recordatorio sobre objetos personales.", phaseId: "fase7", descKey: "current_flight.not_started.atgate.crew_deboarding", narratorKey: "current_flight.not_started.events.narrator_crew" },
     // Transversales
-    { key: "common_capt_seatbelt", narrator: "Capitán", desc: "Cambio de estado de la señal lumínica de cinturones (se dispara en cualquier momento por turbulencia).", phaseId: "transversal" },
-    { key: "common_crew_seatbelt", narrator: "Tripulación", desc: "Refuerzo verbal exigiendo que todos vuelvan a sus asientos inmediatamente tras el aviso del capitán.", phaseId: "transversal" }
+    { key: "common_capt_seatbelt", narrator: "Capitán", desc: "Cambio de estado de la señal lumínica de cinturones (se dispara en cualquier momento por turbulencia).", phaseId: "transversal", descKey: "current_flight.not_started.transversal.capt_seatbelt", narratorKey: "current_flight.not_started.events.narrator_captain" },
+    { key: "common_crew_seatbelt", narrator: "Tripulación", desc: "Refuerzo verbal exigiendo que todos vuelvan a sus asientos inmediatamente tras el aviso del capitán.", phaseId: "transversal", descKey: "current_flight.not_started.transversal.crew_seatbelt", narratorKey: "current_flight.not_started.events.narrator_crew" }
   ];
 
   const getRouteDetails = (origen: string, destino: string) => {
@@ -432,17 +507,17 @@ export default function VueloActualView({
     }));
   };
 
-  const eventGroups = [
-    { id: "immersion", label: "Inmersión (7)" },
-    { id: "fase1", label: "Embarque (3)" },
-    { id: "fase2", label: "Pre-Vuelo (5)" },
-    { id: "fase3", label: "Rodaje (5)" },
-    { id: "fase4", label: "Crucero (7)" },
-    { id: "fase5", label: "Descenso (6)" },
-    { id: "fase6", label: "Rodaje a Puerta (3)" },
-    { id: "fase7", label: "Plataforma (2)" },
-    { id: "transversal", label: "Transversales (2)" }
-  ];
+  const eventGroups = useMemo(() => [
+    { id: "immersion", label: t("current_flight.not_started.events.group_immersion") },
+    { id: "fase1", label: t("current_flight.not_started.boarding.group_label") },
+    { id: "fase2", label: t("current_flight.not_started.preflight.group_label") },
+    { id: "fase3", label: t("current_flight.not_started.events.group_taxi") },
+    { id: "fase4", label: t("current_flight.not_started.events.group_cruise") },
+    { id: "fase5", label: t("current_flight.not_started.events.group_descent") },
+    { id: "fase6", label: t("current_flight.not_started.events.group_taxitogate") },
+    { id: "fase7", label: t("current_flight.not_started.events.group_atgate") },
+    { id: "transversal", label: t("current_flight.not_started.events.group_transversal") }
+  ], [t]);
 
   const getFilteredEvents = (): EventDefinition[] => {
     return eventDefinitionList.filter(item => item.phaseId === activeGroupTab);
@@ -456,15 +531,15 @@ export default function VueloActualView({
     return "Rodaje a Puerta";
   });
 
-  const simplifiedPhases = [
-    { label: "Embarque", state: FlightState.PreEmbarque },
-    { label: "Pre-vuelo", state: FlightState.PreEmbarque },
-    { label: "Rodaje", state: FlightState.PreEmbarque },
-    { label: "Crucero", state: FlightState.EnVuelo },
-    { label: "Descenso", state: FlightState.EnVuelo },
-    { label: "Rodaje a Puerta", state: FlightState.Aterrizado },
-    { label: "Plataforma", state: FlightState.Aterrizado }
-  ];
+  const simplifiedPhases = useMemo(() => [
+    { label: t("current_flight.not_started.phases.boarding"), state: FlightState.PreEmbarque },
+    { label: t("current_flight.not_started.phases.preflight"), state: FlightState.PreEmbarque },
+    { label: t("current_flight.not_started.phases.taxi"), state: FlightState.PreEmbarque },
+    { label: t("current_flight.not_started.phases.cruise"), state: FlightState.EnVuelo },
+    { label: t("current_flight.not_started.phases.descent"), state: FlightState.EnVuelo },
+    { label: t("current_flight.not_started.phases.taxitogate"), state: FlightState.Aterrizado },
+    { label: t("current_flight.not_started.phases.atgate"), state: FlightState.Aterrizado }
+  ], [t]);
 
   const getCurrentPhaseIndex = () => {
     const stage = currentSubStage.toLowerCase();
@@ -946,7 +1021,7 @@ export default function VueloActualView({
         <div className="flex flex-col md:flex-row md:items-center md:justify-between border-b border-[#3B7EB2]/50 pb-4 gap-4">
           <div>
             <h1 className="font-display font-extrabold text-3xl tracking-tight text-[#45AFFF]">
-              {isFlightSettingsOpen ? "Ajustes del Vuelo" : "Vuelo Actual: No iniciado"}
+              {isFlightSettingsOpen ? t("current_flight.not_started.settings_title") : t("current_flight.not_started.title")}
             </h1>
           </div>
           {/* Action Buttons inside header for instant usability */}
@@ -969,12 +1044,12 @@ export default function VueloActualView({
                   }`}
                 >
                   <Download className="w-4 h-4" />
-                  Importar desde SimBrief
+                  {t("current_flight.not_started.import_btn")}
                 </button>
                 {/* Tooltip Popup */}
                 <div className="absolute right-0 top-full mt-2 hidden group-hover:block w-72 p-3 bg-[#00172e] border border-[#3B7EB2] text-white text-xs rounded shadow-2xl z-50 animate-fadeIn pointer-events-none">
                   <p className="font-sans font-medium text-white/90 leading-relaxed text-left text-[11px]">
-                    Crea y genera el plan de vuelo en SimBrief e impórtalo en Announce para comenzar de forma automatizada. El simulador detectará tu última sesión y cargará la información operativa de inmediato.
+                    {t("current_flight.not_started.import_tooltip")}
                   </p>
                   {/* Arrow pointing up */}
                   <div className="absolute bottom-full right-10 w-0 h-0 border-l-4 border-l-transparent border-r-4 border-r-transparent border-b-4 border-b-[#3B7EB2]"></div>
@@ -992,7 +1067,7 @@ export default function VueloActualView({
                 className="bg-[#e68b00]/15 hover:bg-[#e68b00]/30 text-[#ffb03a] border border-[#e68b00]/50 px-5 py-2.5 rounded-[5px] text-xs font-mono font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow hover:scale-[1.01] active:scale-[0.99]"
               >
                 <Save className="w-4 h-4" />
-                Cargar Vuelo
+                {t("current_flight.not_started.load_btn")}
               </button>
             </div>
           )}
@@ -1724,18 +1799,18 @@ export default function VueloActualView({
               <div className="flex items-center gap-2">
                 <Radio className="w-5 h-5 text-[#45AFFF]" />
                 <h3 className="font-display font-bold text-base text-[#45AFFF]">
-                  Configurar Eventos
+                  {t("current_flight.not_started.event_config.title")}
                 </h3>
               </div>
               <div id="package-selector-container" className="flex items-center gap-3 bg-black/30 border border-white/10 rounded-[5px] px-3 py-1.5 shrink-0 max-w-full overflow-x-auto">
-                <label className="text-[9px] font-mono font-bold text-white/55 uppercase tracking-wider whitespace-nowrap">Package Activo:</label>
+                <label className="text-[9px] font-mono font-bold text-white/55 uppercase tracking-wider whitespace-nowrap">{t("current_flight.not_started.package_box.active_label")}</label>
                 <select
                   id="package-select"
                   value={selectedPackage}
                   onChange={(e) => setSelectedPackage(e.target.value)}
                   className="bg-black/55 border border-[#3B7EB2]/45 text-xs text-white font-mono font-bold rounded-[3px] px-2 py-0.5 focus:outline-none cursor-pointer hover:border-[#45AFFF] transition-colors"
                 >
-                  <option value="">-- Sin Package (Desactivar PACK) --</option>
+                  <option value="">{t("current_flight.not_started.package_box.no_package")}</option>
                   <option value="aerolineas">Aerolíneas Argentinas AR Pack</option>
                   <option value="latam">LATAM Real Voice Pack v2</option>
                   <option value="iberia">Iberia Premium Audio</option>
@@ -1747,13 +1822,13 @@ export default function VueloActualView({
                   onClick={() => setShowPackageManager(true)}
                   className="text-[#45AFFF] hover:text-[#43E600] text-[10px] font-mono font-bold hover:underline cursor-pointer border-l border-white/10 pl-2 shrink-0 transition-colors"
                 >
-                  [ Administrar ]
+                  {t("current_flight.not_started.package_box.manage_btn")}
                 </button>
               </div>
             </div>
 
             <p className="text-xs text-white/80 leading-relaxed">
-              Selecciona el tipo de anunciador para cada evento regulado que ocurrirá durante el vuelo:
+              {t("current_flight.not_started.event_config.description")}
             </p>
 
             {/* Event Category Tabs */}
@@ -1783,7 +1858,7 @@ export default function VueloActualView({
                   return (
                     <div 
                       key={item.key} 
-                      title={item.deep}
+                      title={t(item.deepKey)}
                       className={`group relative bg-[#002440]/45 hover:bg-[#002440]/75 border border-[#3B7EB2]/20 hover:border-[#3B7EB2]/40 p-4 rounded-[6px] flex flex-col sm:flex-row justify-between gap-4 transition-all ${
                         item.key === "play_boarding_music" && currentValue ? "sm:items-start" : "sm:items-center"
                       }`}
@@ -1791,25 +1866,25 @@ export default function VueloActualView({
                       <div className="space-y-1.5 flex-1 min-w-0 pr-1">
                         <div className="flex items-center gap-2">
                           <span className="text-[12.5px] font-sans font-bold text-white leading-normal tracking-wide">
-                            {item.brief}
+                            {t(item.briefKey)}
                           </span>
                           <span className="text-[#45AFFF] hover:text-[#43E600] transition-colors cursor-help shrink-0 relative">
                             <Info className="w-3.5 h-3.5" />
                             {/* Hover Tooltip bubble inside the group - rendered cleanly downwards so it never slips behind the persistent group tabs container */}
                             <div className="invisible group-hover:visible absolute top-full left-1/2 -translate-x-1/2 mt-2.5 w-64 p-3 bg-[#01172e] border border-[#3B7EB2] text-[11px] text-white/90 leading-relaxed font-sans rounded shadow-2xl z-50 pointer-events-none font-normal">
-                              <span className="text-[#43E600] font-bold block mb-1 uppercase text-[9px] tracking-wider">Detalles de Inmersión</span>
-                              {item.deep}
+                              <span className="text-[#43E600] font-bold block mb-1 uppercase text-[9px] tracking-wider">{t("current_flight.not_started.immersion.details_header")}</span>
+                              {t(item.deepKey)}
                               <div className="absolute bottom-full left-1/2 -translate-x-1/2 w-0 h-0 border-x-4 border-x-transparent border-b-4 border-b-[#3B7EB2]"></div>
                             </div>
                           </span>
                         </div>
                         <span className="text-[10px] font-mono text-white/45 uppercase block tracking-wider">
-                          Def: <strong className="text-[#43E600]/80">Activo (Sí)</strong>
+                          {t("current_flight.not_started.immersion.def_label")} <strong className="text-[#43E600]/80">{t("current_flight.not_started.immersion.def_active")}</strong>
                         </span>
                         {item.key === "play_boarding_music" && currentValue && (
                           <div className="mt-3 space-y-1" onClick={(e) => e.stopPropagation()}>
                             <label className="block text-[10px] font-mono text-white/70 uppercase tracking-wider">
-                              Tema a reproducir:
+                              {t("current_flight.not_started.immersion.track_label")}
                             </label>
                             <select
                               value={boardingMusicTrack}
@@ -1842,7 +1917,7 @@ export default function VueloActualView({
                               : "text-white/30 border-transparent hover:text-white/60"
                           }`}
                         >
-                          Sí
+                          {t("current_flight.not_started.immersion.yes")}
                         </button>
                         <button
                           type="button"
@@ -1858,7 +1933,7 @@ export default function VueloActualView({
                               : "text-white/30 border-transparent hover:text-white/60"
                           }`}
                         >
-                          No
+                          {t("current_flight.not_started.immersion.no")}
                         </button>
                       </div>
                     </div>
@@ -1875,12 +1950,12 @@ export default function VueloActualView({
                     >
                       <div className="space-y-1 my-1 flex-1 min-w-0 pr-1">
                         <span className="text-[12.5px] font-sans font-medium text-white/95 leading-normal block">
-                          {item.desc}
+                          {item.descKey ? t(item.descKey) : item.desc}
                         </span>
                         {/* Narrator Display below description */}
                         <div className="flex items-center gap-1.5 text-[10px] uppercase font-mono tracking-wider text-white/50 mt-1.5">
                           <span className={`w-1.5 h-1.5 rounded-full ${item.narrator === "Capitán" ? "bg-[#e68b00]" : "bg-[#45AFFF]"}`}></span>
-                          <span>NARRADOR: <strong className={item.narrator === "Capitán" ? "text-[#ffb340]" : "text-[#45AFFF]"}>{item.narrator}</strong></span>
+                          <span>{t("current_flight.not_started.events.narrator_label")} <strong className={item.narrator === "Capitán" ? "text-[#ffb340]" : "text-[#45AFFF]"}>{item.narratorKey ? t(item.narratorKey) : t(item.narrator === "Capitán" ? "narrator.captain" : "narrator.crew")}</strong></span>
                         </div>
                       </div>
 
@@ -1901,12 +1976,12 @@ export default function VueloActualView({
                               type="button"
                               disabled={isPackModeDisabled}
                               onClick={() => handleEventConfigChange(item.key, mode)}
-                              title={isPackModeDisabled ? "Debes seleccionar un Package activo para habilitar la opción PACK" : ""}
+                              title={isPackModeDisabled ? t("current_flight.not_started.events.tooltip_no_package") : ""}
                               className={`px-1.5 py-1 rounded-[3px] font-mono uppercase tracking-wider border cursor-pointer transition-all flex-1 text-center ${activeStyle} ${
                                 isPackModeDisabled ? "opacity-25 cursor-not-allowed hover:text-white/20" : ""
                               }`}
                             >
-                              {mode}
+                              {mode === "off" ? t("current_flight.not_started.events.mode_off") : mode === "pack" ? t("current_flight.not_started.events.mode_pack") : t("current_flight.not_started.events.mode_ia")}
                             </button>
                           );
                         })}
@@ -1939,14 +2014,14 @@ export default function VueloActualView({
                 {/* Fila 1: Cabecera */}
                 <div className="flex justify-between items-center text-[10px] font-mono font-bold tracking-wider border-b border-white/25 pb-2 uppercase text-white/85">
                   <span className="flex items-center gap-1.5">
-                    <span>MSFS GATE MONITOR</span>
+                    <span>{t("current_flight.not_started.boarding_display.monitor_title")}</span>
                     <span className="text-[9px] bg-white/10 px-1.5 py-0.5 rounded text-white/70 font-mono tracking-normal">
                       {showSecondaryLang ? (crewLanguage || "Ninguno").toUpperCase() : (captainLanguage || "Español (ES)").toUpperCase()}
                     </span>
                   </span>
                   <span className="text-[#43E600] flex items-center gap-1.5 font-sans">
                     <span className="w-2 h-2 rounded-full bg-[#43E600] animate-pulse" />
-                    {getBoardingText("EMBARQUE ABIERTO", "BOARDING OPEN")}
+                    {t("current_flight.not_started.boarding_display.boarding_open")}
                   </span>
                   <span>{new Date().toLocaleDateString('es-ES', { month: 'short', day: '2-digit', year: 'numeric' }).toUpperCase()}</span>
                 </div>
@@ -1955,14 +2030,14 @@ export default function VueloActualView({
                 <div className="grid grid-cols-3 gap-4 border-b border-white/20 py-3 flex-1 items-center">
                   <div className="col-span-2">
                     <span className="block text-[9px] font-mono text-white/50 tracking-widest uppercase font-extrabold mb-0.5">
-                      {getBoardingText("SALIENDO HACIA:", "DEPARTING TO:")}
+                      {t("current_flight.not_started.boarding_display.departing_to")}
                     </span>
                     <h2 className="text-2xl sm:text-3xl font-sans font-black tracking-tight text-white uppercase">{routeDetails.destCity}</h2>
                     <span className="text-[10px] text-white/60 font-mono tracking-wider">({destICAO}) • {routeDetails.destCountry}</span>
                   </div>
                   <div className="border-l border-white/20 pl-4">
                     <span className="block text-[9px] font-mono text-white/50 tracking-widest uppercase font-extrabold mb-0.5">
-                      {getBoardingText("VUELO:", "FLIGHT:")}
+                      {t("current_flight.not_started.boarding_display.flight")}
                     </span>
                     <h2 className="text-2xl sm:text-3xl font-mono font-black text-amber-400">{flightCode}</h2>
                     <span className="text-[10px] text-white/60 font-mono tracking-wider">{airline}</span>
@@ -1973,27 +2048,27 @@ export default function VueloActualView({
                 <div className="grid grid-cols-3 gap-4 border-b border-white/20 py-2.5 flex-1 items-center">
                   <div className="col-span-2">
                     <span className="block text-[9px] font-mono text-white/50 tracking-widest uppercase font-extrabold mb-0.5">
-                      {getBoardingText("ESTADO:", "STATUS:")}
+                      {t("current_flight.not_started.boarding_display.status")}
                     </span>
                     <h3 className={`text-xl sm:text-2xl font-sans font-black tracking-tight ${isBoardingActive ? "text-amber-400 animate-pulse" : boardedCount >= passengers.length ? "text-[#43E600]" : "text-[#45AFFF]"}`}>
                       {isBoardingActive 
-                        ? getBoardingText("EMBARCANDO", "BOARDING") 
+                        ? t("current_flight.not_started.boarding_display.boarding") 
                         : boardedCount >= passengers.length 
-                          ? getBoardingText("EMBARQUE CERRADO", "BOARDING CLOSED") 
-                          : getBoardingText("A TIEMPO / LISTO", "ON TIME / READY")}
+                          ? t("current_flight.not_started.boarding_display.boarding_closed") 
+                          : t("current_flight.not_started.boarding_display.on_time_ready")}
                     </h3>
                   </div>
                   <div className="border-l border-white/20 pl-4">
                     <span className="block text-[8px] font-mono text-white/50 tracking-widest uppercase font-extrabold truncate mb-0.5">
-                      {getBoardingText("CLIMA EN", "WEATHER IN")} {routeDetails.destCity.toUpperCase()}:
+                      {t("current_flight.not_started.boarding_display.weather_in")} {routeDetails.destCity.toUpperCase()}:
                     </span>
                     <div className="text-[10px] font-mono text-white/95 mt-1">
                       <div className="flex justify-between gap-1">
-                        <span>{getBoardingText("DESPEJADO:", "FAIR:")}</span> 
+                        <span>{t("current_flight.not_started.boarding_display.fair")}</span> 
                         <span className="text-[#43E600] font-bold">18°C</span>
                       </div>
                       <div className="flex justify-between gap-1">
-                        <span>{getBoardingText("VIENTO:", "WIND:")}</span> 
+                        <span>{t("current_flight.not_started.boarding_display.wind")}</span> 
                         <span>8 KT W</span>
                       </div>
                     </div>
@@ -2004,17 +2079,17 @@ export default function VueloActualView({
                 <div className="grid grid-cols-3 gap-4 pt-2.5 items-center">
                   <div className="col-span-2">
                     <span className="block text-[9px] font-mono text-white/50 tracking-widest uppercase font-extrabold mb-0.5">
-                      {getBoardingText("SALIDA ESTIMADA:", "ESTIMATED DEPARTURE:")}
+                      {t("current_flight.not_started.boarding_display.estimated_departure")}
                     </span>
                     <strong className="text-sm sm:text-base font-mono tracking-wider text-white">
                       12:45 UTC <span className="text-white/40 font-normal">
-                        ({simBriefData.blockTime ? (getBoardingText("ETA EN ", "ETA IN ") + simBriefData.blockTime) : "75 MIN"})
+                        ({simBriefData.blockTime ? (t("current_flight.not_started.boarding_display.eta_in") + simBriefData.blockTime) : "75 MIN"})
                       </span>
                     </strong>
                   </div>
                   <div className="border-l border-white/20 pl-4">
                     <span className="block text-[9px] font-mono text-white/50 tracking-widest uppercase font-extrabold mb-0.5">
-                      {getBoardingText("PASAJEROS:", "PASSENGERS:")}
+                      {t("current_flight.not_started.boarding_display.passengers")}
                     </span>
                     <strong className="text-sm sm:text-base font-mono text-[#43E600]">{displayBoardedCount} / {displayTotalPassengers}</strong>
                   </div>

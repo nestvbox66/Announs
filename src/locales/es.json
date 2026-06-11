@@ -1,4 +1,13 @@
 {
+  "narrator": {
+    "captain": "Capitán",
+    "crew": "Tripulación"
+  },
+  "sidebar": {
+    "hub": "Hub del Usuario",
+    "vuelo": "Vuelo Actual",
+    "config": "Configuración"
+  },
   "account": {
     "title": "PERFIL Y AJUSTES DE CUENTA",
     "subtitle": "Configura tu Licencia, Membresía e Integraciones de SimBrief",
@@ -79,6 +88,155 @@
     "passengers": "Pasajeros transportados:",
     "avg_satisfaction": "Satisfacción Media:",
     "avg_landing": "Aterrizaje Promedio:"
+  },
+  "current_flight": {
+    "not_started": {
+      "title": "Vuelo Actual: No iniciado",
+      "settings_title": "Ajustes del Vuelo",
+      "import_btn": "Importar desde SimBrief",
+      "import_tooltip": "Crea y genera el plan de vuelo en SimBrief e impórtalo en Announce para comenzar de forma automatizada. El simulador detectará tu última sesión y cargará la información operativa de inmediato.",
+      "load_btn": "Cargar Vuelo",
+      "immersion": {
+        "details_header": "Detalles de Inmersión",
+        "def_label": "Def:",
+        "def_active": "Activo (Sí)",
+        "track_label": "Tema a reproducir:",
+        "yes": "Sí",
+        "no": "No",
+        "chime": {
+          "brief": "Tono de aviso de cabina",
+          "deep": "Reproduce el clásico tono de aviso de cabina (\"Ding\" o \"Ding-Dong\") justo un segundo antes de que comience cualquier anuncio de la tripulación o del capitán. Ayuda a captar la atención del jugador sobre el ruido de los motores."
+        },
+        "ambient": {
+          "brief": "Sonido ambiente en vuelo",
+          "deep": "Activa una pista de audio en bucle de muy bajo volumen que simula la vida en la cabina (murmullos sutiles, tintineo de vasos, pasos en el pasillo). Se reproduce de forma continua durante el vuelo, enmascarando el silencio absoluto si el simulador no tiene buenos sonidos internos."
+        },
+        "greeting": {
+          "brief": "Saludos de cabina en puerta",
+          "deep": "Habilita pequeñas locuciones aleatorias (\"Hola\", \"Bienvenidos\", \"Buenas tardes\") superpuestas al sonido ambiente de embarque, simulando a la jefa de cabina recibiendo a los pasajeros en la puerta del avión."
+        },
+        "reaction": {
+          "brief": "Reacciones de pasajeros al movimiento",
+          "deep": "Permite que el motor de simulación de pasajeros emita sonidos audibles (jadeos, exclamaciones, murmullos nerviosos) en respuesta a fuerzas G repentinas, turbulencia severa, caídas bruscas de altitud o frenadas intensas."
+        },
+        "landing": {
+          "brief": "Reacciones al aterrizar",
+          "deep": "Activa una respuesta sonora colectiva de la cabina inmediatamente después de que el avión toca la pista. Dependiendo de los pies por minuto (FPM) del aterrizaje, puede generar desde un clásico aplauso de alivio hasta quejas audibles."
+        },
+        "music": {
+          "brief": "Música de embarque y desembarque",
+          "deep": "Habilita la reproducción de una lista musical de fondo durante todo el proceso de embarque y desembarque, deteniéndose automáticamente cuando el capitán ordena armar las puertas. Ideal para establecer el clima de la aerolínea (desde música clásica relajante hasta synth-pop retro)."
+        },
+        "speed": {
+          "brief": "Reporte de velocidad en km/h",
+          "deep": "Define el sistema de unidades que utilizará la Inteligencia Artificial cuando deba mencionar la velocidad a los pasajeros (por ejemplo, en el reporte de mitad de vuelo). Si está activo, el capitán anunciará la velocidad en kilómetros por hora (km/h). Si está apagado, utilizará millas por hora (mph)."
+        }
+      },
+      "events": {
+        "narrator_label": "NARRADOR:",
+        "narrator_captain": "Capitán",
+        "narrator_crew": "Tripulación",
+        "mode_off": "Apagado",
+        "mode_pack": "Package",
+        "mode_ia": "Generación IA",
+        "tooltip_no_package": "Debes seleccionar un Package activo para habilitar la opción PACK",
+        "group_immersion": "Inmersión (7)",
+        "group_taxi": "Rodaje (5)",
+        "group_cruise": "Crucero (7)",
+        "group_descent": "Descenso (6)",
+        "group_taxitogate": "Rodaje a Puerta (3)",
+        "group_atgate": "Plataforma (2)",
+        "group_transversal": "Transversales (2)"
+      },
+      "boarding": {
+        "group_label": "Embarque (3)",
+        "gate_crew_start_soon": "Anuncio en la terminal indicando que el proceso de embarque comenzará en breve.",
+        "gate_crew_started": "Aviso oficial del inicio del abordaje por grupos o zonas.",
+        "common_crew_boarding": "Mensajes rutinarios emitidos dentro de la cabina mientras los pasajeros buscan sus asientos y guardan el equipaje."
+      },
+      "preflight": {
+        "group_label": "Pre-Vuelo (5)",
+        "crew_welcome": "Mensaje inicial de bienvenida a bordo una vez que el flujo principal de pasajeros se ha estabilizado.",
+        "capt_welcome": "Saludo inicial oficial desde la cabina de mando.",
+        "capt_delay": "Explicación sobre posibles demoras por tráfico ATC o carga (anuncio condicional).",
+        "capt_basic_info": "Resumen operativo detallando la altitud, tiempo en ruta y meteorología esperada.",
+        "crew_basic_info": "Complemento informativo repasando normas generales o disponibilidad de servicios."
+      },
+      "phases": {
+        "no_iniciado": "No iniciado",
+        "boarding": "Embarque",
+        "preflight": "Pre-vuelo",
+        "taxi": "Rodaje",
+        "cruise": "Crucero",
+        "descent": "Descenso",
+        "taxitogate": "Rodaje a Puerta",
+        "atgate": "Plataforma"
+      },
+      "boarding_display": {
+        "monitor_title": "MSFS GATE MONITOR",
+        "boarding_open": "EMBARQUE ABIERTO",
+        "departing_to": "SALIENDO HACIA:",
+        "flight": "VUELO:",
+        "status": "ESTADO:",
+        "boarding": "EMBARCANDO",
+        "boarding_closed": "EMBARQUE CERRADO",
+        "on_time_ready": "A TIEMPO / LISTO",
+        "weather_in": "CLIMA EN",
+        "fair": "DESPEJADO:",
+        "wind": "VIENTO:",
+        "estimated_departure": "SALIDA ESTIMADA:",
+        "eta_in": "ETA EN ",
+        "passengers": "PASAJEROS:"
+      },
+      "taxi": {
+        "group_label": "Rodaje (5)",
+        "capt_armdoors": "Orden estricta a la tripulación para armar toboganes y verificar puertas cerradas (Cross-check).",
+        "crew_safety_brief": "Ejecución de la demostración de seguridad (manual o por pantallas).",
+        "capt_dimlights": "Orden a la tripulación para reducir la iluminación general (típicamente en vuelos nocturnos).",
+        "crew_dimlights": "Aviso a los pasajeros sobre la atenuación de luces para el despegue.",
+        "capt_prepare": "Orden ejecutiva indicando a los tripulantes que tomen sus lugares para el despegue inminente."
+      },
+      "cruise": {
+        "group_label": "Crucero (7)",
+        "crew_upcoming_service": "Aviso sobre los servicios a bordo que se ofrecerán, emitido generalmente al superar los 10.000 pies.",
+        "capt_general_info": "Actualización a mitad del vuelo sobre el progreso, puntos de interés geográficos o cambios en la ruta.",
+        "crew_service_info1": "Inicio del servicio primario de comidas o bebidas.",
+        "crew_service_info2": "Segundo pase en cabina (recolección de bandejas, oferta de té/café).",
+        "crew_shopping_info": "Promoción de la venta a bordo (Duty Free).",
+        "crew_customs_forms": "Aviso sobre la distribución de los formularios de migraciones y aduanas para vuelos internacionales.",
+        "crew_service_info3": "Tercer servicio ocasional, típicamente un desayuno o snack en vuelos de largo radio antes del descenso."
+      },
+      "descent": {
+        "capt_close_desc": "Aviso previo informando que el avión está a punto de abandonar la altitud de crucero (Top of Descent).",
+        "capt_upcoming_actions": "Detalles finales sobre la pista de aterrizaje, terminal asignada y clima local en destino.",
+        "crew_upcoming_actions": "Solicitud a los pasajeros de guardar mesas, enderezar respaldos y prepararse para la llegada.",
+        "capt_10kfeet": "Señal acústica o verbal al cruzar 10.000 pies hacia abajo, indicando el inicio de la cabina estéril.",
+        "crew_landing_fewmin": "Chequeo final de cabina y confirmación de que el aterrizaje ocurrirá en breves minutos.",
+        "capt_take_seats": "Orden perentoria a la tripulación de ocupar sus transportines para el aterrizaje."
+      },
+      "taxitogate": {
+        "crew_welcome": "Anuncio protocolar dando la bienvenida oficial al destino y confirmando la hora local.",
+        "crew_ramining_seating": "Recordatorio preventivo para que nadie se levante antes de que se apague la señal correspondiente.",
+        "crew_delay_apologies": "Mensaje para gestionar la impaciencia si la puerta de desembarque está ocupada y hay demoras en plataforma (condicional)."
+      },
+      "atgate": {
+        "capt_disarm_doors": "Orden ejecutiva para desarmar los toboganes de evacuación una vez detenidos por completo.",
+        "crew_deboarding": "Instrucciones finales sobre el flujo de salida, despedida y recordatorio sobre objetos personales."
+      },
+      "transversal": {
+        "capt_seatbelt": "Cambio de estado de la señal lumínica de cinturones (se dispara en cualquier momento por turbulencia).",
+        "crew_seatbelt": "Refuerzo verbal exigiendo que todos vuelvan a sus asientos inmediatamente tras el aviso del capitán."
+      },
+      "event_config": {
+        "title": "Configurar Eventos",
+        "description": "Selecciona el tipo de anunciador para cada evento regulado que ocurrirá durante el vuelo:"
+      },
+      "package_box": {
+        "active_label": "Package Activo:",
+        "no_package": "-- Sin Package (Desactivar PACK) --",
+        "manage_btn": "[ Administrar ]"
+      }
+    }
   },
   "config": {
     "tab_generales": "Generales",

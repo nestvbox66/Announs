@@ -4,6 +4,7 @@
  */
 
 import React from "react";
+import { useTranslation } from "react-i18next";
 // @ts-ignore
 import logoImg from "./Announs Logo.png";
 import { 
@@ -35,14 +36,15 @@ export default function Sidebar({
   copilotVolume,
   isLoggedIn = false
 }: SidebarProps) {
+  const { t } = useTranslation();
   const menuItems = isLoggedIn 
     ? [
-        { id: "hub", label: "Hub del Usuario", icon: User },
-        { id: "vuelo", label: "Vuelo Actual", icon: Plane },
-        { id: "config", label: "Configuración", icon: Settings },
+        { id: "hub", label: t("sidebar.hub"), icon: User },
+        { id: "vuelo", label: t("sidebar.vuelo"), icon: Plane },
+        { id: "config", label: t("sidebar.config"), icon: Settings },
       ]
     : [
-        { id: "hub", label: "Hub del Usuario", icon: User },
+        { id: "hub", label: t("sidebar.hub"), icon: User },
       ];
 
   return (
