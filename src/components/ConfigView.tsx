@@ -63,13 +63,13 @@ const FREQUENCIES = ["31Hz", "62Hz", "125Hz", "250Hz", "500Hz", "1kHz", "2kHz", 
 
 interface EventGroup {
   id: string;
-  label: string;
+  labelKey: string;
 }
 
 interface EventDefinition {
   key: string;
-  narrator: "Capitán" | "Tripulación";
-  desc: string;
+  narratorKey: string;
+  descKey: string;
   phaseId: string;
 }
 
@@ -181,6 +181,52 @@ export default function ConfigView({
         setPfIrregularGroundSpeed(true);
         setPfAccelerationGroundSpeed(true);
         setPfDelayFeedback(true);
+        setPlayChimeBeforeAnn(true);
+        setPlayAmbientDuringFlight(true);
+        setCrewGreetingGate(true);
+        setPassengerReactionPlanesMovement(true);
+        setPassengerReactionLanding(true);
+        setPlayBoardingMusic(true);
+        setSongBoardingMusic("");
+        setSpeedKph(true);
+      }
+
+      // Load announcements from setting_announcements
+      const { data: annData, error: annError } = await supabase
+        .from("setting_announcements")
+        .select("*")
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      if (cancelled || annError) return;
+
+      if (annData) {
+        const annPayload: Record<string, "off" | "pack" | "IA"> = {};
+        const dbKeys = [
+          "gate_crew_start_soon", "gate_crew_started", "common_crew_boarding",
+          "preflight_crew_welcome", "preflight_capt_welcome", "preflight_capt_delay",
+          "preflight_capt_basic_info", "preflight_crew_basic_info", "taxi_capt_armdoors",
+          "taxi_crew_safety_brief", "taxi_capt_dimlights", "taxi_crew_dimlights",
+          "takeoff_capt_prepare", "climb_crew_upcoming_service", "cruise_capt_general_info",
+          "cruise_crew_service_info1", "cruise_crew_service_info2", "cruise_crew_shopping_info",
+          "cruise_crew_customs_forms", "cruise_crew_service_info3", "descent_capt_close_desc",
+          "descent_capt_upcoming_actions", "descent_crew_upcoming_actions", "descent_capt_10kfeet",
+          "descent_crew_landing_fewmin", "final_capt_take_seats", "taxitogate_crew_welcome",
+          "taxitogate_crew_ramining_seating", "taxitogate_crew_delay_apologies",
+          "atgate_capt_disarm_doors", "atgate_crew_deboarding", "common_capt_seatbelt",
+          "common_crew_seatbelt"
+        ];
+        for (const key of dbKeys) {
+          if ((annData as any)[key] != null) {
+            annPayload[key] = (annData as any)[key] as "off" | "pack" | "IA";
+          }
+        }
+        if (Object.keys(annPayload).length > 0) {
+          setEventConfig(prev => ({ ...prev, ...annPayload }));
+        }
+        if (annData.announcement_flavor != null) {
+          setAnnouncementFlavor(annData.announcement_flavor);
+        }
       }
     };
 
@@ -368,7 +414,7 @@ export default function ConfigView({
     return localStorage.getItem("cfg_play_boarding_music") !== "false"; // default true
   });
   const [songBoardingMusic, setSongBoardingMusic] = useState<string>(() => {
-    return localStorage.getItem("cfg_song_boarding_music") || "Vivaldi Concert VIII";
+    return localStorage.getItem("cfg_song_boarding_music") || "";
   });
   const [speedKph, setSpeedKph] = useState<boolean>(() => {
     return localStorage.getItem("cfg_speed_kph") !== "false"; // default true
@@ -432,34 +478,37 @@ export default function ConfigView({
     return localStorage.getItem("cfg_selected_package") || "aerolineas";
   });
   const [activeGroupTab, setActiveGroupTab] = useState<string>("immersion");
+  const [announcementFlavor, setAnnouncementFlavor] = useState<"operative" | "cultural" | "scenic" | "casual">(() => {
+    return (localStorage.getItem("cfg_announcement_flavor") as any) || "operative";
+  });
   const [eventConfig, setEventConfig] = useState<Record<string, "off" | "pack" | "IA">>(() => {
     const raw = localStorage.getItem("cfg_event_config");
     if (raw) return JSON.parse(raw);
     return {
-      gate_crew_start_soon: "off",
+      gate_crew_start_soon: "IA",
       gate_crew_started: "IA",
       common_crew_boarding: "IA",
       preflight_crew_welcome: "IA",
       preflight_capt_welcome: "IA",
       preflight_capt_delay: "IA",
       preflight_capt_basic_info: "IA",
-      preflight_crew_basic_info: "off",
+      preflight_crew_basic_info: "IA",
       taxi_capt_armdoors: "IA",
       taxi_crew_safety_brief: "IA",
-      taxi_capt_dimlights: "off",
-      taxi_crew_dimlights: "off",
+      taxi_capt_dimlights: "IA",
+      taxi_crew_dimlights: "IA",
       takeoff_capt_prepare: "IA",
       climb_crew_upcoming_service: "IA",
       cruise_capt_general_info: "IA",
       cruise_crew_service_info1: "IA",
-      cruise_crew_service_info2: "off",
-      cruise_crew_shopping_info: "off",
-      cruise_crew_customs_forms: "off",
-      cruise_crew_service_info3: "off",
+      cruise_crew_service_info2: "IA",
+      cruise_crew_shopping_info: "IA",
+      cruise_crew_customs_forms: "IA",
+      cruise_crew_service_info3: "IA",
       descent_capt_close_desc: "IA",
       descent_capt_upcoming_actions: "IA",
       descent_crew_upcoming_actions: "IA",
-      descent_capt_10kfeet: "off",
+      descent_capt_10kfeet: "IA",
       descent_crew_landing_fewmin: "IA",
       final_capt_take_seats: "IA",
       taxitogate_crew_welcome: "IA",
@@ -519,6 +568,7 @@ export default function ConfigView({
     // Eventos
     localStorage.setItem("cfg_selected_package", selectedPackage);
     localStorage.setItem("cfg_event_config", JSON.stringify(eventConfig));
+    localStorage.setItem("cfg_announcement_flavor", announcementFlavor);
 
     // Despachar actualizaciones a componentes padres si estuvieran definidas
     onAudioUpdate({
@@ -572,13 +622,61 @@ export default function ConfigView({
             irregular_ground_speed: pfIrregularGroundSpeed,
             acceleration_ground_speed: pfAccelerationGroundSpeed,
             delay_feedback: pfDelayFeedback,
+            play_chime_sound_before_ann: playChimeBeforeAnn,
+            play_ambient_sound_during_flight: playAmbientDuringFlight,
+            crew_greeting_passengers_at_gate: crewGreetingGate,
+            passenger_reaction_to_planes_movement: passengerReactionPlanesMovement,
+            play_passenger_reaction_during_landing: passengerReactionLanding,
+            play_boarding_music: playBoardingMusic,
+            song_boarding_music: songBoardingMusic,
+            speed_kph: speedKph,
           };
 
-          const { error } = await supabase
-            .from("setting_general")
-            .upsert(upsertPayload, { onConflict: "user_id" });
+          const upsertAnnouncementsPayload: Record<string, any> = {
+            user_id: userId,
+            gate_crew_start_soon: eventConfig.gate_crew_start_soon,
+            gate_crew_started: eventConfig.gate_crew_started,
+            common_crew_boarding: eventConfig.common_crew_boarding,
+            preflight_crew_welcome: eventConfig.preflight_crew_welcome,
+            preflight_capt_welcome: eventConfig.preflight_capt_welcome,
+            preflight_capt_delay: eventConfig.preflight_capt_delay,
+            preflight_capt_basic_info: eventConfig.preflight_capt_basic_info,
+            preflight_crew_basic_info: eventConfig.preflight_crew_basic_info,
+            taxi_capt_armdoors: eventConfig.taxi_capt_armdoors,
+            taxi_crew_safety_brief: eventConfig.taxi_crew_safety_brief,
+            taxi_capt_dimlights: eventConfig.taxi_capt_dimlights,
+            taxi_crew_dimlights: eventConfig.taxi_crew_dimlights,
+            takeoff_capt_prepare: eventConfig.takeoff_capt_prepare,
+            climb_crew_upcoming_service: eventConfig.climb_crew_upcoming_service,
+            cruise_capt_general_info: eventConfig.cruise_capt_general_info,
+            cruise_crew_service_info1: eventConfig.cruise_crew_service_info1,
+            cruise_crew_service_info2: eventConfig.cruise_crew_service_info2,
+            cruise_crew_shopping_info: eventConfig.cruise_crew_shopping_info,
+            cruise_crew_customs_forms: eventConfig.cruise_crew_customs_forms,
+            cruise_crew_service_info3: eventConfig.cruise_crew_service_info3,
+            descent_capt_close_desc: eventConfig.descent_capt_close_desc,
+            descent_capt_upcoming_actions: eventConfig.descent_capt_upcoming_actions,
+            descent_crew_upcoming_actions: eventConfig.descent_crew_upcoming_actions,
+            descent_capt_10kfeet: eventConfig.descent_capt_10kfeet,
+            descent_crew_landing_fewmin: eventConfig.descent_crew_landing_fewmin,
+            final_capt_take_seats: eventConfig.final_capt_take_seats,
+            taxitogate_crew_welcome: eventConfig.taxitogate_crew_welcome,
+            taxitogate_crew_ramining_seating: eventConfig.taxitogate_crew_ramining_seating,
+            taxitogate_crew_delay_apologies: eventConfig.taxitogate_crew_delay_apologies,
+            atgate_capt_disarm_doors: eventConfig.atgate_capt_disarm_doors,
+            atgate_crew_deboarding: eventConfig.atgate_crew_deboarding,
+            common_capt_seatbelt: eventConfig.common_capt_seatbelt,
+            common_crew_seatbelt: eventConfig.common_crew_seatbelt,
+            announcement_flavor: announcementFlavor,
+          };
 
-          if (error) throw error;
+          const [genResult, annResult] = await Promise.all([
+            supabase.from("setting_general").upsert(upsertPayload, { onConflict: "user_id" }),
+            supabase.from("setting_announcements").upsert(upsertAnnouncementsPayload, { onConflict: "user_id" })
+          ]);
+
+          if (genResult.error) throw genResult.error;
+          if (annResult.error) throw annResult.error;
         } catch (err) {
           console.error("Supabase save error:", err);
           setToastNotification("⚠️ Error al guardar en la nube. Los cambios locales están seguros.");
@@ -619,111 +717,112 @@ export default function ConfigView({
   };
 
   // ==================== DEFINICIÓN DE EVENTOS (PREESTABLECIDAS) ====================
+  const getGroupCount = (id: string): number => {
+    if (id === "immersion") return immersionOptions.length;
+    return eventDefinitionList.filter(e => e.phaseId === id).length;
+  };
+
   const eventGroups: EventGroup[] = [
-    { id: "immersion", label: "Inmersión (8)" },
-    { id: "fase1", label: "Embarque (3)" },
-    { id: "fase2", label: "Pre-Vuelo (5)" },
-    { id: "fase3", label: "Rodaje (5)" },
-    { id: "fase4", label: "Crucero (7)" },
-    { id: "fase5", label: "Descenso (6)" },
-    { id: "fase6", label: "Rodaje a Puerta (3)" },
-    { id: "fase7", label: "Plataforma (2)" },
-    { id: "transversal", label: "Transversales (2)" }
+    { id: "immersion", labelKey: "config.events.groups.immersion" },
+    { id: "fase1", labelKey: "config.events.groups.fase1" },
+    { id: "fase3", labelKey: "config.events.groups.fase3" },
+    { id: "fase4", labelKey: "config.events.groups.fase4" },
+    { id: "fase5", labelKey: "config.events.groups.fase5" },
+    { id: "fase6", labelKey: "config.events.groups.fase6" },
+    { id: "transversal", labelKey: "config.events.groups.transversal" }
   ];
 
   const immersionOptions = [
     {
       key: "play_chime_sound_before_ann",
-      brief: "Tono de aviso de cabina",
-      deep: "Reproduce el timbre tradicional justo antes de los comunicados de voz.",
+      briefKey: "config.immersion_chime_brief",
+      deepKey: "config.immersion_chime_deep",
       setter: setPlayChimeBeforeAnn,
       getter: playChimeBeforeAnn
     },
     {
       key: "play_ambient_sound_during_flight",
-      brief: "Sonido ambiente en vuelo",
-      deep: "Activa zumbido de fondo y murmullos continuos en la cabina.",
+      briefKey: "config.immersion_ambient_brief",
+      deepKey: "config.immersion_ambient_deep",
       setter: setPlayAmbientDuringFlight,
       getter: playAmbientDuringFlight
     },
     {
       key: "crew_greeting_passengers_at_gate",
-      brief: "Saludos en puerta por tripulación",
-      deep: "Habilita que los asistentes de cabina saluden en la bienvenida física.",
+      briefKey: "config.immersion_greeting_brief",
+      deepKey: "config.immersion_greeting_deep",
       setter: setCrewGreetingGate,
       getter: crewGreetingGate
     },
     {
       key: "passenger_reaction_to_planes_movement",
-      brief: "Reacciones a fuerzas de aceleración",
-      deep: "Habilita exclamaciones u jadeos grupales bajo Gs abruptas o frenadas severas.",
+      briefKey: "config.immersion_reaction_brief",
+      deepKey: "config.immersion_reaction_deep",
       setter: setPassengerReactionPlanesMovement,
       getter: passengerReactionPlanesMovement
     },
     {
       key: "play_passenger_reaction_during_landing",
-      brief: "Reacciones audibles al tocar pista / touchdown",
-      deep: "Activa aplausos o quejas en el impacto según los pies por minuto en el toque.",
+      briefKey: "config.immersion_landing_brief",
+      deepKey: "config.immersion_landing_deep",
       setter: setPassengerReactionLanding,
       getter: passengerReactionLanding
     },
     {
       key: "play_boarding_music",
-      brief: "Música ambiental d'Embarque/Desembarque",
-      deep: "Música de fondo activa únicamente en rampa de acceso o con las puertas abiertas.",
+      briefKey: "config.immersion_music_brief",
+      deepKey: "config.immersion_music_deep",
       setter: setPlayBoardingMusic,
       getter: playBoardingMusic
     },
     {
       key: "speed_kph",
-      brief: "Unidad métrica en Km/h",
-      deep: "Cambia la mención oficial de velocidades del capitán de millas por hora a Km/h.",
+      briefKey: "config.immersion_speed_brief",
+      deepKey: "config.immersion_speed_deep",
       setter: setSpeedKph,
       getter: speedKph
     }
   ];
 
   const eventDefinitionList: EventDefinition[] = [
-    { key: "gate_crew_start_soon", narrator: "Tripulación", desc: "Anuncio en terminal informando el inicio inminente del abordaje.", phaseId: "fase1" },
-    { key: "gate_crew_started", narrator: "Tripulación", desc: "Aviso de abordaje en curso invitando a acomodar grupos o zonas.", phaseId: "fase1" },
-    { key: "common_crew_boarding", narrator: "Tripulación", desc: "Instrucciones de pasillo y acomodación del equipaje de cabina.", phaseId: "fase1" },
+    { key: "gate_crew_start_soon", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.gate_crew_start_soon", phaseId: "fase1" },
+    { key: "gate_crew_started", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.gate_crew_started", phaseId: "fase1" },
+    { key: "common_crew_boarding", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.common_crew_boarding", phaseId: "fase1" },
+    { key: "preflight_crew_welcome", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.preflight_crew_welcome", phaseId: "fase1" },
+    { key: "preflight_capt_welcome", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.preflight_capt_welcome", phaseId: "fase1" },
+    { key: "preflight_capt_delay", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.preflight_capt_delay", phaseId: "fase1" },
+    { key: "preflight_capt_basic_info", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.preflight_capt_basic_info", phaseId: "fase1" },
+    { key: "preflight_crew_basic_info", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.preflight_crew_basic_info", phaseId: "fase1" },
     
-    { key: "preflight_crew_welcome", narrator: "Tripulación", desc: "Mensaje cordial de tripulante dándole la bienvenida oficial tras el ingreso.", phaseId: "fase2" },
-    { key: "preflight_capt_welcome", narrator: "Capitán", desc: "Saludo principal del Comandante desde el puesto técnico de control.", phaseId: "fase2" },
-    { key: "preflight_capt_delay", narrator: "Capitán", desc: "Explicación de demora ATC por flujos, aerovías o autorizaciones.", phaseId: "fase2" },
-    { key: "preflight_capt_basic_info", narrator: "Capitán", desc: "Datos operativos generales (tiempo estimado de crucero, plan y niveles).", phaseId: "fase2" },
-    { key: "preflight_crew_basic_info", narrator: "Tripulación", desc: "Datos y servicios disponibles en el tramo programado.", phaseId: "fase2" },
+    { key: "taxi_capt_armdoors", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.taxi_capt_armdoors", phaseId: "fase3" },
+    { key: "taxi_crew_safety_brief", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.taxi_crew_safety_brief", phaseId: "fase3" },
+    { key: "taxi_capt_dimlights", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.taxi_capt_dimlights", phaseId: "fase3" },
+    { key: "taxi_crew_dimlights", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.taxi_crew_dimlights", phaseId: "fase3" },
+    { key: "takeoff_capt_prepare", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.takeoff_capt_prepare", phaseId: "fase3" },
     
-    { key: "taxi_capt_armdoors", narrator: "Capitán", desc: "Instrucción formal de cierre y armado de toboganes de evacuación (cross-check).", phaseId: "fase3" },
-    { key: "taxi_crew_safety_brief", narrator: "Tripulación", desc: "Demostración de procedimientos y salidas de emergencia en cabina.", phaseId: "fase3" },
-    { key: "taxi_capt_dimlights", narrator: "Capitán", desc: "Señal de luces bajas de cabina a la tripulación para el despegue.", phaseId: "fase3" },
-    { key: "taxi_crew_dimlights", narrator: "Tripulación", desc: "Advertencia a pasajeros sobre el oscurecimiento acústico nocturno en cabina.", phaseId: "fase3" },
-    { key: "takeoff_capt_prepare", narrator: "Capitán", desc: "Aviso perentorio de tomar asientos inminentes para el ascenso primario.", phaseId: "fase3" },
+    { key: "climb_crew_upcoming_service", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.climb_crew_upcoming_service", phaseId: "fase4" },
+    { key: "cruise_capt_general_info", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.cruise_capt_general_info", phaseId: "fase4" },
+    { key: "cruise_crew_service_info1", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.cruise_crew_service_info1", phaseId: "fase4" },
+    { key: "cruise_crew_service_info2", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.cruise_crew_service_info2", phaseId: "fase4" },
+    { key: "cruise_crew_shopping_info", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.cruise_crew_shopping_info", phaseId: "fase4" },
+    { key: "cruise_crew_customs_forms", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.cruise_crew_customs_forms", phaseId: "fase4" },
+    { key: "cruise_crew_service_info3", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.cruise_crew_service_info3", phaseId: "fase4" },
     
-    { key: "climb_crew_upcoming_service", narrator: "Tripulación", desc: "Aviso de liberación y detalles de menúes al superar los diez mil pies.", phaseId: "fase4" },
-    { key: "cruise_capt_general_info", narrator: "Capitán", desc: "Actualización a mitad sobre hitos, clima en destino y travesía.", phaseId: "fase4" },
-    { key: "cruise_crew_service_info1", narrator: "Tripulación", desc: "Apertura del carrito de comidas calientes o refrigerios.", phaseId: "fase4" },
-    { key: "cruise_crew_service_info2", narrator: "Tripulación", desc: "Recogida de residuos y ronda secundaria de bebidas.", phaseId: "fase4" },
-    { key: "cruise_crew_shopping_info", narrator: "Tripulación", desc: "Anuncio de catálogo de compras o productos libres de impuestos (Duty Free).", phaseId: "fase4" },
-    { key: "cruise_crew_customs_forms", narrator: "Tripulación", desc: "Reparto de aduana e internacional migratorio.", phaseId: "fase4" },
-    { key: "cruise_crew_service_info3", narrator: "Tripulación", desc: "Pre-snack o tentempié antes de culminar la altitud superior.", phaseId: "fase4" },
+    { key: "descent_capt_close_desc", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.descent_capt_close_desc", phaseId: "fase5" },
+    { key: "descent_capt_upcoming_actions", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.descent_capt_upcoming_actions", phaseId: "fase5" },
+    { key: "descent_crew_upcoming_actions", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.descent_crew_upcoming_actions", phaseId: "fase5" },
+    { key: "descent_capt_10kfeet", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.descent_capt_10kfeet", phaseId: "fase5" },
+    { key: "descent_crew_landing_fewmin", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.descent_crew_landing_fewmin", phaseId: "fase5" },
+    { key: "final_capt_take_seats", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.final_capt_take_seats", phaseId: "fase5" },
     
-    { key: "descent_capt_close_desc", narrator: "Capitán", desc: "Primer anuncio de descenso abandonando altitud asignada del crucero.", phaseId: "fase5" },
-    { key: "descent_capt_upcoming_actions", narrator: "Capitán", desc: "Altitud, pista en destino, clima local y estimación final.", phaseId: "fase5" },
-    { key: "descent_crew_upcoming_actions", narrator: "Tripulación", desc: "Ajuste de cinturones, guardar bandejas y trabar asientos.", phaseId: "fase5" },
-    { key: "descent_capt_10kfeet", narrator: "Capitán", desc: "Señal estéril a asistentes de cabina para cese de servicios.", phaseId: "fase5" },
-    { key: "descent_crew_landing_fewmin", narrator: "Tripulación", desc: "Comprobación final visual de equipajes y preparación al suelo.", phaseId: "fase5" },
-    { key: "final_capt_take_seats", narrator: "Capitán", desc: "Comando verbal exigiendo tomar transportines para tocar tierra.", phaseId: "fase5" },
+    { key: "taxitogate_crew_welcome", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.taxitogate_crew_welcome", phaseId: "fase6" },
+    { key: "taxitogate_crew_ramining_seating", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.taxitogate_crew_ramining_seating", phaseId: "fase6" },
+    { key: "taxitogate_crew_delay_apologies", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.taxitogate_crew_delay_apologies", phaseId: "fase6" },
+    { key: "atgate_capt_disarm_doors", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.atgate_capt_disarm_doors", phaseId: "fase6" },
+    { key: "atgate_crew_deboarding", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.atgate_crew_deboarding", phaseId: "fase6" },
     
-    { key: "taxitogate_crew_welcome", narrator: "Tripulación", desc: "Bienvenida cordial al destino, facilitando hora y temperatura.", phaseId: "fase6" },
-    { key: "taxitogate_crew_ramining_seating", narrator: "Tripulación", desc: "Firme retención de pasajeros sentados hasta el apagado del aviso.", phaseId: "fase6" },
-    { key: "taxitogate_crew_delay_apologies", narrator: "Tripulación", desc: "Disculpas si hay filas excesivas en plataforma o esperas de remolque.", phaseId: "fase6" },
-    
-    { key: "atgate_capt_disarm_doors", narrator: "Capitán", desc: "Orden formal a los tripulantes para desarmar toboganes.", phaseId: "fase7" },
-    { key: "atgate_crew_deboarding", narrator: "Tripulación", desc: "Despedida final regulada e instrucciones de salida.", phaseId: "fase7" },
-    
-    { key: "common_capt_seatbelt", narrator: "Capitán", desc: "Señal auditiva de cinturones manual por baches o cambios.", phaseId: "transversal" },
-    { key: "common_crew_seatbelt", narrator: "Tripulación", desc: "Exigencia verbal de acatar el ajuste lumínico de seguridad.", phaseId: "transversal" }
+    { key: "common_capt_seatbelt", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.common_capt_seatbelt", phaseId: "transversal" },
+    { key: "common_crew_seatbelt", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.common_crew_seatbelt", phaseId: "transversal" }
   ];
 
   const getFilteredEvents = (): EventDefinition[] => {
@@ -786,7 +885,7 @@ export default function ConfigView({
               : "text-white/60 hover:text-white hover:bg-white/5"
           }`}
         >
-          📢 Configurar Eventos (Matriz Inteligente)
+          📢 {t("config.tab_eventos")}
         </button>
         <button
           onClick={() => setActiveTab("packages")}
@@ -796,7 +895,7 @@ export default function ConfigView({
               : "text-white/60 hover:text-white hover:bg-white/5"
           }`}
         >
-          📦 Packages
+          📦 {t("config.tab_packages")}
         </button>
         <button
           onClick={() => setActiveTab("voces")}
@@ -806,7 +905,7 @@ export default function ConfigView({
               : "text-white/60 hover:text-white hover:bg-white/5"
           }`}
         >
-          🗣️ Voces
+          🗣️ {t("config.tab_voces")}
         </button>
       </div>
 
@@ -1249,20 +1348,20 @@ export default function ConfigView({
               <div className="flex items-center gap-2">
                 <Radio className="w-5 h-5 text-[#45AFFF] animate-pulse" />
                 <h3 className="font-display font-bold text-base text-[#45AFFF] uppercase tracking-wider font-black">
-                  Configurar Eventos Inteligentes de Cabina
+                  {t("config.eventos_title")}
                 </h3>
               </div>
 
               {/* Package selector mimicking Flight screen */}
               <div id="cfg-package-selector" className="flex items-center gap-3 bg-black/30 border border-white/10 rounded-[5px] px-3 py-1.5 shrink-0 max-w-full overflow-x-auto">
-                <label className="text-[9px] font-mono font-bold text-white/55 uppercase tracking-wider whitespace-nowrap">Package Activo:</label>
+                <label className="text-[9px] font-mono font-bold text-white/55 uppercase tracking-wider whitespace-nowrap">{t("config.package_active_label")}</label>
                 <select
                   id="package-select"
                   value={selectedPackage}
                   onChange={(e) => setSelectedPackage(e.target.value)}
                   className="bg-black/55 border border-[#3B7EB2]/45 text-xs text-white font-mono font-bold rounded-[3px] px-2 py-0.5 focus:outline-none cursor-pointer hover:border-[#45AFFF] transition-colors"
                 >
-                  <option value="">-- Sin Package (Desactivar PACK) --</option>
+                  <option value="">{t("config.package_no_package")}</option>
                   <option value="aerolineas">Aerolíneas Argentinas AR Pack</option>
                   <option value="latam">LATAM Real Voice Pack v2</option>
                   <option value="iberia">Iberia Premium Audio</option>
@@ -1273,7 +1372,7 @@ export default function ConfigView({
             </div>
 
             <p className="text-xs text-white/80 font-mono leading-relaxed">
-              Selecciona las preferencias de aviso para cada etapa del vuelo. Habilita locuciones IA para mayor detalle de trayecto.
+              {t("config.eventos_desc")}
             </p>
 
             {/* Event Category Tabs matching flight screen */}
@@ -1289,7 +1388,7 @@ export default function ConfigView({
                       : "text-white/60 hover:text-white hover:bg-white/5"
                   }`}
                 >
-                  {group.label}
+                  {t(group.labelKey)} ({getGroupCount(group.id)})
                 </button>
               ))}
             </div>
@@ -1309,11 +1408,11 @@ export default function ConfigView({
                         <div className="space-y-1.5 flex-1 min-w-0 pr-1 font-mono">
                           <div className="flex items-center gap-2">
                             <span className="text-[12.5px] font-sans font-bold text-white leading-normal tracking-wide">
-                              {item.brief}
+                              {t(item.briefKey)}
                             </span>
                           </div>
                           <span className="text-[10px] text-white/45 block max-w-sm leading-relaxed">
-                            {item.deep}
+                            {t(item.deepKey)}
                           </span>
                         </div>
 
@@ -1328,7 +1427,7 @@ export default function ConfigView({
                                 : "text-white/30 border-transparent hover:text-white/60"
                             }`}
                           >
-                            Sí
+                            {t("config.events.yes")}
                           </button>
                           <button
                             type="button"
@@ -1339,7 +1438,7 @@ export default function ConfigView({
                                 : "text-white/30 border-transparent hover:text-white/60"
                             }`}
                           >
-                            No
+                            {t("config.events.no")}
                           </button>
                         </div>
                       </div>
@@ -1348,7 +1447,7 @@ export default function ConfigView({
                       {item.key === "play_boarding_music" && item.getter && (
                         <div className="border-t border-white/5 pt-3 mt-1 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
                           <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">
-                            PISTA DE EMBARQUE SELECCIONADA:
+                            {t("config.immersion_music_label")}
                           </span>
                           <select 
                             className="bg-[#00172e] border border-[#3B7EB2]/50 text-white rounded-[4px] px-2.5 py-1 text-xs font-mono focus:outline-none w-full sm:w-auto min-w-[200px]"
@@ -1377,14 +1476,14 @@ export default function ConfigView({
                       className="bg-[#002440]/45 hover:bg-[#002440]/75 border border-[#3B7EB2]/20 hover:border-[#3B7EB2]/40 p-4 rounded-[6px] flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-all font-mono"
                     >
                       <div className="space-y-1 my-1 flex-1 min-w-0 pr-1">
-                        <span className="text-[12.5px] font-sans font-medium text-white/95 leading-normal block">
-                          {item.desc}
-                        </span>
-                        {/* Narrator Display below description */}
-                        <div className="flex items-center gap-1.5 text-[9px] uppercase font-mono tracking-wider text-white/50 mt-1.5">
-                          <span className={`w-1.5 h-1.5 rounded-full ${item.narrator === "Capitán" ? "bg-[#e68b00]" : "bg-[#45AFFF]"}`}></span>
-                          <span>NARRADOR: <strong className={item.narrator === "Capitán" ? "text-[#ffb340]" : "text-[#45AFFF]"}>{item.narrator}</strong></span>
-                        </div>
+                          <span className="text-[12.5px] font-sans font-medium text-white/95 leading-normal block">
+                            {t(item.descKey)}
+                          </span>
+                          {/* Narrator Display below description */}
+                          <div className="flex items-center gap-1.5 text-[9px] uppercase font-mono tracking-wider text-white/50 mt-1.5">
+                            <span className={`w-1.5 h-1.5 rounded-full ${item.narratorKey === "config.events.narrator_captain" ? "bg-[#e68b00]" : "bg-[#45AFFF]"}`}></span>
+                            <span>{t("config.events.narrator_label")} <strong className={item.narratorKey === "config.events.narrator_captain" ? "text-[#ffb340]" : "text-[#45AFFF]"}>{t(item.narratorKey)}</strong></span>
+                          </div>
                       </div>
 
                       {/* Selector Mode Pill */}
@@ -1404,12 +1503,12 @@ export default function ConfigView({
                               type="button"
                               disabled={isPackModeDisabled}
                               onClick={() => handleEventConfigChange(item.key, mode)}
-                              title={isPackModeDisabled ? "Debes seleccionar un Package activo para habilitar la opción PACK" : ""}
+                              title={isPackModeDisabled ? t("config.events.tooltip_no_package") : ""}
                               className={`px-1.5 py-1 rounded-[3px] font-mono uppercase tracking-wider border cursor-pointer transition-all flex-1 text-center ${activeStyle} ${
                                 isPackModeDisabled ? "opacity-25 cursor-not-allowed hover:text-white/20" : ""
                               }`}
                             >
-                              {mode}
+                              {mode === "off" ? t("config.events.mode_off_label") : mode === "pack" ? t("config.events.mode_pack_label") : t("config.events.mode_ia_label")}
                             </button>
                           );
                         })}
