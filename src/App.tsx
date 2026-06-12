@@ -178,21 +178,23 @@ export default function App() {
   };
 
   // SimBrief Dynamic dispatch import simulation
-  const handleTriggerBriefImport = () => {
-    // Generate a beautiful loader feedback
-    alert("Iniciando conexión con SimBrief API... Descargando último plan OFP generado.");
-    setSimBrief({
-      username: "capitán_msfs2024",
-      nombrePiloto: "N. Sassano",
-      vueloCodigo: "AR1842",
-      origen: "SABE",
-      destino: "SACO",
-      aerolinea: "Aerolíneas Argentinas",
-      avion: "Boeing 737-800 NG",
-      cruisingAltitude: "FL320 (32,000 pies)",
-      blockTime: "75 minutos",
-      pasajerosCount: 142
-    });
+  const handleTriggerBriefImport = (realData?: any) => {
+    if (realData) {
+      setSimBrief(realData);
+    } else {
+      setSimBrief({
+        username: "capitán_msfs2024",
+        nombrePiloto: "N. Sassano",
+        vueloCodigo: "AR1842",
+        origen: "SABE",
+        destino: "SACO",
+        aerolinea: "Aerolíneas Argentinas",
+        avion: "Boeing 737-800 NG",
+        cruisingAltitude: "FL320 (32,000 pies)",
+        blockTime: "75 minutos",
+        pasajerosCount: 142
+      });
+    }
     // Trigger achievement "Primer Oficial de SimBrief"
     setLogros(prev => prev.map(l => l.id === "l-4" ? { ...l, unlocked: true, fechaDesbloqueo: "05 Jun 2026" } : l));
   };
@@ -287,6 +289,7 @@ export default function App() {
             onLandingFpmChange={setLandingFpm}
             onResetSimulation={handleResetSimulation}
             onTriggerBriefImport={handleTriggerBriefImport}
+            onNavigateToAccount={() => setCurrentView("hub")}
           />
         )}
 

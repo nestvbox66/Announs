@@ -94,8 +94,26 @@
       "title": "Vuelo Actual: No iniciado",
       "settings_title": "Ajustes del Vuelo",
       "import_btn": "Importar desde SimBrief",
+      "no_simbrief_id_msg": "Configure su SimBrief ID para comenzar",
       "import_tooltip": "Crea y genera el plan de vuelo en SimBrief e impórtalo en Announce para comenzar de forma automatizada. El simulador detectará tu última sesión y cargará la información operativa de inmediato.",
+      "errors": {
+        "simbrief_no_plan": "No se encontró un plan de vuelo activo. Asegúrese de generar el vuelo en SimBrief antes de importar.",
+        "simbrief_generic_error": "Error al conectar con SimBrief."
+      },
       "load_btn": "Cargar Vuelo",
+      "start_flight_btn": "Siguiente",
+      "starting_flight_btn": "Iniciando...",
+      "reimport_btn": "Volver a importar",
+      "flight_settings": {
+        "start_flight_btn": "Iniciar Vuelo"
+      },
+      "header": {
+        "airline_and_flight": "AEROLÍNEA Y VUELO",
+        "origin": "ORIGEN",
+        "destination": "DESTINO",
+        "aircraft": "AVIÓN COMERCIAL:",
+        "passengers": "PASAJEROS:"
+      },
       "immersion": {
         "details_header": "Detalles de Inmersión",
         "def_label": "Def:",
@@ -138,7 +156,7 @@
         "narrator_crew": "Tripulación",
         "mode_off": "Apagado",
         "mode_pack": "Package",
-        "mode_ia": "Generación IA",
+        "mode_ia": "IA",
         "tooltip_no_package": "Debes seleccionar un Package activo para habilitar la opción PACK",
         "group_immersion": "Inmersión (7)",
         "group_taxi": "Rodaje (5)",
@@ -315,7 +333,7 @@
       "narrator_crew": "Tripulación",
       "mode_off_label": "Apagado",
       "mode_pack_label": "Package",
-      "mode_ia_label": "Generación IA",
+      "mode_ia_label": "IA",
       "tooltip_no_package": "Debes seleccionar un Package activo para habilitar la opción PACK",
       "flavor_operative": "Operativo",
       "flavor_cultural": "Cultural",

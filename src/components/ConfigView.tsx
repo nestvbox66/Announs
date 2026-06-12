@@ -1487,7 +1487,7 @@ export default function ConfigView({
                       </div>
 
                       {/* Selector Mode Pill */}
-                      <div className="flex bg-black/60 border border-white/15 rounded-[4px] p-0.5 shrink-0 h-fit max-w-[150px] w-full justify-between">
+                      <div className="flex bg-black/60 border border-white/15 rounded-[4px] overflow-hidden shrink-0 h-fit w-[165px]">
                         {(["off", "pack", "IA"] as const).map((mode) => {
                           const isSelected = currentValue === mode;
                           const isPackModeDisabled = mode === "pack" && !selectedPackage;

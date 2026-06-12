@@ -94,8 +94,26 @@
       "title": "Current Flight: Not started",
       "settings_title": "Flight Settings",
       "import_btn": "Import from SimBrief",
+      "no_simbrief_id_msg": "Configure your SimBrief ID to start",
       "import_tooltip": "Create and generate the flight plan in SimBrief and import it into Announce to start in an automated way. The simulator will detect your last session and load the operational information immediately.",
+      "errors": {
+        "simbrief_no_plan": "No active flight plan found. Make sure to generate the flight in SimBrief before importing.",
+        "simbrief_generic_error": "Error connecting to SimBrief."
+      },
       "load_btn": "Load Flight",
+      "start_flight_btn": "Next",
+      "starting_flight_btn": "Starting...",
+      "reimport_btn": "Re-import",
+      "flight_settings": {
+        "start_flight_btn": "Start Flight"
+      },
+      "header": {
+        "airline_and_flight": "AIRLINE AND FLIGHT",
+        "origin": "ORIGIN",
+        "destination": "DESTINATION",
+        "aircraft": "COMMERCIAL AIRCRAFT:",
+        "passengers": "PASSENGERS:"
+      },
       "immersion": {
         "details_header": "Immersion Details",
         "def_label": "Def:",
@@ -138,7 +156,7 @@
         "narrator_crew": "Crew",
         "mode_off": "Off",
         "mode_pack": "Pack",
-        "mode_ia": "AI Generation",
+        "mode_ia": "IA",
         "tooltip_no_package": "You must select an active Package to enable the PACK option",
         "group_immersion": "Immersion (7)",
         "group_taxi": "Taxi (5)",
@@ -315,7 +333,7 @@
       "narrator_crew": "Crew",
       "mode_off_label": "Off",
       "mode_pack_label": "Pack",
-      "mode_ia_label": "AI Generation",
+      "mode_ia_label": "IA",
       "tooltip_no_package": "You must select an active Package to enable the PACK option",
       "flavor_operative": "Operative",
       "flavor_cultural": "Cultural",

@@ -61,7 +61,8 @@ interface VueloActualViewProps {
   landingFpm: number;
   onLandingFpmChange: (fpm: number) => void;
   onResetSimulation: () => void;
-  onTriggerBriefImport: () => void;
+  onTriggerBriefImport: (realData?: any) => void;
+  onNavigateToAccount?: () => void;
 }
 
 function ToggleSwitch({ 
@@ -105,7 +106,8 @@ export default function VueloActualView({
   landingFpm,
   onLandingFpmChange,
   onResetSimulation,
-  onTriggerBriefImport
+  onTriggerBriefImport,
+  onNavigateToAccount
 }: VueloActualViewProps) {
   const { t } = useTranslation();
   const [flightCode, setFlightCode] = useState(simBriefData.vueloCodigo);
@@ -135,6 +137,8 @@ export default function VueloActualView({
   
   // --- FLIGHT SETTINGS SCREEN STATES ---
   const [isFlightSettingsOpen, setIsFlightSettingsOpen] = useState<boolean>(false);
+  const [flightId, setFlightId] = useState<string | null>(null);
+  const [isStartingFlight, setIsStartingFlight] = useState<boolean>(false);
 
   // Block 1: Tripulación e Identificación
   const [captainVoice, setCaptainVoice] = useState<string>("Alejandro (Voz IA)");
@@ -287,6 +291,10 @@ export default function VueloActualView({
   });
 
   const [userId, setUserId] = useState<string | null>(null);
+  const [simbriefId, setSimbriefId] = useState<string | null>(null);
+  const [isFetchingSimbrief, setIsFetchingSimbrief] = useState<boolean>(false);
+  const [simbriefRawData, setSimbriefRawData] = useState<any>(null);
+  const [simbriefError, setSimbriefError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -294,6 +302,15 @@ export default function VueloActualView({
       const { data: { user }, error: authErr } = await supabase.auth.getUser();
       if (cancelled || authErr || !user) return;
       setUserId(user.id);
+
+      const { data: userData, error: userErr } = await supabase
+        .from("users")
+        .select("simbrief_pilot_id")
+        .eq("id", user.id)
+        .maybeSingle();
+      if (!cancelled && !userErr && userData?.simbrief_pilot_id) {
+        setSimbriefId(userData.simbrief_pilot_id);
+      }
 
       const [genResult, annResult] = await Promise.all([
         supabase.from("setting_general").select("*").eq("user_id", user.id).maybeSingle(),
@@ -505,6 +522,193 @@ export default function VueloActualView({
       ...prev,
       [key]: value
     }));
+  };
+
+  const handleStartFlight = async () => {
+    setIsStartingFlight(true);
+    try {
+      const annEventKeys = [
+        "gate_crew_start_soon", "gate_crew_started", "common_crew_boarding",
+        "preflight_crew_welcome", "preflight_capt_welcome", "preflight_capt_delay",
+        "preflight_capt_basic_info", "preflight_crew_basic_info", "taxi_capt_armdoors",
+        "taxi_crew_safety_brief", "taxi_capt_dimlights", "taxi_crew_dimlights",
+        "takeoff_capt_prepare", "climb_crew_upcoming_service", "cruise_capt_general_info",
+        "cruise_crew_service_info1", "cruise_crew_service_info2", "cruise_crew_shopping_info",
+        "cruise_crew_customs_forms", "cruise_crew_service_info3", "descent_capt_close_desc",
+        "descent_capt_upcoming_actions", "descent_crew_upcoming_actions", "descent_capt_10kfeet",
+        "descent_crew_landing_fewmin", "final_capt_take_seats", "taxitogate_crew_welcome",
+        "taxitogate_crew_ramining_seating", "taxitogate_crew_delay_apologies",
+        "atgate_capt_disarm_doors", "atgate_crew_deboarding", "common_capt_seatbelt",
+        "common_crew_seatbelt"
+      ];
+      const annPayload: Record<string, any> = { flight_id: flightId, user_id: userId };
+      for (const key of annEventKeys) {
+        annPayload[key] = eventConfig[key] || "off";
+      }
+      const flavorMapRev: Record<number, string> = { 1: "operative", 2: "cultural", 3: "scenic", 4: "casual" };
+      annPayload.announcement_flavor = flavorMapRev[communicationStyle] || "operative";
+      annPayload.packages_location = selectedPackage || "aerolineas";
+
+      if (flightId) {
+        const { error: annError } = await supabase
+          .from("flight_setting_announcements")
+          .insert(annPayload);
+        if (annError) throw new Error(annError.message);
+      }
+
+      const { error: flightError } = await supabase
+        .from("flights")
+        .update({ flight_status: "started" })
+        .eq("id", flightId);
+      if (flightError) throw new Error(flightError.message);
+
+      setIsFlightSettingsOpen(false);
+      onStateChange(FlightState.PreEmbarque);
+    } catch (err: any) {
+      console.error("Error al iniciar vuelo:", err);
+    } finally {
+      setIsStartingFlight(false);
+    }
+  };
+
+  const handleImportSimbrief = async () => {
+    setIsFetchingSimbrief(true);
+    setSimbriefError(null);
+    setSimbriefRawData(null);
+    try {
+      const response = await fetch(`https://www.simbrief.com/api/xml.fetcher.php?userid=${simbriefId}&json=1`);
+      if (response.status === 400) {
+        throw new Error("simbrief_no_plan");
+      } else if (!response.ok) {
+        throw new Error("simbrief_generic_error");
+      }
+      const data = await response.json();
+      setSimbriefRawData(data);
+
+      const userId = (await supabase.auth.getUser()).data.user?.id;
+      if (!userId) throw new Error("User not authenticated");
+
+      const gen = data.general || {};
+      const origin = data.origin || {};
+      const dest = data.destination || {};
+      const alt = data.alternate || {};
+      const ac = data.aircraft || {};
+      const w = data.weights || {};
+      const times = data.times || {};
+
+      const defaultServices = {
+        Catering: true,
+        Entertainment: true,
+        Retail: false,
+        Procedures: true,
+      };
+
+      function parseTimestamp(ts: any): Date | null {
+        if (!ts) return null;
+        if (typeof ts === "number") return new Date(ts * 1000);
+        if (typeof ts === "string") {
+          const n = Number(ts);
+          if (!isNaN(n)) return new Date(n * 1000);
+          const d = new Date(ts);
+          if (!isNaN(d.getTime())) return d;
+        }
+        return null;
+      }
+
+      const schedOutDate = parseTimestamp(gen.sched_out);
+      const schedInDate = parseTimestamp(gen.sched_in);
+
+      function fmtDate(d: Date | null): string | null {
+        if (!d) return null;
+        return d.toISOString().slice(0, 10);
+      }
+      function fmtTime(d: Date | null): string | null {
+        if (!d) return null;
+        return d.toISOString().slice(11, 19);
+      }
+
+      const flightRow = {
+        user_id: userId,
+        saved_flight: `${gen.icao_airline || ""}${gen.flight_number || ""}` || gen.flight_number || "",
+        airlane_icao: gen.icao_airline || "",
+        flight_number: gen.flight_number || "",
+        atc_callsign: gen.callsign || "",
+        depart_icao: origin.icao_code || "",
+        arrive_icao: dest.icao_code || "",
+        alternate_icao: alt.icao_code || "",
+        aircraft_type: ac.icaocode || "",
+        variant_airframe: "",
+        departure_date: fmtDate(schedOutDate),
+        departure_time: fmtTime(schedOutDate),
+        arrival_time: fmtTime(schedInDate),
+        air_time: String(Math.round(parseFloat(times.est_time_enroute || "0") * 60)) || "",
+        block_time: String(Math.round(parseFloat(times.est_block || "0") * 60)) || "",
+        airframe: ac.reg || ac.name || "",
+        cost_index: gen.costindex || "",
+        passengers_count: w.pax_count ? parseInt(w.pax_count) : 0,
+        crew_count: 2,
+        flight_status: "pending",
+        flight_services_config: defaultServices,
+        simbrief_snapshot: data,
+      };
+
+      let currentFlightId: string | null = null;
+
+      const { data: existingFlight } = await supabase
+        .from("flights")
+        .select("id")
+        .eq("user_id", userId)
+        .eq("flight_status", "pending")
+        .maybeSingle();
+
+      if (existingFlight?.id) {
+        const { error: updateError } = await supabase
+          .from("flights")
+          .update(flightRow)
+          .eq("id", existingFlight.id);
+        if (updateError) throw new Error(updateError.message);
+        currentFlightId = existingFlight.id;
+      } else {
+        const { data: insertedFlight, error: insertError } = await supabase
+          .from("flights")
+          .insert(flightRow)
+          .select("id")
+          .single();
+        if (insertError) throw new Error(insertError.message);
+        currentFlightId = insertedFlight?.id || null;
+      }
+
+      if (currentFlightId) setFlightId(currentFlightId);
+
+      setFlightCode(gen.flight_number || "");
+      setOriginICAO(origin.icao_code || "");
+      setDestICAO(dest.icao_code || "");
+      setAirline(gen.icao_airline || "");
+      const initialRoute = getRouteDetails(origin.icao_code || "", dest.icao_code || "");
+      setOriginCityName(initialRoute.orgCity);
+      setDestCityName(initialRoute.destCity);
+
+      const mappedSimbriefData = {
+        username: data.general?.pilot_id ? `pilot_${data.general.pilot_id}` : "capitán_msfs2024",
+        nombrePiloto: data.general?.captain || "N. Sassano",
+        vueloCodigo: data.general?.flight_number || "",
+        origen: data.origin?.icao_code || "",
+        destino: data.destination?.icao_code || "",
+        aerolinea: data.general?.icao_airline || data.general?.airline || "",
+        avion: data.aircraft?.name || "",
+        cruisingAltitude: data.general?.route_altitude || "",
+        blockTime: data.times?.est_block ? `${Math.round(parseFloat(data.times.est_block) * 60)} minutos` : "",
+        pasajerosCount: parseInt(String(data.weights?.pax_count || "0"), 10),
+      };
+
+      onTriggerBriefImport(mappedSimbriefData);
+      setIsBriefImported(true);
+      setCanStartFlight(true);
+    } catch (err: any) {
+      setSimbriefError(err?.message || "Error desconocido al conectar con SimBrief");
+    } finally {
+      setIsFetchingSimbrief(false);
+    }
   };
 
   const eventGroups = useMemo(() => [
@@ -1026,25 +1230,33 @@ export default function VueloActualView({
           </div>
           {/* Action Buttons inside header for instant usability */}
           {!isFlightSettingsOpen && (
+            <div className="flex flex-col gap-2">
             <div className="flex flex-wrap items-center gap-3">
               {/* Tooltip Wrapper for Import button */}
+              {simbriefId ? (
+              <>
               <div className="relative group inline-block">
                 <button
                   id="btn-import-simbrief-header"
                   type="button"
-                  onClick={() => {
-                    onTriggerBriefImport();
-                    setIsBriefImported(true);
-                    setCanStartFlight(true);
-                  }}
-                  className={`px-5 py-2.5 rounded-[5px] text-xs font-mono font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer hover:scale-[1.01] active:scale-[0.99] ${
+                  onClick={handleImportSimbrief}
+                  disabled={isFetchingSimbrief}
+                  className={`px-5 py-2.5 rounded-[5px] text-xs font-mono font-bold flex items-center justify-center gap-1.5 transition-all ${
+                    isFetchingSimbrief
+                      ? "opacity-50 cursor-not-allowed"
+                      : "cursor-pointer hover:scale-[1.01] active:scale-[0.99]"
+                  } ${
                     !isBriefImported
                       ? "bg-[#43E600]/10 hover:bg-[#43E600]/20 text-[#43E600] border border-[#43E600] shadow-[0_0_15px_rgba(67,230,0,0.25)]"
                       : "bg-[#45AFFF]/15 hover:bg-[#45AFFF]/30 text-[#45AFFF] border border-[#45AFFF]/40 shadow"
                   }`}
                 >
-                  <Download className="w-4 h-4" />
-                  {t("current_flight.not_started.import_btn")}
+                  {isFetchingSimbrief ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Download className="w-4 h-4" />
+                  )}
+                  {isFetchingSimbrief ? "Importando..." : t("current_flight.not_started.import_btn")}
                 </button>
                 {/* Tooltip Popup */}
                 <div className="absolute right-0 top-full mt-2 hidden group-hover:block w-72 p-3 bg-[#00172e] border border-[#3B7EB2] text-white text-xs rounded shadow-2xl z-50 animate-fadeIn pointer-events-none">
@@ -1052,15 +1264,24 @@ export default function VueloActualView({
                     {t("current_flight.not_started.import_tooltip")}
                   </p>
                   {/* Arrow pointing up */}
-                  <div className="absolute bottom-full right-10 w-0 h-0 border-l-4 border-l-transparent border-r-4 border-r-transparent border-b-4 border-b-[#3B7EB2]"></div>
                 </div>
               </div>
+              </>
+              ) : (
+              <button
+                type="button"
+                onClick={onNavigateToAccount}
+                className="px-5 py-2.5 rounded-[5px] text-xs font-mono font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer hover:scale-[1.01] active:scale-[0.99] bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/40 shadow-[0_0_15px_rgba(251,191,36,0.15)]"
+              >
+                <AlertTriangle className="w-4 h-4" />
+                {t("current_flight.not_started.no_simbrief_id_msg")}
+              </button>
+              )}
 
               <button 
                 id="btn-cargar-vuelo-header"
                 type="button"
                 onClick={() => {
-                  alert("Restaurando estado del simulador... Se cargó la sesión anterior de pasajeros.");
                   setCanStartFlight(true);
                   onStateChange(FlightState.EnVuelo);
                 }}
@@ -1070,19 +1291,25 @@ export default function VueloActualView({
                 {t("current_flight.not_started.load_btn")}
               </button>
             </div>
+            {simbriefError && (
+              <div className="w-full text-center text-red-500 text-sm font-semibold">
+                {t(`current_flight.not_started.errors.${simbriefError}`, { defaultValue: simbriefError })}
+              </div>
+            )}
+            </div>
           )}
         </div>
       ) : (
         <div className="bg-[#001d35]/75 border border-[#3B7EB2]/40 rounded-[5px] p-5 shadow-xl animate-fadeIn flex flex-col md:flex-row items-stretch md:items-center justify-between gap-5 w-full">
           {/* Horizontal route details */}
-          <div className="flex flex-col sm:flex-row flex-wrap items-center gap-6 flex-1 w-full md:w-auto">
+          <div className="flex flex-col sm:flex-row flex-wrap items-start gap-6 flex-1 w-full md:w-auto">
             {/* Airline & Flight */}
             <div className="flex flex-col text-center sm:text-left shrink-0">
               <span className="text-[9px] font-mono font-extrabold tracking-widest text-[#45AFFF]/80 uppercase">
-                AEROLÍNEA Y VUELO
+                {t("current_flight.not_started.header.airline_and_flight")}
               </span>
               <span className="text-sm font-sans font-black text-white mt-1 uppercase">
-                {airline || "Aerolínea Real"} • <span className="text-[#43E600]">{flightCode}</span>
+                {simbriefRawData?.general?.icao_airline || ""}{simbriefRawData?.general?.flight_number || ""}
               </span>
             </div>
 
@@ -1091,12 +1318,11 @@ export default function VueloActualView({
             {/* Origin */}
             <div className="flex flex-col text-center sm:text-left">
               <span className="text-[9px] font-mono font-extrabold tracking-widest text-[#45AFFF]/80 uppercase">
-                ORIGEN
+                {t("current_flight.not_started.header.origin")}
               </span>
               <span className="text-sm font-sans font-black text-white mt-1 uppercase flex flex-col justify-center sm:justify-start">
-                <span className="text-white">{originICAO}</span>
-                <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{routeDetails.orgCity}, {routeDetails.orgCountry}</span>
-                <span className="text-[10px] text-white/40 font-mono font-normal normal-case mt-0.5">({routeDetails.orgName})</span>
+                <span className="text-white">{simbriefRawData?.origin?.icao_code}</span>
+                <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{simbriefRawData?.origin?.plan_city ? simbriefRawData.origin.plan_city + ' ' : ''}({simbriefRawData?.origin?.name})</span>
               </span>
             </div>
 
@@ -1108,12 +1334,11 @@ export default function VueloActualView({
             {/* Destination */}
             <div className="flex flex-col text-center sm:text-left">
               <span className="text-[9px] font-mono font-extrabold tracking-widest text-[#45AFFF]/80 uppercase">
-                DESTINO
+                {t("current_flight.not_started.header.destination")}
               </span>
               <span className="text-sm font-sans font-black mt-1 uppercase flex flex-col justify-center sm:justify-start">
-                <span className="text-[#43E600]">{destICAO}</span>
-                <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{routeDetails.destCity}, {routeDetails.destCountry}</span>
-                <span className="text-[10px] text-white/40 font-mono font-normal normal-case mt-0.5">({routeDetails.destName})</span>
+                <span className="text-[#43E600]">{simbriefRawData?.destination?.icao_code}</span>
+                <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{simbriefRawData?.destination?.plan_city ? simbriefRawData.destination.plan_city + ' ' : ''}({simbriefRawData?.destination?.name})</span>
               </span>
             </div>
 
@@ -1122,12 +1347,12 @@ export default function VueloActualView({
             {/* Additional operational details */}
             <div className="grid grid-cols-2 gap-x-5 text-[10px] font-mono text-white/70 flex-1 pl-0 lg:pl-1 mt-1 sm:mt-0 w-full lg:w-auto">
               <div>
-                <span className="text-white/40 block">AVIÓN COMERCIAL:</span>
-                <span className="text-white font-bold">{simBriefData.avion || "Airbus A320"}</span>
+                <span className="text-white/40 block">{t("current_flight.not_started.header.aircraft")}</span>
+                <span className="text-white font-bold text-xl">{simbriefRawData?.aircraft?.name || ""}</span>
               </div>
               <div>
-                <span className="text-white/40 block">PASAJEROS:</span>
-                <span className="text-sm font-sans font-black text-[#43E600]">{simBriefData.pasajerosCount || 142} PAX</span>
+                <span className="text-white/40 block">{t("current_flight.not_started.header.passengers")}</span>
+                <span className="text-sm font-sans font-black text-[#43E600]">{simbriefRawData?.weights?.pax_count || ""} PAX</span>
               </div>
             </div>
           </div>
@@ -1277,14 +1502,14 @@ export default function VueloActualView({
               {canStartFlight && (
                 <div className="bg-[#001d35]/75 border border-[#3B7EB2]/40 rounded-[5px] p-5 shadow-xl flex flex-col md:flex-row items-stretch md:items-center justify-between gap-5 w-full">
                   {/* Horizontal route details */}
-                  <div className="flex flex-col sm:flex-row flex-wrap items-center gap-6 flex-1 w-full md:w-auto">
+                  <div className="flex flex-col sm:flex-row flex-wrap items-start gap-6 flex-1 w-full md:w-auto">
                     {/* Airline & Flight */}
                     <div className="flex flex-col text-center sm:text-left shrink-0">
                       <span className="text-[9px] font-mono font-extrabold tracking-widest text-[#45AFFF]/80 uppercase">
-                        AEROLÍNEA Y VUELO
+                        {t("current_flight.not_started.header.airline_and_flight")}
                       </span>
                       <span className="text-sm font-sans font-black text-white mt-1 uppercase">
-                        {airline || "Aerolínea Real"} • <span className="text-[#43E600]">{flightCode}</span>
+                        {simbriefRawData?.general?.icao_airline || ""}{simbriefRawData?.general?.flight_number || ""}
                       </span>
                     </div>
 
@@ -1293,12 +1518,11 @@ export default function VueloActualView({
                     {/* Origin */}
                     <div className="flex flex-col text-center sm:text-left">
                       <span className="text-[9px] font-mono font-extrabold tracking-widest text-[#45AFFF]/80 uppercase">
-                        ORIGEN
+                        {t("current_flight.not_started.header.origin")}
                       </span>
                       <span className="text-sm font-sans font-black text-white mt-1 uppercase flex flex-col justify-center sm:justify-start">
-                        <span className="text-white">{originICAO}</span>
-                        <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{routeDetails.orgCity}, {routeDetails.orgCountry}</span>
-                        <span className="text-[10px] text-white/40 font-mono font-normal normal-case mt-0.5">({routeDetails.orgName})</span>
+                        <span className="text-white">{simbriefRawData?.origin?.icao_code}</span>
+                        <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{simbriefRawData?.origin?.plan_city ? simbriefRawData.origin.plan_city + ' ' : ''}({simbriefRawData?.origin?.name})</span>
                       </span>
                     </div>
 
@@ -1310,12 +1534,11 @@ export default function VueloActualView({
                     {/* Destination */}
                     <div className="flex flex-col text-center sm:text-left">
                       <span className="text-[9px] font-mono font-extrabold tracking-widest text-[#45AFFF]/80 uppercase">
-                        DESTINO
+                        {t("current_flight.not_started.header.destination")}
                       </span>
                       <span className="text-sm font-sans font-black mt-1 uppercase flex flex-col justify-center sm:justify-start">
-                        <span className="text-[#43E600]">{destICAO}</span>
-                        <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{routeDetails.destCity}, {routeDetails.destCountry}</span>
-                        <span className="text-[10px] text-white/40 font-mono font-normal normal-case mt-0.5">({routeDetails.destName})</span>
+                        <span className="text-[#43E600]">{simbriefRawData?.destination?.icao_code}</span>
+                        <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{simbriefRawData?.destination?.plan_city ? simbriefRawData.destination.plan_city + ' ' : ''}({simbriefRawData?.destination?.name})</span>
                       </span>
                     </div>
 
@@ -1324,12 +1547,12 @@ export default function VueloActualView({
                     {/* Additional operational details */}
                     <div className="grid grid-cols-2 gap-x-5 text-[10px] font-mono text-white/70 flex-1 pl-0 lg:pl-1 mt-1 sm:mt-0 w-full lg:w-auto">
                       <div>
-                        <span className="text-white/40 block">AVIÓN COMERCIAL:</span>
-                        <span className="text-white font-bold">{simBriefData.avion || "Airbus A320"}</span>
+                        <span className="text-white/40 block">{t("current_flight.not_started.header.aircraft")}</span>
+                        <span className="text-white font-bold text-xl">{simbriefRawData?.aircraft?.name || ""}</span>
                       </div>
                       <div>
-                        <span className="text-white/40 block">PASAJEROS:</span>
-                        <span className="text-sm font-sans font-black text-[#43E600]">{simBriefData.pasajerosCount || 142} PAX</span>
+                        <span className="text-white/40 block">{t("current_flight.not_started.header.passengers")}</span>
+                        <span className="text-sm font-sans font-black text-[#43E600]">{simbriefRawData?.weights?.pax_count || ""} PAX</span>
                       </div>
                     </div>
                   </div>
@@ -1346,14 +1569,12 @@ export default function VueloActualView({
 
                     <button
                       type="button"
-                      onClick={() => {
-                        setIsFlightSettingsOpen(false);
-                        onStateChange(FlightState.PreEmbarque);
-                      }}
-                      className="bg-[#43E600] hover:bg-[#3cd000] text-black font-black px-5 py-2 rounded-[5px] text-xs font-mono flex items-center justify-center gap-1.5 transition-all shadow-[0_0_15px_rgba(67,230,0,0.3)] hover:scale-[1.02] active:scale-[0.98] cursor-pointer text-center"
+                      disabled={isStartingFlight}
+                      onClick={handleStartFlight}
+                      className="bg-[#43E600] hover:bg-[#3cd000] disabled:bg-[#43E600]/40 disabled:cursor-not-allowed text-black font-black px-5 py-2 rounded-[5px] text-xs font-mono flex items-center justify-center gap-1.5 transition-all shadow-[0_0_15px_rgba(67,230,0,0.3)] hover:scale-[1.02] active:scale-[0.98] cursor-pointer text-center"
                     >
                       <Play className="w-3.5 h-3.5 fill-black" strokeWidth={3} />
-                      Iniciar
+                      {isStartingFlight ? t("current_flight.not_started.starting_flight_btn") : t("current_flight.not_started.flight_settings.start_flight_btn")}
                     </button>
                   </div>
                 </div>
@@ -1707,14 +1928,14 @@ export default function VueloActualView({
               {canStartFlight && (
             <div className="bg-[#001d35]/75 border border-[#3B7EB2]/40 rounded-[5px] p-5 shadow-xl animate-fadeIn flex flex-col md:flex-row items-stretch md:items-center justify-between gap-5 w-full">
               {/* Horizontal route details */}
-              <div className="flex flex-col sm:flex-row flex-wrap items-center gap-6 flex-1 w-full md:w-auto">
+              <div className="flex flex-col sm:flex-row flex-wrap items-start gap-6 flex-1 w-full md:w-auto">
                 {/* Airline & Flight */}
                 <div className="flex flex-col text-center sm:text-left shrink-0">
                   <span className="text-[9px] font-mono font-extrabold tracking-widest text-[#45AFFF]/80 uppercase">
-                    AEROLÍNEA Y VUELO
+                    {t("current_flight.not_started.header.airline_and_flight")}
                   </span>
                   <span className="text-sm font-sans font-black text-white mt-1 uppercase">
-                    {airline || "Aerolínea Real"} • <span className="text-[#43E600]">{flightCode}</span>
+                    {simbriefRawData?.general?.icao_airline || ""}{simbriefRawData?.general?.flight_number || ""}
                   </span>
                 </div>
 
@@ -1723,12 +1944,11 @@ export default function VueloActualView({
                 {/* Origin */}
                 <div className="flex flex-col text-center sm:text-left">
                   <span className="text-[9px] font-mono font-extrabold tracking-widest text-[#45AFFF]/80 uppercase">
-                    ORIGEN
+                    {t("current_flight.not_started.header.origin")}
                   </span>
                   <span className="text-sm font-sans font-black text-white mt-1 uppercase flex flex-col justify-center sm:justify-start">
-                    <span className="text-white">{originICAO}</span>
-                    <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{routeDetails.orgCity}, {routeDetails.orgCountry}</span>
-                    <span className="text-[10px] text-white/40 font-mono font-normal normal-case mt-0.5">({routeDetails.orgName})</span>
+                    <span className="text-white">{simbriefRawData?.origin?.icao_code}</span>
+                    <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{simbriefRawData?.origin?.plan_city ? simbriefRawData.origin.plan_city + ' ' : ''}({simbriefRawData?.origin?.name})</span>
                   </span>
                 </div>
 
@@ -1740,12 +1960,11 @@ export default function VueloActualView({
                 {/* Destination */}
                 <div className="flex flex-col text-center sm:text-left">
                   <span className="text-[9px] font-mono font-extrabold tracking-widest text-[#45AFFF]/80 uppercase">
-                    DESTINO
+                    {t("current_flight.not_started.header.destination")}
                   </span>
                   <span className="text-sm font-sans font-black mt-1 uppercase flex flex-col justify-center sm:justify-start">
-                    <span className="text-[#43E600]">{destICAO}</span>
-                    <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{routeDetails.destCity}, {routeDetails.destCountry}</span>
-                    <span className="text-[10px] text-white/40 font-mono font-normal normal-case mt-0.5">({routeDetails.destName})</span>
+                    <span className="text-[#43E600]">{simbriefRawData?.destination?.icao_code}</span>
+                    <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{simbriefRawData?.destination?.plan_city ? simbriefRawData.destination.plan_city + ' ' : ''}({simbriefRawData?.destination?.name})</span>
                   </span>
                 </div>
 
@@ -1754,12 +1973,12 @@ export default function VueloActualView({
                 {/* Additional operational details */}
                 <div className="grid grid-cols-2 gap-x-5 text-[10px] font-mono text-white/70 flex-1 pl-0 lg:pl-1 mt-1 sm:mt-0 w-full lg:w-auto">
                   <div>
-                    <span className="text-white/40 block">AVIÓN COMERCIAL:</span>
-                    <span className="text-white font-bold">{simBriefData.avion || "Airbus A320"}</span>
+                    <span className="text-white/40 block">{t("current_flight.not_started.header.aircraft")}</span>
+                    <span className="text-white font-bold text-xl">{simbriefRawData?.aircraft?.name || ""}</span>
                   </div>
                   <div>
-                    <span className="text-white/40 block">PASAJEROS:</span>
-                    <span className="text-sm font-sans font-black text-[#43E600]">{simBriefData.pasajerosCount || 142} PAX</span>
+                    <span className="text-white/40 block">{t("current_flight.not_started.header.passengers")}</span>
+                    <span className="text-sm font-sans font-black text-[#43E600]">{simbriefRawData?.weights?.pax_count || ""} PAX</span>
                   </div>
                 </div>
               </div>
@@ -1775,18 +1994,14 @@ export default function VueloActualView({
                   className="bg-[#43E600] hover:bg-[#3cd000] text-black font-black px-6 py-2.5 rounded-[5px] text-xs font-mono flex items-center justify-center gap-1.5 transition-all shadow-[0_0_15px_rgba(67,230,0,0.3)] hover:scale-[1.02] active:scale-[0.98] cursor-pointer text-center"
                 >
                   <Play className="w-3.5 h-3.5 fill-black" strokeWidth={3} />
-                  Iniciar Vuelo
+                  {t("current_flight.not_started.start_flight_btn")}
                 </button>
                 <button
-                  onClick={() => {
-                    onTriggerBriefImport();
-                    setIsBriefImported(true);
-                    setCanStartFlight(true);
-                  }}
+                  onClick={handleImportSimbrief}
                   className="text-[10px] text-[#45AFFF] hover:underline flex items-center gap-1 cursor-pointer font-mono font-bold"
                 >
                   <Download className="w-3 h-3" />
-                  Volver a importar
+                  {t("current_flight.not_started.reimport_btn")}
                 </button>
               </div>
             </div>
@@ -1946,21 +2161,24 @@ export default function VueloActualView({
                   return (
                     <div 
                       key={item.key} 
-                      className="bg-[#002440]/45 hover:bg-[#002440]/75 border border-[#3B7EB2]/20 hover:border-[#3B7EB2]/40 p-4 rounded-[6px] flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-all"
+                      className="bg-[#002440]/45 hover:bg-[#002440]/75 border border-[#3B7EB2]/20 hover:border-[#3B7EB2]/40 rounded-[6px] min-h-[120px] flex flex-col justify-between w-full h-full p-4 gap-3 transition-all"
                     >
-                      <div className="space-y-1 my-1 flex-1 min-w-0 pr-1">
-                        <span className="text-[12.5px] font-sans font-medium text-white/95 leading-normal block">
-                          {item.descKey ? t(item.descKey) : item.desc}
-                        </span>
-                        {/* Narrator Display below description */}
-                        <div className="flex items-center gap-1.5 text-[10px] uppercase font-mono tracking-wider text-white/50 mt-1.5">
+                      {/* First Row: Description */}
+                      <span className="text-[11.5px] font-sans font-medium text-white/95 leading-snug w-full">
+                        {item.descKey ? t(item.descKey) : item.desc}
+                      </span>
+
+                      {/* Second Row: Narrator + Selector */}
+                      <div className="flex flex-row items-center justify-between w-full mt-auto">
+                        {/* Narrator */}
+                        <div className="text-xs font-medium text-gray-400 truncate shrink min-w-0 mr-2">
                           <span className={`w-1.5 h-1.5 rounded-full ${item.narrator === "Capitán" ? "bg-[#e68b00]" : "bg-[#45AFFF]"}`}></span>
                           <span>{t("current_flight.not_started.events.narrator_label")} <strong className={item.narrator === "Capitán" ? "text-[#ffb340]" : "text-[#45AFFF]"}>{item.narratorKey ? t(item.narratorKey) : t(item.narrator === "Capitán" ? "narrator.captain" : "narrator.crew")}</strong></span>
                         </div>
-                      </div>
 
-                      {/* Selector Mode Pill */}
-                      <div className="flex bg-black/60 border border-white/15 rounded-[4px] p-0.5 shrink-0 h-fit max-w-[150px] w-full justify-between">
+                        {/* Selector Mode Pill */}
+                        <div className="flex-shrink-0">
+                          <div className="flex bg-black/60 border border-white/15 rounded-[4px] overflow-hidden h-fit w-[165px]">
                         {(["off", "pack", "IA"] as const).map((mode) => {
                           const isSelected = currentValue === mode;
                           const isPackModeDisabled = mode === "pack" && !selectedPackage;
@@ -1986,6 +2204,8 @@ export default function VueloActualView({
                           );
                         })}
                       </div>
+                    </div>
+                    </div>
                     </div>
                   );
                 })
@@ -3039,7 +3259,7 @@ export default function VueloActualView({
           flightCode={flightCode}
         />
       )}
-
+      
     </div>
   );
 }
