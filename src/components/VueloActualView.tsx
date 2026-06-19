@@ -6,6 +6,10 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { supabase } from "../lib/supabase";
+import { generateManifest, getRegionFromICAO } from "../engine/PassengerManifest";
+import { getAirportName, formatETA, parseMETAR, getAirportTimezone } from "../utils/airportMapping";
+import { getAirlineName } from "../utils/airlineMapping";
+import { useToast } from "./Toast";
 import { 
   Plane, 
   Download, 
@@ -139,24 +143,96 @@ export default function VueloActualView({
   const [isFlightSettingsOpen, setIsFlightSettingsOpen] = useState<boolean>(false);
   const [flightId, setFlightId] = useState<string | null>(null);
   const [isStartingFlight, setIsStartingFlight] = useState<boolean>(false);
+  const [boardingManifest, setBoardingManifest] = useState<Pasajero[]>([]);
 
   // Block 1: Tripulación e Identificación
-  const [captainVoice, setCaptainVoice] = useState<string>("Alejandro (Voz IA)");
-  const [crewVoice, setCrewVoice] = useState<string>("Sofía (Voz IA)");
-  const [captainLanguage, setCaptainLanguage] = useState<string>("Español (ES)");
-  const [crewLanguage, setCrewLanguage] = useState<string>("Ninguno");
-  const [captainAccent, setCaptainAccent] = useState<string>("Rioplatense (AR)");
-  const [crewAccent, setCrewAccent] = useState<string>("Neutro (LATAM)");
+  const [captainVoice, setCaptainVoice] = useState<string>("93d91fee-541a-46cd-b615-f5d57c05c7d4");
+  const [crewVoice, setCrewVoice] = useState<string>("b9c037ca-6ac7-4b80-b231-34afe3efbccf");
+
+  const LANG_NAMES = ["Español (ES)", "Español (AR)", "Inglés (US)", "Inglés (UK)"];
+  const LANG_NONE = "none";
+
+  const [captainPrimaryLang, setCaptainPrimaryLang] = useState<string>("300a6cfd-bc1f-43e2-bde6-60a3abdccd0f");
+  const [captainSecondaryLang, setCaptainSecondaryLang] = useState<string>(LANG_NONE);
   const [boardingMusicTrack, setBoardingMusicTrack] = useState<string>("Vivaldi Concert VIII");
 
   const [showSecondaryLang, setShowSecondaryLang] = useState<boolean>(false);
+
+  // Alternating bilingual display for GateMonitor (15s cycle)
+  const [showEnglish, setShowEnglish] = useState<boolean>(true);
+  const [labelOpacity, setLabelOpacity] = useState(1);
+
+  // Voice options loaded from DB (no fallback — block UI on failure)
+  interface VoiceOption {
+    id: string;
+    name: string;
+    gender: string;
+  }
+
+  const [availableVoices, setAvailableVoices] = useState<VoiceOption[]>([]);
+  const [voicesReady, setVoicesReady] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [voicesLoading, setVoicesLoading] = useState(false);
+
+  const captainVoiceOptions = availableVoices.filter((v) => v.gender === "M");
+  const crewVoiceOptions = availableVoices.filter((v) => v.gender === "F");
+
+  // Language options loaded from DB (no fallback — block UI on failure)
+  interface LanguageOption {
+    id: string;
+    name: string;
+  }
+
+  const [languageOptions, setLanguageOptions] = useState<LanguageOption[]>([]);
+  const [languagesReady, setLanguagesReady] = useState(false);
+  const [languageError, setLanguageError] = useState<string | null>(null);
+  const [languagesLoading, setLanguagesLoading] = useState(false);
+
+  useEffect(() => {
+      let cancelled = false;
+    (async () => {
+      setLanguagesLoading(true);
+      try {
+        const { data, error } = await supabase.from("languages").select("id, language_name");
+        if (error) throw error;
+        if (cancelled) return;
+        const mapped = (data || []).map((l: any) => ({ id: l.id, name: l.language_name }));
+        if (mapped.length > 0) {
+          setLanguageOptions(mapped);
+          setCaptainPrimaryLang((prev) => (prev === "" || !mapped.find((l) => l.id === prev)) ? mapped[0].id : prev);
+          setCaptainSecondaryLang((prev) => (prev === "" || !mapped.find((l) => l.id === prev)) ? LANG_NONE : prev);
+        }
+        setLanguagesReady(true);
+      } catch (e: any) {
+        if (!cancelled) {
+          setLanguageError(e?.message || "Error al cargar idiomas");
+        }
+      } finally {
+        if (!cancelled) setLanguagesLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const langOptions = languageOptions;
+  const secondaryLangOptions = [{ id: LANG_NONE, name: "Ninguno" }, ...langOptions];
+
+  function getLangName(id: string): string {
+    return langOptions.find((l) => l.id === id)?.name || id;
+  }
+
+  // Whether the user's configured primary language is English
+  const isLangEnglish = (() => {
+    const name = getLangName(captainPrimaryLang).toLowerCase();
+    return name.includes("inglés") || name === "english (us)" || name === "english (uk)";
+  })();
 
   useEffect(() => {
     if (currentState !== FlightState.PreEmbarque) {
       setShowSecondaryLang(false);
       return;
     }
-    const hasSecondary = crewLanguage && crewLanguage !== "Ninguno" && crewLanguage !== captainLanguage;
+    const hasSecondary = captainSecondaryLang !== LANG_NONE && getLangName(captainSecondaryLang) !== getLangName(captainPrimaryLang);
     if (!hasSecondary) {
       setShowSecondaryLang(false);
       return;
@@ -164,10 +240,26 @@ export default function VueloActualView({
 
     const interval = setInterval(() => {
       setShowSecondaryLang((prev) => !prev);
-    }, 30000); // 30 seconds
+    }, 30000);
 
     return () => clearInterval(interval);
-  }, [currentState, captainLanguage, crewLanguage]);
+  }, [currentState, captainPrimaryLang, captainSecondaryLang]);
+
+  // Alternating bilingual display for GateMonitor (15s cycle with fade)
+  React.useEffect(() => {
+    let fadeTimeout: ReturnType<typeof setTimeout>;
+    const interval = setInterval(() => {
+      setLabelOpacity(0);
+      fadeTimeout = setTimeout(() => {
+        setShowEnglish(prev => !prev);
+        setLabelOpacity(1);
+      }, 500);
+    }, 15000);
+    return () => {
+      clearInterval(interval);
+      clearTimeout(fadeTimeout);
+    };
+  }, []);
 
   // Block 2: Eventos Especiales
   const [specialEvents, setSpecialEvents] = useState<string>("");
@@ -295,6 +387,59 @@ export default function VueloActualView({
   const [isFetchingSimbrief, setIsFetchingSimbrief] = useState<boolean>(false);
   const [simbriefRawData, setSimbriefRawData] = useState<any>(null);
   const [simbriefError, setSimbriefError] = useState<string | null>(null);
+
+  // Load voices from DB — two-step query (more robust than FK join)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setVoicesLoading(true);
+      if (!userId) return;
+      try {
+        const { data: userVoices, error: voicesError } = await supabase
+          .from('voices')
+          .select('voicestock_id')
+          .eq('user_id', userId);
+        if (voicesError) throw voicesError;
+        if (cancelled) return;
+
+        const stockIds = (userVoices || []).map((v: any) => v.voicestock_id);
+
+        let mapped: VoiceOption[] = [];
+        if (stockIds.length > 0) {
+          const { data: stockData, error: stockError } = await supabase
+            .from('voices_stock')
+            .select('id, voice_name, voice_gender')
+            .in('id', stockIds);
+          if (stockError) throw stockError;
+          if (cancelled) return;
+          mapped = (stockData || []).map((vs: any) => ({
+            id: vs.id,
+            name: vs.voice_name,
+            gender: vs.voice_gender,
+          }));
+        }
+        if (mapped.length > 0) {
+          setAvailableVoices(mapped);
+          if (!mapped.find((v) => v.id === captainVoice)) {
+            const male = mapped.find((v) => v.gender === "M");
+            if (male) setCaptainVoice(male.id);
+          }
+          if (!mapped.find((v) => v.id === crewVoice)) {
+            const female = mapped.find((v) => v.gender === "F");
+            if (female) setCrewVoice(female.id);
+          }
+        }
+        setVoicesReady(true);
+      } catch (e: any) {
+        if (!cancelled) {
+          setVoiceError(e?.message || "Error al cargar voces");
+        }
+      } finally {
+        if (!cancelled) setVoicesLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [userId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -447,8 +592,8 @@ export default function VueloActualView({
       SASA: { name: "Salta Martín Miguel de Güemes", city: "Salta", country: "Argentina" }
     };
 
-    const orgInfo = airports[o] || { name: `${o} Airport`, city: o, country: "Desconocido" };
-    const destInfo = airports[d] || { name: `${d} Airport`, city: d, country: "Desconocido" };
+    const orgInfo = airports[o] || { name: "", city: getAirportName(o), country: "" };
+    const destInfo = airports[d] || { name: "", city: getAirportName(d), country: "" };
 
     return {
       orgName: orgInfo.name,
@@ -480,16 +625,25 @@ export default function VueloActualView({
     setDestCityName(initialRoute.destCity);
   }, [simBriefData]);
 
+  // Generate passenger manifest when simBriefData or PreEmbarque state is ready
+  React.useEffect(() => {
+    if (simBriefData?.origen && simBriefData?.pasajerosCount > 0) {
+      const manifest = generateManifest(simBriefData.pasajerosCount, simBriefData.origen);
+      setBoardingManifest(manifest);
+    }
+  }, [simBriefData]);
+
   // Phase 1 boarding simulation timer effect
   React.useEffect(() => {
     let intervalId: any = null;
-    if (isBoardingActive && boardedCount < passengers.length) {
+    const targetLength = boardingManifest.length > 0 ? boardingManifest.length : passengers.length;
+    if (isBoardingActive && boardedCount < targetLength) {
       intervalId = setInterval(() => {
         setBoardedCount(prev => {
-          if (prev >= passengers.length) {
+          if (prev >= targetLength) {
             setIsBoardingActive(false);
             clearInterval(intervalId);
-            return passengers.length;
+            return targetLength;
           }
           return prev + 1;
         });
@@ -498,7 +652,7 @@ export default function VueloActualView({
     return () => {
       if (intervalId) clearInterval(intervalId);
     };
-  }, [isBoardingActive, boardedCount, passengers.length]);
+  }, [isBoardingActive, boardedCount, boardingManifest.length, passengers.length]);
 
   // Check when boarding is complete to deactivate active boarding state
   React.useEffect(() => {
@@ -524,7 +678,27 @@ export default function VueloActualView({
     }));
   };
 
+  const { showToast } = useToast();
+
   const handleStartFlight = async () => {
+    // --- Validation ---
+    const errors: string[] = [];
+    const resolvedAirline = getAirlineName(airline);
+    if (!resolvedAirline || !resolvedAirline.trim()) {
+      errors.push("El nombre de la aerolínea no puede estar vacío.");
+    }
+    if (!originCityName || !originCityName.trim()) {
+      errors.push("La ciudad de origen no puede estar vacía.");
+    }
+    if (!destCityName || !destCityName.trim()) {
+      errors.push("La ciudad de destino no puede estar vacía.");
+    }
+    if (errors.length > 0) {
+      showToast(errors.join("\n"), "error");
+      return;
+    }
+    // --------------------
+
     setIsStartingFlight(true);
     try {
       const annEventKeys = [
@@ -650,6 +824,10 @@ export default function VueloActualView({
         flight_status: "pending",
         flight_services_config: defaultServices,
         simbrief_snapshot: data,
+        lang_primary_id: captainPrimaryLang,
+        lang_secondary_id: captainSecondaryLang === LANG_NONE || captainSecondaryLang === "" ? null : captainSecondaryLang,
+        voice_captain_id: captainVoice,
+        voice_crew_id: crewVoice,
       };
 
       let currentFlightId: string | null = null;
@@ -917,8 +1095,53 @@ export default function VueloActualView({
     }
   }, [boardedCount, passengers.length, currentState, currentSubStage]);
 
-  const displayTotalPassengers = 142;
-  const displayBoardedCount = boardedCount === passengers.length ? 142 : Math.round((boardedCount / passengers.length) * 142);
+  const displayTotalPassengers = boardingManifest.length > 0 ? boardingManifest.length : passengers.length;
+  const displayBoardedCount = boardedCount;
+
+  // Compute ETA block minutes from raw SimBrief data
+  const blockMinutes = React.useMemo(() => {
+    if (simbriefRawData?.times?.est_block) {
+      return Math.round(parseFloat(simbriefRawData.times.est_block) * 60);
+    }
+    const match = (simBriefData.blockTime || "").match(/(\d+)/);
+    return match ? parseInt(match[1]) : 75;
+  }, [simbriefRawData, simBriefData]);
+
+  // Compute departure local time from SimBrief sched_out
+  const departureTimeStr = React.useMemo(() => {
+    if (simbriefRawData?.general?.sched_out) {
+      const ts = Number(simbriefRawData.general.sched_out);
+      if (!isNaN(ts)) {
+        const tz = getAirportTimezone(originICAO);
+        return new Intl.DateTimeFormat("es-ES", {
+          hour: "2-digit",
+          minute: "2-digit",
+          timeZone: tz,
+          hour12: false,
+        }).format(new Date(ts * 1000));
+      }
+    }
+    return "12:45";
+  }, [simbriefRawData, originICAO]);
+
+  // Compute flight duration from sta (sched_in) - std (sched_out) in minutes
+  const flightDuration = React.useMemo(() => {
+    const std = simbriefRawData?.general?.sched_out;
+    const sta = simbriefRawData?.general?.sched_in;
+    if (std && sta) {
+      const stdDate = new Date(Number(std) * 1000);
+      const staDate = new Date(Number(sta) * 1000);
+      const diffMs = staDate.getTime() - stdDate.getTime();
+      const totalMinutes = Math.floor(diffMs / 60000);
+      if (totalMinutes > 0 && isFinite(totalMinutes)) return totalMinutes;
+    }
+    return null;
+  }, [simbriefRawData]);
+
+  // Parse METAR from SimBrief destination data
+  const metarData = React.useMemo(() => {
+    return parseMETAR(simbriefRawData?.destination?.metar || "");
+  }, [simbriefRawData]);
 
   // Calculate global passenger statistics
   const avgSatisfaction = Math.round(
@@ -983,7 +1206,7 @@ export default function VueloActualView({
           <button
             id="btn-create-pkg"
             type="button"
-            onClick={() => alert("Simulación de Importación: Elige un archivo ZIP o JSON con el manifest del Sound Pack.")}
+            onClick={() => showToast("Simulación de Importación: Elige un archivo ZIP o JSON con el manifest del Sound Pack.", "info")}
             className="bg-[#43E600] text-black hover:bg-[#34b300] font-mono font-black text-xs px-4 py-2.5 rounded-[5px] transition-all flex items-center gap-2 cursor-pointer shadow-[0_0_15px_rgba(67,230,0,0.4)]"
           >
             + Crear Nuevo Package
@@ -1094,7 +1317,7 @@ export default function VueloActualView({
                         <button
                           type="button"
                           onClick={() => {
-                            alert(`Probando sonido asociado: ${track.file}. Escuchando retroalimentación de altavoz de techo...`);
+                            showToast(`Probando sonido asociado: ${track.file}. Escuchando retroalimentación de altavoz de techo...`, "info");
                           }}
                           className="text-[10px] font-mono px-3 py-1.5 rounded cursor-pointer transition-all uppercase flex items-center gap-1.5 bg-[#002440]/60 text-[#45AFFF] border border-[#3B7EB2]/40 hover:bg-[#45AFFF] hover:text-[#00172e]"
                         >
@@ -1106,7 +1329,7 @@ export default function VueloActualView({
                           onClick={() => {
                             const newName = prompt(`Cambiar archivo asignado a ${track.event}:`, track.file);
                             if (newName) {
-                              alert(`Se ha reasociado el evento '${track.event}' al archivo '${newName}' de forma satisfactoria.`);
+                              showToast(`Se ha reasociado el evento '${track.event}' al archivo '${newName}' de forma satisfactoria.`, "success");
                             }
                           }}
                           className="bg-white/5 text-white/70 hover:bg-white/10 text-[10px] font-mono px-3 py-1.5 rounded border border-white/10 transition-all cursor-pointer"
@@ -1132,7 +1355,7 @@ export default function VueloActualView({
   }
 
   return (
-    <div id="vuelo-actual-container" className="space-y-6">
+      <div id="vuelo-actual-container" className="space-y-6">
       
       {/* 🛡️ DYNAMIC FLIGHT STAGES TIMELINE (Linear Stepper) */}
       {currentState !== FlightState.NoIniciado && (
@@ -1322,7 +1545,7 @@ export default function VueloActualView({
               </span>
               <span className="text-sm font-sans font-black text-white mt-1 uppercase flex flex-col justify-center sm:justify-start">
                 <span className="text-white">{simbriefRawData?.origin?.icao_code}</span>
-                <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{simbriefRawData?.origin?.plan_city ? simbriefRawData.origin.plan_city + ' ' : ''}({simbriefRawData?.origin?.name})</span>
+                <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{getAirportName(simbriefRawData?.origin?.icao_code)}{simbriefRawData?.origin?.name ? ' (' + simbriefRawData.origin.name + ')' : ''}</span>
               </span>
             </div>
 
@@ -1338,7 +1561,7 @@ export default function VueloActualView({
               </span>
               <span className="text-sm font-sans font-black mt-1 uppercase flex flex-col justify-center sm:justify-start">
                 <span className="text-[#43E600]">{simbriefRawData?.destination?.icao_code}</span>
-                <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{simbriefRawData?.destination?.plan_city ? simbriefRawData.destination.plan_city + ' ' : ''}({simbriefRawData?.destination?.name})</span>
+                <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{getAirportName(simbriefRawData?.destination?.icao_code)}{simbriefRawData?.destination?.name ? ' (' + simbriefRawData.destination.name + ')' : ''}</span>
               </span>
             </div>
 
@@ -1522,7 +1745,7 @@ export default function VueloActualView({
                       </span>
                       <span className="text-sm font-sans font-black text-white mt-1 uppercase flex flex-col justify-center sm:justify-start">
                         <span className="text-white">{simbriefRawData?.origin?.icao_code}</span>
-                        <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{simbriefRawData?.origin?.plan_city ? simbriefRawData.origin.plan_city + ' ' : ''}({simbriefRawData?.origin?.name})</span>
+                        <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{getAirportName(simbriefRawData?.origin?.icao_code)}{simbriefRawData?.origin?.name ? ' (' + simbriefRawData.origin.name + ')' : ''}</span>
                       </span>
                     </div>
 
@@ -1538,7 +1761,7 @@ export default function VueloActualView({
                       </span>
                       <span className="text-sm font-sans font-black mt-1 uppercase flex flex-col justify-center sm:justify-start">
                         <span className="text-[#43E600]">{simbriefRawData?.destination?.icao_code}</span>
-                        <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{simbriefRawData?.destination?.plan_city ? simbriefRawData.destination.plan_city + ' ' : ''}({simbriefRawData?.destination?.name})</span>
+                        <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{getAirportName(simbriefRawData?.destination?.icao_code)}{simbriefRawData?.destination?.name ? ' (' + simbriefRawData.destination.name + ')' : ''}</span>
                       </span>
                     </div>
 
@@ -1569,7 +1792,7 @@ export default function VueloActualView({
 
                     <button
                       type="button"
-                      disabled={isStartingFlight}
+                      disabled={isStartingFlight || languagesLoading || voicesLoading || !languagesReady || !!languageError || !voicesReady || !!voiceError}
                       onClick={handleStartFlight}
                       className="bg-[#43E600] hover:bg-[#3cd000] disabled:bg-[#43E600]/40 disabled:cursor-not-allowed text-black font-black px-5 py-2 rounded-[5px] text-xs font-mono flex items-center justify-center gap-1.5 transition-all shadow-[0_0_15px_rgba(67,230,0,0.3)] hover:scale-[1.02] active:scale-[0.98] cursor-pointer text-center"
                     >
@@ -1580,123 +1803,110 @@ export default function VueloActualView({
                 </div>
               )}
 
-              {/* BLOQUE 1: Configuración de Voces, Idiomas, Acentos y Editables */}
+              {/* BLOQUE 1: Tripulación y Cabina */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                
-                {/* Voices Block - occupies 2 columns */}
-                <div className="md:col-span-2 bg-[#00172e]/85 border border-[#3B7EB2]/45 rounded-[8px] p-5 shadow-lg space-y-5">
+
+                {/* Tripulación block - occupies 2 columns */}
+                <div className="md:col-span-2 bg-[#00172e]/85 border border-[#3B7EB2]/45 rounded-[8px] p-5 shadow-lg space-y-6">
                   <div className="flex items-center gap-2 border-b border-white/10 pb-2">
                     <Volume2 className="w-5 h-5 text-[#45AFFF]" />
                     <h3 className="font-display font-bold text-base text-[#45AFFF]">
-                      Tripulación y Cabina
+                      {t("current_flight.not_started.crew.title")}
                     </h3>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-                    
-                    {/* Comandante Column */}
-                    <div className="space-y-4 bg-black/20 p-4 rounded border border-white/5">
-                      <span className="text-[10px] font-mono font-extrabold tracking-widest text-[#43E600] uppercase block border-b border-white/5 pb-1">
-                        Comandante de Vuelo
-                      </span>
-                      
+                  {/* Voice Configuration */}
+                  <div className="space-y-3">
+                    <span className="text-[11px] font-mono font-extrabold tracking-widest text-white/60 uppercase block">
+                      {t("current_flight.not_started.crew.voice_config_title")}
+                    </span>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div>
-                        <label className="block text-[11px] font-mono text-white/70 mb-1">VOZ DEL CAPITÁN:</label>
-                        <select 
+                        <label className="block text-[11px] font-mono text-white/70 mb-1">{t("current_flight.not_started.crew.captain_voice")}</label>
+                        <select
                           value={captainVoice}
                           onChange={(e) => setCaptainVoice(e.target.value)}
                           className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF]"
                         >
-                          <option value="Alejandro (Voz IA)">Alejandro (Voz IA)</option>
-                          <option value="Marcos (Voz IA)">Marcos (Voz IA)</option>
-                          <option value="Gabriel (Voz IA)">Gabriel (Voz IA)</option>
-                          <option value="Carlos (Voz IA)">Carlos (Voz IA)</option>
+                          {voicesLoading ? (
+                            <option value="" disabled>Cargando...</option>
+                          ) : captainVoiceOptions.length === 0 ? (
+                            <option value="" disabled>{voiceError || "Sin voces disponibles"}</option>
+                          ) : (
+                            captainVoiceOptions.map((v) => (
+                              <option key={v.id} value={v.id}>{v.name}</option>
+                            ))
+                          )}
                         </select>
                       </div>
 
                       <div>
-                        <label className="block text-[11px] font-mono text-white/70 mb-1">IDIOMA PRIMARIO:</label>
-                        <select 
-                          value={captainLanguage}
-                          onChange={(e) => setCaptainLanguage(e.target.value)}
-                          className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF]"
-                        >
-                          <option value="Español (ES)">Español (ES)</option>
-                          <option value="Español (AR)">Español (AR)</option>
-                          <option value="Inglés (US)">Inglés (US)</option>
-                          <option value="Inglés (UK)">Inglés (UK)</option>
-                        </select>
-                      </div>
-
-                      <div>
-                        <label className="block text-[11px] font-mono text-white/70 mb-1">ACENTO DEL CAPITÁN:</label>
-                        <select 
-                          value={captainAccent}
-                          onChange={(e) => setCaptainAccent(e.target.value)}
-                          className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF]"
-                        >
-                          <option value="Rioplatense (AR)">Rioplatense (AR)</option>
-                          <option value="Penínsular (ES)">Penínsular (ES)</option>
-                          <option value="Neutro (LATAM)">Neutro (LATAM)</option>
-                          <option value="Castellano standard">Castellano standard</option>
-                          <option value="Americano (US)">Americano (US)</option>
-                          <option value="Británico (UK)">Británico (UK)</option>
-                        </select>
-                      </div>
-                    </div>
-
-                    {/* Tripulación de Cabina Column */}
-                    <div className="space-y-4 bg-black/20 p-4 rounded border border-white/5">
-                      <span className="text-[10px] font-mono font-extrabold tracking-widest text-[#45AFFF] uppercase block border-b border-white/5 pb-1">
-                        Servicio y Cabina (TCP)
-                      </span>
-
-                      <div>
-                        <label className="block text-[11px] font-mono text-white/70 mb-1">VOZ DE TRIPULACIÓN:</label>
-                        <select 
+                        <label className="block text-[11px] font-mono text-white/70 mb-1">{t("current_flight.not_started.crew.cabin_voice")}</label>
+                        <select
                           value={crewVoice}
                           onChange={(e) => setCrewVoice(e.target.value)}
-                          className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none"
-                        >
-                          <option value="Sofía (Voz IA)">Sofía (Voz IA)</option>
-                          <option value="Mariana (Voz IA)">Mariana (Voz IA)</option>
-                          <option value="Camila (Voz IA)">Camila (Voz IA)</option>
-                          <option value="Laura (Voz IA)">Laura (Voz IA)</option>
-                        </select>
-                      </div>
-
-                      <div>
-                        <label className="block text-[11px] font-mono text-white/70 mb-1">IDIOMA SECUNDARIO:</label>
-                        <select 
-                          value={crewLanguage}
-                          onChange={(e) => setCrewLanguage(e.target.value)}
                           className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF]"
                         >
-                          <option value="Ninguno">Ninguno</option>
-                          <option value="Español (ES)">Español (ES)</option>
-                          <option value="Español (AR)">Español (AR)</option>
-                          <option value="Inglés (US)">Inglés (US)</option>
-                          <option value="Inglés (UK)">Inglés (UK)</option>
-                        </select>
-                      </div>
-
-                      <div>
-                        <label className="block text-[11px] font-mono text-white/70 mb-1">ACENTO DE TRIPULACIÓN:</label>
-                        <select 
-                          value={crewAccent}
-                          onChange={(e) => setCrewAccent(e.target.value)}
-                          className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF]"
-                        >
-                          <option value="Rioplatense (AR)">Rioplatense (AR)</option>
-                          <option value="Penínsular (ES)">Penínsular (ES)</option>
-                          <option value="Neutro (LATAM)">Neutro (LATAM)</option>
-                          <option value="Castellano standard">Castellano standard</option>
-                          <option value="Americano (US)">Americano (US)</option>
-                          <option value="Británico (UK)">Británico (UK)</option>
+                          {voicesLoading ? (
+                            <option value="" disabled>Cargando...</option>
+                          ) : crewVoiceOptions.length === 0 ? (
+                            <option value="" disabled>{voiceError || "Sin voces disponibles"}</option>
+                          ) : (
+                            crewVoiceOptions.map((v) => (
+                              <option key={v.id} value={v.id}>{v.name}</option>
+                            ))
+                          )}
                         </select>
                       </div>
                     </div>
+                  </div>
 
+                  {/* Language Configuration */}
+                  <div className="space-y-3">
+                    <span className="text-[11px] font-mono font-extrabold tracking-widest text-white/60 uppercase block">
+                      {t("current_flight.not_started.crew.lang_config_title")}
+                    </span>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-[11px] font-mono text-white/70 mb-1">{t("current_flight.not_started.crew.primary_lang")}</label>
+                        <select
+                          value={captainPrimaryLang}
+                          onChange={(e) => setCaptainPrimaryLang(e.target.value)}
+                          className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF]"
+                        >
+                          {languagesLoading ? (
+                            <option value="" disabled>Cargando...</option>
+                          ) : langOptions.length === 0 ? (
+                            <option value="" disabled>{languageError || "Sin idiomas disponibles"}</option>
+                          ) : (
+                            langOptions.map((lang) => (
+                              <option key={lang.id} value={lang.id}>{lang.name}</option>
+                            ))
+                          )}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-mono text-white/70 mb-1">{t("current_flight.not_started.crew.secondary_lang")}</label>
+                        <select
+                          value={captainSecondaryLang}
+                          onChange={(e) => setCaptainSecondaryLang(e.target.value)}
+                          className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF]"
+                        >
+                          {languagesLoading ? (
+                            <option value="" disabled>Cargando...</option>
+                          ) : secondaryLangOptions.length === 0 ? (
+                            <option value="" disabled>{languageError || "Sin idiomas disponibles"}</option>
+                          ) : (
+                            secondaryLangOptions.map((lang) => (
+                              <option key={lang.id} value={lang.id}>{lang.name}</option>
+                            ))
+                          )}
+                        </select>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
@@ -1706,37 +1916,44 @@ export default function VueloActualView({
                     <div className="flex items-center gap-2 border-b border-white/10 pb-2">
                       <Plane className="w-5 h-5 text-[#45AFFF]" />
                       <h3 className="font-display font-bold text-base text-[#45AFFF]">
-                        Identificaciones
+                        {t("current_flight.not_started.identifications.title")}
                       </h3>
                     </div>
 
                     <div>
-                      <label className="block text-[11px] font-mono text-white/70 mb-1 uppercase">Aerolínea:</label>
-                      <input 
+                      <label className="block text-[11px] font-mono text-white/70 mb-1 uppercase">{t("current_flight.not_started.identifications.airline")}</label>
+                      <input
                         type="text"
-                        value={airline}
+                        value={getAirlineName(airline)}
                         onChange={(e) => setAirline(e.target.value)}
-                        placeholder="P.e: Aerolíneas Argentinas"
+                        placeholder={t("current_flight.not_started.identifications.airline_placeholder")}
                         className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF] placeholder-white/20 font-bold"
                       />
+                      {airline.trim() && (
+                        <span className="block text-[10px] font-mono mt-1.5 px-1">
+                          {getAirlineName(airline) !== airline.trim().toUpperCase()
+                            ? `Aerolínea: ${getAirlineName(airline)}`
+                            : <span className="text-amber-400">Aerolínea no encontrada en base de datos</span>}
+                        </span>
+                      )}
                     </div>
                     <div>
-                      <label className="block text-[11px] font-mono text-white/70 mb-1 uppercase">Ciudad de Origen:</label>
-                      <input 
+                      <label className="block text-[11px] font-mono text-white/70 mb-1 uppercase">{t("current_flight.not_started.identifications.origin_city")}</label>
+                      <input
                         type="text"
                         value={originCityName}
                         onChange={(e) => setOriginCityName(e.target.value)}
-                        placeholder="P.e: Buenos Aires"
+                        placeholder={t("current_flight.not_started.identifications.city_placeholder")}
                         className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF] placeholder-white/20 font-bold"
                       />
                     </div>
                     <div>
-                      <label className="block text-[11px] font-mono text-white/70 mb-1 uppercase">Ciudad de Destino:</label>
-                      <input 
+                      <label className="block text-[11px] font-mono text-white/70 mb-1 uppercase">{t("current_flight.not_started.identifications.dest_city")}</label>
+                      <input
                         type="text"
                         value={destCityName}
                         onChange={(e) => setDestCityName(e.target.value)}
-                        placeholder="P.e: Córdoba"
+                        placeholder={t("current_flight.not_started.identifications.city_placeholder")}
                         className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF] placeholder-white/20 font-bold"
                       />
                     </div>
@@ -1948,7 +2165,7 @@ export default function VueloActualView({
                   </span>
                   <span className="text-sm font-sans font-black text-white mt-1 uppercase flex flex-col justify-center sm:justify-start">
                     <span className="text-white">{simbriefRawData?.origin?.icao_code}</span>
-                    <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{simbriefRawData?.origin?.plan_city ? simbriefRawData.origin.plan_city + ' ' : ''}({simbriefRawData?.origin?.name})</span>
+                    <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{getAirportName(simbriefRawData?.origin?.icao_code)}{simbriefRawData?.origin?.name ? ' (' + simbriefRawData.origin.name + ')' : ''}</span>
                   </span>
                 </div>
 
@@ -1964,7 +2181,7 @@ export default function VueloActualView({
                   </span>
                   <span className="text-sm font-sans font-black mt-1 uppercase flex flex-col justify-center sm:justify-start">
                     <span className="text-[#43E600]">{simbriefRawData?.destination?.icao_code}</span>
-                    <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{simbriefRawData?.destination?.plan_city ? simbriefRawData.destination.plan_city + ' ' : ''}({simbriefRawData?.destination?.name})</span>
+                    <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{getAirportName(simbriefRawData?.destination?.icao_code)}{simbriefRawData?.destination?.name ? ' (' + simbriefRawData.destination.name + ')' : ''}</span>
                   </span>
                 </div>
 
@@ -2234,82 +2451,97 @@ export default function VueloActualView({
                 {/* Fila 1: Cabecera */}
                 <div className="flex justify-between items-center text-[10px] font-mono font-bold tracking-wider border-b border-white/25 pb-2 uppercase text-white/85">
                   <span className="flex items-center gap-1.5">
-                    <span>{t("current_flight.not_started.boarding_display.monitor_title")}</span>
-                    <span className="text-[9px] bg-white/10 px-1.5 py-0.5 rounded text-white/70 font-mono tracking-normal">
-                      {showSecondaryLang ? (crewLanguage || "Ninguno").toUpperCase() : (captainLanguage || "Español (ES)").toUpperCase()}
-                    </span>
+                    <span className="transition-opacity duration-500" style={{ opacity: labelOpacity }} key={showEnglish + "title"}>{showEnglish || isLangEnglish ? "MSFS GATE MONITOR" : t("current_flight.not_started.boarding_display.monitor_title")}</span>
                   </span>
                   <span className="text-[#43E600] flex items-center gap-1.5 font-sans">
                     <span className="w-2 h-2 rounded-full bg-[#43E600] animate-pulse" />
-                    {t("current_flight.not_started.boarding_display.boarding_open")}
+                    <span className="transition-opacity duration-500" style={{ opacity: labelOpacity }} key={showEnglish + "boardopen"}>{showEnglish || isLangEnglish ? "BOARDING OPEN" : t("current_flight.not_started.boarding_display.boarding_open")}</span>
                   </span>
                   <span>{new Date().toLocaleDateString('es-ES', { month: 'short', day: '2-digit', year: 'numeric' }).toUpperCase()}</span>
                 </div>
-                
+
                 {/* Fila 2: Origen / Destino */}
                 <div className="grid grid-cols-3 gap-4 border-b border-white/20 py-3 flex-1 items-center">
                   <div className="col-span-2">
-                    <span className="block text-[9px] font-mono text-white/50 tracking-widest uppercase font-extrabold mb-0.5">
-                      {t("current_flight.not_started.boarding_display.departing_to")}
+                    <span className="block text-[9px] font-mono text-white/50 tracking-widest uppercase font-extrabold mb-0.5 transition-opacity duration-500" style={{ opacity: labelOpacity }} key={showEnglish + "dep"}>
+                      {showEnglish || isLangEnglish
+                        ? "DEPARTING TO:"
+                        : t("current_flight.not_started.boarding_display.departing_to")}
                     </span>
-                    <h2 className="text-2xl sm:text-3xl font-sans font-black tracking-tight text-white uppercase">{routeDetails.destCity}</h2>
-                    <span className="text-[10px] text-white/60 font-mono tracking-wider">({destICAO}) • {routeDetails.destCountry}</span>
+                    <h2 className="text-2xl sm:text-3xl font-sans font-black tracking-tight text-white uppercase">{routeDetails.destCity || getAirportName(destICAO) || destICAO}</h2>
+                    {routeDetails.destCountry && (
+                      <span className="text-[10px] text-white/60 font-mono tracking-wider">({destICAO}) • {routeDetails.destCountry}</span>
+                    )}
                   </div>
                   <div className="border-l border-white/20 pl-4">
-                    <span className="block text-[9px] font-mono text-white/50 tracking-widest uppercase font-extrabold mb-0.5">
-                      {t("current_flight.not_started.boarding_display.flight")}
+                    <span className="block text-[9px] font-mono text-white/50 tracking-widest uppercase font-extrabold mb-0.5 transition-opacity duration-500" style={{ opacity: labelOpacity }} key={showEnglish + "flight"}>
+                      {showEnglish || isLangEnglish ? "FLIGHT:" : t("current_flight.not_started.boarding_display.flight")}
                     </span>
                     <h2 className="text-2xl sm:text-3xl font-mono font-black text-amber-400">{flightCode}</h2>
-                    <span className="text-[10px] text-white/60 font-mono tracking-wider">{airline}</span>
+                    <span className="text-sm text-white/80 font-sans font-bold tracking-wide mt-0.5 block">{getAirlineName(airline)}</span>
                   </div>
                 </div>
 
                 {/* Fila 3: Estado de Embarque / Temperatura */}
                 <div className="grid grid-cols-3 gap-4 border-b border-white/20 py-2.5 flex-1 items-center">
                   <div className="col-span-2">
-                    <span className="block text-[9px] font-mono text-white/50 tracking-widest uppercase font-extrabold mb-0.5">
-                      {t("current_flight.not_started.boarding_display.status")}
+                    <span className="block text-[9px] font-mono text-white/50 tracking-widest uppercase font-extrabold mb-0.5 transition-opacity duration-500" style={{ opacity: labelOpacity }} key={showEnglish + "status"}>
+                      {showEnglish || isLangEnglish ? "STATUS:" : t("current_flight.not_started.boarding_display.status")}
                     </span>
-                    <h3 className={`text-xl sm:text-2xl font-sans font-black tracking-tight ${isBoardingActive ? "text-amber-400 animate-pulse" : boardedCount >= passengers.length ? "text-[#43E600]" : "text-[#45AFFF]"}`}>
+                    <h3 className={`text-xl sm:text-2xl font-sans font-black tracking-tight ${isBoardingActive ? "text-amber-400 animate-pulse" : boardedCount >= passengers.length ? "text-[#43E600]" : "text-[#45AFFF]"} transition-opacity duration-500`} style={{ opacity: labelOpacity }} key={showEnglish + "statval"}>
                       {isBoardingActive 
-                        ? t("current_flight.not_started.boarding_display.boarding") 
+                        ? (showEnglish || isLangEnglish ? "BOARDING" : t("current_flight.not_started.boarding_display.boarding"))
                         : boardedCount >= passengers.length 
-                          ? t("current_flight.not_started.boarding_display.boarding_closed") 
-                          : t("current_flight.not_started.boarding_display.on_time_ready")}
+                          ? (showEnglish || isLangEnglish ? "BOARDING CLOSED" : t("current_flight.not_started.boarding_display.boarding_closed"))
+                          : (showEnglish || isLangEnglish ? "ON TIME / READY" : t("current_flight.not_started.boarding_display.on_time_ready"))}
                     </h3>
                   </div>
                   <div className="border-l border-white/20 pl-4">
-                    <span className="block text-[8px] font-mono text-white/50 tracking-widest uppercase font-extrabold truncate mb-0.5">
-                      {t("current_flight.not_started.boarding_display.weather_in")} {routeDetails.destCity.toUpperCase()}:
+                    <span className="block text-[8px] font-mono text-white/50 tracking-widest uppercase font-extrabold truncate mb-0.5 transition-opacity duration-500" style={{ opacity: labelOpacity }} key={showEnglish + "weather"}>
+                      {showEnglish || isLangEnglish ? "WEATHER IN" : t("current_flight.not_started.boarding_display.weather_in")} {(getAirportName(destICAO) || destICAO).toUpperCase()}:
                     </span>
                     <div className="text-[10px] font-mono text-white/95 mt-1">
                       <div className="flex justify-between gap-1">
-                        <span>{t("current_flight.not_started.boarding_display.fair")}</span> 
-                        <span className="text-[#43E600] font-bold">18°C</span>
+                        <span className="transition-opacity duration-500" style={{ opacity: labelOpacity }} key={showEnglish + "fair"}>{showEnglish || isLangEnglish ? "FAIR:" : t("current_flight.not_started.boarding_display.fair")}</span> 
+                        <span className="text-[#43E600] font-bold">{metarData.temperature}</span>
                       </div>
                       <div className="flex justify-between gap-1">
-                        <span>{t("current_flight.not_started.boarding_display.wind")}</span> 
-                        <span>8 KT W</span>
+                        <span className="transition-opacity duration-500" style={{ opacity: labelOpacity }} key={showEnglish + "wind"}>{showEnglish || isLangEnglish ? "WIND:" : t("current_flight.not_started.boarding_display.wind")}</span> 
+                        <span>{metarData.windSpeed}{metarData.windGust ? " G" + metarData.windGust : ""} {metarData.windDir !== "--" ? metarData.windDir : ""}</span>
                       </div>
                     </div>
                   </div>
                 </div>
 
-                {/* Fila 4: Horarios */}
+                {/* Fila 4: Horarios y Duración */}
                 <div className="grid grid-cols-3 gap-4 pt-2.5 items-center">
                   <div className="col-span-2">
-                    <span className="block text-[9px] font-mono text-white/50 tracking-widest uppercase font-extrabold mb-0.5">
-                      {t("current_flight.not_started.boarding_display.estimated_departure")}
-                    </span>
-                    <strong className="text-sm sm:text-base font-mono tracking-wider text-white">
-                      12:45 UTC <span className="text-white/40 font-normal">
-                        ({simBriefData.blockTime ? (t("current_flight.not_started.boarding_display.eta_in") + simBriefData.blockTime) : "75 MIN"})
-                      </span>
-                    </strong>
+                    <div className="flex items-center gap-4">
+                      <div>
+                        <span className="block text-[9px] font-mono text-white/50 tracking-widest uppercase font-extrabold mb-0.5 transition-opacity duration-500" style={{ opacity: labelOpacity }} key={showEnglish + "time"}>
+                          {showEnglish || isLangEnglish
+                            ? "LOCAL TIME:"
+                            : t("current_flight.not_started.boarding_display.local_time")}
+                        </span>
+                        <strong className="text-sm sm:text-base font-mono tracking-wider text-white">
+                          {departureTimeStr}
+                        </strong>
+                      </div>
+                      <div className="border-l border-white/20 pl-4">
+                        <span className="block text-[9px] font-mono text-white/50 tracking-widest uppercase font-extrabold mb-0.5 transition-opacity duration-500" style={{ opacity: labelOpacity }} key={showEnglish + "dur"}>
+                          {showEnglish || isLangEnglish
+                            ? "DURATION:"
+                            : t("current_flight.not_started.boarding_display.duration")}
+                        </span>
+                        <strong className="text-sm sm:text-base font-mono tracking-wider text-white">
+                          {flightDuration !== null ? formatETA(flightDuration) : "---"}
+                        </strong>
+                      </div>
+                    </div>
                   </div>
                   <div className="border-l border-white/20 pl-4">
-                    <span className="block text-[9px] font-mono text-white/50 tracking-widest uppercase font-extrabold mb-0.5">
-                      {t("current_flight.not_started.boarding_display.passengers")}
+                    <span className="block text-[9px] font-mono text-white/50 tracking-widest uppercase font-extrabold mb-0.5 transition-opacity duration-500" style={{ opacity: labelOpacity }} key={showEnglish + "pax"}>
+                      {showEnglish || isLangEnglish ? "PASSENGERS:" : t("current_flight.not_started.boarding_display.passengers")}
                     </span>
                     <strong className="text-sm sm:text-base font-mono text-[#43E600]">{displayBoardedCount} / {displayTotalPassengers}</strong>
                   </div>
@@ -2369,7 +2601,7 @@ export default function VueloActualView({
               </div>
 
               <div className="overflow-y-auto flex-1 space-y-2 pr-1 scrollbar-thin scrollbar-thumb-white/10" id="compact-passenger-list">
-                {passengers.map((p, idx) => {
+                {(boardingManifest.length > 0 ? boardingManifest : passengers).map((p, idx) => {
                   const isBoarded = idx < boardedCount;
                   const isBoardingCurrent = idx === boardedCount && isBoardingActive;
                   
@@ -3257,6 +3489,10 @@ export default function VueloActualView({
           pasajero={selectedPasajero}
           onClose={() => setSelectedPasajero(null)}
           flightCode={flightCode}
+          passengerList={boardingManifest.length > 0 ? boardingManifest : passengers}
+          onNavigate={(p) => setSelectedPasajero(p)}
+          simBriefData={simBriefData}
+          airlineName={getAirlineName(airline)}
         />
       )}
       

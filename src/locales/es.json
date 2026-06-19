@@ -202,8 +202,8 @@
         "weather_in": "CLIMA EN",
         "fair": "DESPEJADO:",
         "wind": "VIENTO:",
-        "estimated_departure": "SALIDA ESTIMADA:",
-        "eta_in": "ETA EN ",
+        "local_time": "HORA LOCAL:",
+        "duration": "DURACIÓN:",
         "passengers": "PASAJEROS:"
       },
       "taxi": {
@@ -253,6 +253,23 @@
         "active_label": "Package Activo:",
         "no_package": "-- Sin Package (Desactivar PACK) --",
         "manage_btn": "[ Administrar ]"
+      },
+      "crew": {
+        "title": "Tripulación y Cabina",
+        "voice_config_title": "Configuración de voces",
+        "captain_voice": "Voz del Capitán:",
+        "cabin_voice": "Voz de Cabina (TCP):",
+        "lang_config_title": "Configuración de idiomas",
+        "primary_lang": "Idioma Primario:",
+        "secondary_lang": "Idioma Secundario:"
+      },
+      "identifications": {
+        "title": "Identificaciones",
+        "airline": "Aerolínea:",
+        "airline_placeholder": "P.e: Aerolíneas Argentinas",
+        "origin_city": "Ciudad de Origen:",
+        "dest_city": "Ciudad de Destino:",
+        "city_placeholder": "P.e: Buenos Aires"
       }
     }
   },
@@ -384,5 +401,77 @@
         "common_crew_seatbelt": "Exigencia verbal de acatar el ajuste lumínico de seguridad."
       }
     }
+  },
+  "passenger_details": {
+    "title": "DETALLES DEL PASAJERO",
+    "previous": "< Anterior",
+    "next": "Siguiente >",
+    "passenger_index": "{{current}} de {{total}}",
+    "boarding_pass": {
+      "title": "TARJETA DE EMBARQUE",
+      "passenger_label": "PASAJERO:",
+      "flight_label": "VUELO:",
+      "seat_label": "ASIENTO:",
+      "age_gender_label": "EDAD / COMPAÑÍA:",
+      "years": "años",
+      "nationality_label": "NACIONALIDAD:"
+    },
+    "needs": {
+      "title": "REQUERIMIENTOS Y SENSACIÓN BIOLÓGICA",
+      "satisfaction": "SATISFACCIÓN:",
+      "fear": "MIEDO / FOBIA:",
+      "hunger": "APETITO / HAMBRE:",
+      "bathroom": "BAÑO:"
+    },
+    "incidents": {
+      "title": "HISTORIAL DE INCIDENCIAS EN VUELO",
+      "empty": "Pasajero calmo. Ninguna incidencia transcurrida.",
+      "phase_label": "Fase:",
+      "type_label": "Tipo"
+    },
+    "status": {
+      "economy": "Económica",
+      "business": "Ejecutiva",
+      "first": "Primera",
+      "waiting": "Waiting",
+      "boarding": "Boarding",
+      "seated": "Seated",
+      "male": "Masculino",
+      "female": "Femenino",
+      "other": "Otro"
+    },
+    "indicator": {
+      "satisfaction": {
+        "very_dissatisfied": "Muy descontento",
+        "dissatisfied": "Descontento",
+        "neutral": "Neutral",
+        "satisfied": "Contento",
+        "very_satisfied": "Muy contento"
+      },
+      "hunger": {
+        "full": "Sin hambre",
+        "moderate": "Satisfecho",
+        "hungry": "Con hambre",
+        "very_hungry": "¡Pide refrigerio!"
+      },
+      "fear": {
+        "calm": "Muy calmo",
+        "anxious": "Ansioso",
+        "afraid": "Asustado",
+        "panicked": "Pánico / Fobia extrema"
+      },
+      "bathroom": {
+        "calm": "Calmo",
+        "moderate": "Ganas de orinar",
+        "urgent": "Baño urgente"
+      }
+    },
+    "footer": {
+      "checkin": "Check-in: {{origin}}",
+      "gate": "Gate: {{gate}}",
+      "status": "Status: {{status}}",
+      "identifier": "IDENTIFICADOR CLAVE: {{id}}"
+    },
+    "alert_banner": "ESTE PASAJERO REQUIERE ATENCIÓN"
   }
 }

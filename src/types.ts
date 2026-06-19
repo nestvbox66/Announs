@@ -31,9 +31,10 @@ export interface Pasajero {
   satisfaccion: number; // 0 a 100
   hambre: number; // 0 a 100
   bano: number; // 0 a 100 (necesidad de ir al baño, 100 es urgente)
-  genero: "M" | "F" | "O";
+  genero: "M" | "F";
   clase: "Ejecutiva" | "Económica" | "Primera";
   incidencias: Incidencia[];
+  alert: boolean;
 }
 
 export interface VueloReciente {

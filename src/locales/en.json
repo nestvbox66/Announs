@@ -202,8 +202,8 @@
         "weather_in": "WEATHER IN",
         "fair": "FAIR:",
         "wind": "WIND:",
-        "estimated_departure": "ESTIMATED DEPARTURE:",
-        "eta_in": "ETA IN ",
+        "local_time": "LOCAL TIME:",
+        "duration": "DURATION:",
         "passengers": "PASSENGERS:"
       },
       "taxi": {
@@ -253,6 +253,23 @@
         "active_label": "Active Package:",
         "no_package": "-- No Package (Disable PACK) --",
         "manage_btn": "[ Manage ]"
+      },
+      "crew": {
+        "title": "Crew & Cabin",
+        "voice_config_title": "Voice Configuration",
+        "captain_voice": "Captain Voice:",
+        "cabin_voice": "Cabin Voice (TCP):",
+        "lang_config_title": "Language Configuration",
+        "primary_lang": "Primary Language:",
+        "secondary_lang": "Secondary Language:"
+      },
+      "identifications": {
+        "title": "Identifications",
+        "airline": "Airline:",
+        "airline_placeholder": "e.g. Aerolíneas Argentinas",
+        "origin_city": "Origin City:",
+        "dest_city": "Destination City:",
+        "city_placeholder": "e.g. Buenos Aires"
       }
     }
   },
@@ -384,5 +401,77 @@
         "common_crew_seatbelt": "Verbal requirement to comply with safety light adjustment."
       }
     }
+  },
+  "passenger_details": {
+    "title": "PASSENGER DETAILS",
+    "previous": "< Previous",
+    "next": "Next >",
+    "passenger_index": "{{current}} of {{total}}",
+    "boarding_pass": {
+      "title": "BOARDING PASS",
+      "passenger_label": "PASSENGER:",
+      "flight_label": "FLIGHT:",
+      "seat_label": "SEAT:",
+      "age_gender_label": "AGE / GENDER:",
+      "years": "years",
+      "nationality_label": "NATIONALITY:"
+    },
+    "needs": {
+      "title": "REQUIREMENTS & BIOLOGICAL SENSATION",
+      "satisfaction": "SATISFACTION:",
+      "fear": "FEAR / PHOBIA:",
+      "hunger": "HUNGER:",
+      "bathroom": "BATHROOM:"
+    },
+    "incidents": {
+      "title": "IN-FLIGHT INCIDENT HISTORY",
+      "empty": "Passenger calm. No incidents occurred.",
+      "phase_label": "Phase:",
+      "type_label": "Type"
+    },
+    "status": {
+      "economy": "Economy",
+      "business": "Business",
+      "first": "First",
+      "waiting": "Waiting",
+      "boarding": "Boarding",
+      "seated": "Seated",
+      "male": "Male",
+      "female": "Female",
+      "other": "Other"
+    },
+    "indicator": {
+      "satisfaction": {
+        "very_dissatisfied": "Very dissatisfied",
+        "dissatisfied": "Dissatisfied",
+        "neutral": "Neutral",
+        "satisfied": "Satisfied",
+        "very_satisfied": "Very satisfied"
+      },
+      "hunger": {
+        "full": "Not hungry",
+        "moderate": "Satisfied",
+        "hungry": "Hungry",
+        "very_hungry": "Asks for refreshments!"
+      },
+      "fear": {
+        "calm": "Very calm",
+        "anxious": "Anxious",
+        "afraid": "Afraid",
+        "panicked": "Panic / Extreme phobia"
+      },
+      "bathroom": {
+        "calm": "Calm",
+        "moderate": "Needs to urinate",
+        "urgent": "Urgent bathroom"
+      }
+    },
+    "footer": {
+      "checkin": "Check-in: {{origin}}",
+      "gate": "Gate: {{gate}}",
+      "status": "Status: {{status}}",
+      "identifier": "KEY IDENTIFIER: {{id}}"
+    },
+    "alert_banner": "THIS PASSENGER REQUIRES ATTENTION"
   }
 }

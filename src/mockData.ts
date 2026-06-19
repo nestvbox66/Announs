@@ -165,7 +165,8 @@ export const pasajerosMock: Pasajero[] = [
         impactoMiedo: -5,
         impactoSatisfaccion: 5
       }
-    ]
+    ],
+    alert: false
   },
   {
     id: "p-2",
@@ -190,7 +191,8 @@ export const pasajerosMock: Pasajero[] = [
         impactoMiedo: 15,
         impactoSatisfaccion: -8
       }
-    ]
+    ],
+    alert: false
   },
   {
     id: "p-3",
@@ -215,7 +217,8 @@ export const pasajerosMock: Pasajero[] = [
         impactoMiedo: 0,
         impactoSatisfaccion: 15
       }
-    ]
+    ],
+    alert: false
   },
   {
     id: "p-4",
@@ -240,7 +243,8 @@ export const pasajerosMock: Pasajero[] = [
         impactoMiedo: -10,
         impactoSatisfaccion: 20
       }
-    ]
+    ],
+    alert: false
   },
   {
     id: "p-5",
@@ -274,7 +278,8 @@ export const pasajerosMock: Pasajero[] = [
         impactoMiedo: 20,
         impactoSatisfaccion: -20
       }
-    ]
+    ],
+    alert: false
   },
   {
     id: "p-6",
@@ -289,7 +294,8 @@ export const pasajerosMock: Pasajero[] = [
     bano: 30,
     genero: "F",
     clase: "Ejecutiva",
-    incidencias: []
+    incidencias: [],
+    alert: false
   },
   {
     id: "p-7",
@@ -314,7 +320,8 @@ export const pasajerosMock: Pasajero[] = [
         impactoMiedo: 0,
         impactoSatisfaccion: -12
       }
-    ]
+    ],
+    alert: false
   },
   {
     id: "p-8",
@@ -329,7 +336,8 @@ export const pasajerosMock: Pasajero[] = [
     bano: 15,
     genero: "M",
     clase: "Económica",
-    incidencias: []
+    incidencias: [],
+    alert: false
   }
 ];
 
