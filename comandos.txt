@@ -1,5 +1,8 @@
 Para levantar el entorno: 
-Abrir la terminal integrada y ejecutar: npx tauri dev
+
+Abrir la terminal integrada y ejecutar: 
+cd C:\Proyectos\Announs
+npx tauri dev
 
 Para subir una versión a GitHub
 # 1. Preparar todos los archivos modificados o nuevos
@@ -10,3 +13,8 @@ git commit -m "Escribe aquí lo que modificaste"
 
 # 3. Subir el paquete a la nube (GitHub)
 git push
+
+
+Para subir cambios en la edge function a Supabase
+supabase functions deploy audio-get
+

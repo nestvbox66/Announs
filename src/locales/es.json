@@ -154,6 +154,7 @@
         "narrator_label": "NARRADOR:",
         "narrator_captain": "Capitán",
         "narrator_crew": "Tripulación",
+        "narrator_gate": "Agente de Puerta",
         "mode_off": "Apagado",
         "mode_pack": "Package",
         "mode_ia": "IA",
@@ -342,6 +343,10 @@
     "immersion_speed_brief": "Unidad métrica en Km/h",
     "immersion_speed_deep": "Cambia la mención oficial de velocidades del capitán de millas por hora a Km/h.",
     "immersion_music_label": "PISTA DE EMBARQUE SELECCIONADA:",
+    "immersion_gate_agent_brief": "Voz del Agente de Puerta",
+    "immersion_gate_agent_deep": "Voz personalizada para los anuncios de embarque realizados por el agente de puerta en la terminal.",
+    "immersion_gate_agent_label": "AGENTE DE PUERTA:",
+    "immersion_gate_agent_loading": "Cargando voces...",
     "events": {
       "yes": "Sí",
       "no": "No",

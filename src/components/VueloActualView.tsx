@@ -7,7 +7,7 @@ import React, { useState, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { supabase } from "../lib/supabase";
 import { generateManifest, getRegionFromICAO } from "../engine/PassengerManifest";
-import { getAirportName, formatETA, parseMETAR, getAirportTimezone } from "../utils/airportMapping";
+import { getAirportName, parseMETAR, getAirportTimezone } from "../utils/airportMapping";
 import { getAirlineName } from "../utils/airlineMapping";
 import { useToast } from "./Toast";
 import { 
@@ -42,7 +42,7 @@ import {
   ChevronUp,
   Loader2
 } from "lucide-react";
-import { FlightState, Pasajero, SimBriefData, ConfigVoces, ConfigAudio, UltimoAnuncio } from "../types";
+import { FlightState, Pasajero, SimBriefData, ConfigVoces, ConfigAudio, UltimoAnuncio, AnnouncementInfo } from "../types";
 import PasajeroSlideOver from "./PasajeroSlideOver";
 // @ts-ignore
 import siluetaAvion from "./Silueta Avion.png";
@@ -118,8 +118,9 @@ export default function VueloActualView({
   const [originICAO, setOriginICAO] = useState(simBriefData.origen);
   const [destICAO, setDestICAO] = useState(simBriefData.destino);
   const [airline, setAirline] = useState(simBriefData.aerolinea);
-  const [originCityName, setOriginCityName] = useState<string>("Buenos Aires");
-  const [destCityName, setDestCityName] = useState<string>("Córdoba");
+  const [originCityName, setOriginCityName] = useState<string>(getAirportName(simBriefData.origen) || simBriefData.origen);
+  const [destCityName, setDestCityName] = useState<string>(getAirportName(simBriefData.destino) || simBriefData.destino);
+  const [gate, setGate] = useState<string>("A01");
 
   // Phase 1 Boarding states
   const [boardedCount, setBoardedCount] = useState<number>(0);
@@ -162,11 +163,20 @@ export default function VueloActualView({
   const [showEnglish, setShowEnglish] = useState<boolean>(true);
   const [labelOpacity, setLabelOpacity] = useState(1);
 
+  // Boarding audio
+  const [boardingAudioUrl, setBoardingAudioUrl] = useState<string | null>(null);
+  const [currentAnnouncement, setCurrentAnnouncement] = useState<AnnouncementInfo | null>(null);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [isAudioPlaying, setIsAudioPlaying] = useState(false);
+  const [generatingError, setGeneratingError] = useState<string | null>(null);
+  // Gate agent voice loaded from setting_general
+  const [gateAgentVoiceId, setGateAgentVoiceId] = useState<string>("");
+
   // Voice options loaded from DB (no fallback — block UI on failure)
   interface VoiceOption {
     id: string;
     name: string;
-    gender: string;
+    role: string;
   }
 
   const [availableVoices, setAvailableVoices] = useState<VoiceOption[]>([]);
@@ -174,8 +184,32 @@ export default function VueloActualView({
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [voicesLoading, setVoicesLoading] = useState(false);
 
-  const captainVoiceOptions = availableVoices.filter((v) => v.gender === "M");
-  const crewVoiceOptions = availableVoices.filter((v) => v.gender === "F");
+  const captainVoiceOptions = availableVoices.filter((v) => v.role === "captain");
+  const crewVoiceOptions = availableVoices.filter((v) => v.role === "crew");
+
+  const getSpeakerName = (role: string): string => {
+    if (role === "captain") {
+      const v = availableVoices.find((v) => v.id === captainVoice);
+      return v?.name || simBriefData.nombrePiloto || "Capitán";
+    }
+    if (role === "crew") {
+      const v = availableVoices.find((v) => v.id === crewVoice);
+      return v?.name || "Tripulación";
+    }
+    if (role === "gate") {
+      const v = availableVoices.find((v) => v.id === gateAgentVoiceId);
+      return v?.name || "Agente de Puerta";
+    }
+    return "Desconocido";
+  };
+
+  // Auto-clear generating error after 6 seconds
+  useEffect(() => {
+    if (generatingError) {
+      const timer = setTimeout(() => setGeneratingError(null), 6000);
+      return () => clearTimeout(timer);
+    }
+  }, [generatingError]);
 
   // Language options loaded from DB (no fallback — block UI on failure)
   interface LanguageOption {
@@ -187,6 +221,152 @@ export default function VueloActualView({
   const [languagesReady, setLanguagesReady] = useState(false);
   const [languageError, setLanguageError] = useState<string | null>(null);
   const [languagesLoading, setLanguagesLoading] = useState(false);
+
+  // Fetch boarding audio when entering PreEmbarque
+  React.useEffect(() => {
+    if (currentState !== FlightState.PreEmbarque) {
+      setBoardingAudioUrl(null);
+      return;
+    }
+
+    let cancelled = false;
+    let tempAudio: HTMLAudioElement | null = null;
+
+    (async () => {
+      try {
+        const gateSoonMode = eventConfig["gate_crew_start_soon"];
+        const gateStartedMode = eventConfig["gate_crew_started"];
+
+        const shouldPlaySoon = gateSoonMode === "IA";
+        const shouldPlayStarted = gateStartedMode === "IA";
+
+        const destName = destCityName || simBriefData.destino;
+
+        if (shouldPlaySoon) {
+          setIsGenerating(true);
+          const startSoonResult = await supabase.functions.invoke("audio-get", {
+            method: "POST",
+            body: {
+              event_key: "gate_crew_start_soon",
+              flight_id: flightId,
+              language_id: captainPrimaryLang,
+              event_data: {
+                airline: getAirlineName(airline) || airline,
+                flight_number: flightCode,
+                destination: destName,
+                gate,
+                departure_time: departureTimeStr,
+              },
+            },
+          });
+
+          if (!cancelled && startSoonResult.data?.success && startSoonResult.data?.announcement?.audio_url) {
+            const ann = startSoonResult.data.announcement;
+            const url = new URL(ann.audio_url, window.location.origin);
+            url.searchParams.set("_t", Date.now().toString());
+            tempAudio = new Audio(url.toString());
+            tempAudio.preload = "auto";
+            tempAudio.crossOrigin = "anonymous";
+            tempAudio.addEventListener("canplaythrough", () => {
+              tempAudio!.play().catch(() => {});
+            });
+            tempAudio.addEventListener("play", () => setIsAudioPlaying(true));
+            tempAudio.addEventListener("ended", () => setIsAudioPlaying(false));
+            tempAudio.load();
+            setCurrentAnnouncement({ ...ann });
+          }
+          setIsGenerating(false);
+        }
+
+        // Step 2: Wait 30 seconds
+        await new Promise((resolve) => setTimeout(resolve, 30000));
+        if (cancelled) return;
+
+        if (shouldPlayStarted) {
+          setIsGenerating(true);
+          const { data, error } = await supabase.functions.invoke("audio-get", {
+            method: "POST",
+            body: {
+              event_key: "gate_crew_started",
+              flight_id: flightId,
+              language_id: captainPrimaryLang,
+            },
+          });
+
+          if (cancelled) return;
+          if (error) throw error;
+
+          if (data?.success && data?.announcement?.audio_url) {
+            setBoardingAudioUrl(data.announcement.audio_url);
+            setCurrentAnnouncement({ ...data.announcement });
+          } else {
+            console.error("Error al cargar audio de embarque:", data?.error ?? "unknown error");
+          }
+          setIsGenerating(false);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.error("Error al cargar audio de embarque:", err);
+          setIsGenerating(false);
+          setGeneratingError("Error generando anuncio");
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (tempAudio) {
+        tempAudio.pause();
+        tempAudio.src = "";
+        tempAudio.load();
+        tempAudio = null;
+      }
+    };
+  }, [currentState]);
+
+  // Play boarding audio when URL is loaded
+  React.useEffect(() => {
+    if (!boardingAudioUrl) return;
+
+    const url = new URL(boardingAudioUrl, window.location.origin);
+    url.searchParams.set("_t", Date.now().toString());
+
+    const audio = new Audio(url.toString());
+    audio.preload = "auto";
+    audio.crossOrigin = "anonymous";
+
+    let cancelled = false;
+
+    const onCanPlay = () => {
+      if (!cancelled) audio.play().catch(() => {});
+    };
+    const onPlay = () => {
+      if (!cancelled) setIsAudioPlaying(true);
+    };
+    const onEnded = () => {
+      if (!cancelled) setIsAudioPlaying(false);
+    };
+    const onError = () => {
+      if (!cancelled) console.error("Error al reproducir audio de embarque");
+    };
+
+    audio.addEventListener("canplaythrough", onCanPlay);
+    audio.addEventListener("play", onPlay);
+    audio.addEventListener("ended", onEnded);
+    audio.addEventListener("error", onError);
+    audio.load();
+
+    return () => {
+      cancelled = true;
+      audio.pause();
+      audio.removeEventListener("canplaythrough", onCanPlay);
+      audio.removeEventListener("play", onPlay);
+      audio.removeEventListener("ended", onEnded);
+      audio.removeEventListener("error", onError);
+      audio.src = "";
+      audio.load();
+    };
+  }, [boardingAudioUrl]);
 
   useEffect(() => {
       let cancelled = false;
@@ -408,25 +588,25 @@ export default function VueloActualView({
         if (stockIds.length > 0) {
           const { data: stockData, error: stockError } = await supabase
             .from('voices_stock')
-            .select('id, voice_name, voice_gender')
+            .select('id, voice_name, voice_role')
             .in('id', stockIds);
           if (stockError) throw stockError;
           if (cancelled) return;
           mapped = (stockData || []).map((vs: any) => ({
             id: vs.id,
             name: vs.voice_name,
-            gender: vs.voice_gender,
+            role: vs.voice_role,
           }));
         }
         if (mapped.length > 0) {
           setAvailableVoices(mapped);
           if (!mapped.find((v) => v.id === captainVoice)) {
-            const male = mapped.find((v) => v.gender === "M");
-            if (male) setCaptainVoice(male.id);
+            const captain = mapped.find((v) => v.role === "captain");
+            if (captain) setCaptainVoice(captain.id);
           }
           if (!mapped.find((v) => v.id === crewVoice)) {
-            const female = mapped.find((v) => v.gender === "F");
-            if (female) setCrewVoice(female.id);
+            const crew = mapped.find((v) => v.role === "crew");
+            if (crew) setCrewVoice(crew.id);
           }
         }
         setVoicesReady(true);
@@ -489,6 +669,9 @@ export default function VueloActualView({
         if ((d as any).active_package != null) {
           setSelectedPackage((d as any).active_package);
         }
+        if ((d as any).gate_agent_voice_id != null) {
+          setGateAgentVoiceId((d as any).gate_agent_voice_id);
+        }
       }
 
       if (annResult.data) {
@@ -528,7 +711,7 @@ export default function VueloActualView({
 
   interface EventDefinition {
     key: string;
-    narrator: "Capitán" | "Tripulación";
+    narrator: "Capitán" | "Tripulación" | "Agente de Puerta";
     desc: string;
     phaseId: string;
     descKey?: string;
@@ -537,8 +720,8 @@ export default function VueloActualView({
 
 
     // Fase 1
-    { key: "gate_crew_start_soon", narrator: "Tripulación", desc: "Anuncio en la terminal indicando que el proceso de embarque comenzará en breve.", phaseId: "fase1", descKey: "current_flight.not_started.boarding.gate_crew_start_soon", narratorKey: "current_flight.not_started.events.narrator_crew" },
-    { key: "gate_crew_started", narrator: "Tripulación", desc: "Aviso oficial del inicio del abordaje por grupos o zonas.", phaseId: "fase1", descKey: "current_flight.not_started.boarding.gate_crew_started", narratorKey: "current_flight.not_started.events.narrator_crew" },
+    { key: "gate_crew_start_soon", narrator: "Agente de Puerta", desc: "Anuncio en la terminal indicando que el proceso de embarque comenzará en breve.", phaseId: "fase1", descKey: "current_flight.not_started.boarding.gate_crew_start_soon", narratorKey: "current_flight.not_started.events.narrator_gate" },
+    { key: "gate_crew_started", narrator: "Agente de Puerta", desc: "Aviso oficial del inicio del abordaje por grupos o zonas.", phaseId: "fase1", descKey: "current_flight.not_started.boarding.gate_crew_started", narratorKey: "current_flight.not_started.events.narrator_gate" },
     { key: "common_crew_boarding", narrator: "Tripulación", desc: "Mensajes rutinarios emitidos dentro de la cabina mientras los pasajeros buscan sus asientos y guardan el equipaje.", phaseId: "fase1", descKey: "current_flight.not_started.boarding.common_crew_boarding", narratorKey: "current_flight.not_started.events.narrator_crew" },
     // Fase 2
     { key: "preflight_crew_welcome", narrator: "Tripulación", desc: "Mensaje inicial de bienvenida a bordo una vez que el flujo principal de pasajeros se ha estabilizado.", phaseId: "fase2", descKey: "current_flight.not_started.preflight.crew_welcome", narratorKey: "current_flight.not_started.events.narrator_crew" },
@@ -592,8 +775,8 @@ export default function VueloActualView({
       SASA: { name: "Salta Martín Miguel de Güemes", city: "Salta", country: "Argentina" }
     };
 
-    const orgInfo = airports[o] || { name: "", city: getAirportName(o), country: "" };
-    const destInfo = airports[d] || { name: "", city: getAirportName(d), country: "" };
+    const orgInfo = airports[o] || { name: "", city: getAirportName(o) || o, country: "" };
+    const destInfo = airports[d] || { name: "", city: getAirportName(d) || d, country: "" };
 
     return {
       orgName: orgInfo.name,
@@ -730,9 +913,18 @@ export default function VueloActualView({
         if (annError) throw new Error(annError.message);
       }
 
+      const flightUpdatePayload: Record<string, any> = {
+        flight_status: "started",
+        lang_primary_id: captainPrimaryLang,
+        lang_secondary_id: captainSecondaryLang === LANG_NONE || captainSecondaryLang === "" ? null : captainSecondaryLang,
+        voice_captain_id: captainVoice,
+        voice_crew_id: crewVoice,
+      };
+      console.log("[handleStartFlight] flights.update payload:", JSON.stringify(flightUpdatePayload, null, 2));
+
       const { error: flightError } = await supabase
         .from("flights")
-        .update({ flight_status: "started" })
+        .update(flightUpdatePayload)
         .eq("id", flightId);
       if (flightError) throw new Error(flightError.message);
 
@@ -856,7 +1048,11 @@ export default function VueloActualView({
         currentFlightId = insertedFlight?.id || null;
       }
 
-      if (currentFlightId) setFlightId(currentFlightId);
+      if (currentFlightId) {
+        setFlightId(currentFlightId);
+        const hash = currentFlightId.split("").reduce((acc, c) => acc + c.charCodeAt(0), 0);
+        setGate("A" + ((hash % 30) + 1));
+      }
 
       setFlightCode(gen.flight_number || "");
       setOriginICAO(origin.icao_code || "");
@@ -1124,16 +1320,17 @@ export default function VueloActualView({
     return "12:45";
   }, [simbriefRawData, originICAO]);
 
-  // Compute flight duration from sta (sched_in) - std (sched_out) in minutes
+  // Compute flight duration from SimBrief air_time (seconds)
   const flightDuration = React.useMemo(() => {
-    const std = simbriefRawData?.general?.sched_out;
-    const sta = simbriefRawData?.general?.sched_in;
-    if (std && sta) {
-      const stdDate = new Date(Number(std) * 1000);
-      const staDate = new Date(Number(sta) * 1000);
-      const diffMs = staDate.getTime() - stdDate.getTime();
-      const totalMinutes = Math.floor(diffMs / 60000);
-      if (totalMinutes > 0 && isFinite(totalMinutes)) return totalMinutes;
+    const raw = simbriefRawData?.times?.est_time_enroute;
+    if (raw) {
+      const seconds = Number(raw);
+      if (!isNaN(seconds) && seconds > 0) {
+        const totalMinutes = Math.floor(seconds / 60);
+        const hours = Math.floor(totalMinutes / 60);
+        const mins = totalMinutes % 60;
+        return `${hours}h ${mins}m`;
+      }
     }
     return null;
   }, [simbriefRawData]);
@@ -2534,7 +2731,7 @@ export default function VueloActualView({
                             : t("current_flight.not_started.boarding_display.duration")}
                         </span>
                         <strong className="text-sm sm:text-base font-mono tracking-wider text-white">
-                          {flightDuration !== null ? formatETA(flightDuration) : "---"}
+                          {flightDuration !== null ? flightDuration : "---"}
                         </strong>
                       </div>
                     </div>
@@ -2668,28 +2865,36 @@ export default function VueloActualView({
               
               <div className="bg-black/45 p-3.5 rounded-[5px] border border-[#3B7EB2]/30 text-xs font-sans relative overflow-hidden">
                 <div className="absolute top-1 right-2 animate-pulse flex items-center gap-1">
-                  <span className={`w-1.5 h-1.5 rounded-full ${lastAnnouncement?.reproduciendo ? 'bg-[#43E600]' : 'bg-white/20'}`} />
-                  <span className="text-[8px] font-mono text-white/30">{lastAnnouncement?.reproduciendo ? 'ON AIR' : 'MUTED'}</span>
+                  <span className={`w-1.5 h-1.5 rounded-full ${isAudioPlaying ? 'bg-[#43E600]' : 'bg-white/20'}`} />
+                  <span className="text-[8px] font-mono text-white/30">{isAudioPlaying ? 'ON AIR' : 'MUTED'}</span>
                 </div>
                 
                 <p className="text-white/95 italic leading-relaxed pt-1.5">
-                  "{lastAnnouncement ? lastAnnouncement.texto : 'Seleccione o simule un anuncio para emitirlo a los altavoces de la cabina.'}"
+                  {generatingError
+                    ? <span className="text-red-400">{generatingError}</span>
+                    : isGenerating
+                      ? "Generando anuncio..."
+                      : currentAnnouncement
+                        ? `"${currentAnnouncement.text}"`
+                        : '"Seleccione o simule un anuncio para emitirlo a los altavoces de la cabina."'}
                 </p>
                 
                 <div className="mt-3 pt-2.5 border-t border-white/15 flex justify-between items-center text-[9.5px] font-mono text-white/50">
                   {(() => {
-                    const isCaptain = lastAnnouncement && ["bienvenida", "turbulencia", "descenso", "aterrizaje"].includes(lastAnnouncement.tipo);
-                    const name = lastAnnouncement 
-                      ? (isCaptain ? (simBriefData.nombrePiloto || "N. Sassano") : "Sofía Martínez") 
-                      : (simBriefData.nombrePiloto || "N. Sassano");
-                    const role = lastAnnouncement 
-                      ? (isCaptain ? "Capitán" : "Tripulación de Cabina") 
-                      : "Capitán";
-                    
+                    if (!currentAnnouncement) {
+                      const name = simBriefData.nombrePiloto || "N. Sassano";
+                      return (
+                        <>
+                          <span>NARRACIÓN: <strong className="text-white font-bold">{name}</strong></span>
+                          <span className="text-[#45AFFF] uppercase font-black text-[8px] tracking-wider bg-[#45AFFF]/10 px-1.5 py-0.5 rounded border border-[#45AFFF]/20">Capitán</span>
+                        </>
+                      );
+                    }
+                    const roleLabel = currentAnnouncement.speaker_role === "captain" ? "Capitán" : currentAnnouncement.speaker_role === "crew" ? "Tripulación de Cabina" : "Agente de Puerta";
                     return (
                       <>
-                        <span>NARRACIÓN: <strong className="text-white font-bold">{name}</strong></span>
-                        <span className="text-[#45AFFF] uppercase font-black text-[8px] tracking-wider bg-[#45AFFF]/10 px-1.5 py-0.5 rounded border border-[#45AFFF]/20">{role}</span>
+                        <span>NARRACIÓN: <strong className="text-white font-bold">{getSpeakerName(currentAnnouncement.speaker_role)}</strong></span>
+                        <span className="text-[#45AFFF] uppercase font-black text-[8px] tracking-wider bg-[#45AFFF]/10 px-1.5 py-0.5 rounded border border-[#45AFFF]/20">{roleLabel}</span>
                       </>
                     );
                   })()}
@@ -2706,8 +2911,7 @@ export default function VueloActualView({
               <div className="space-y-3">
                 {/* Captain Card */}
                 {(() => {
-                  const isCaptainSpeaking = lastAnnouncement && lastAnnouncement.reproduciendo && 
-                    (lastAnnouncement.tipo === "bienvenida" || lastAnnouncement.tipo === "turbulencia" || lastAnnouncement.tipo === "descenso" || lastAnnouncement.tipo === "aterrizaje");
+                  const isCaptainSpeaking = isAudioPlaying && currentAnnouncement?.speaker_role === "captain";
                   
                   return (
                     <div className={`p-3 rounded-[5px] border transition-all duration-300 flex items-center justify-between ${
@@ -2725,7 +2929,7 @@ export default function VueloActualView({
                         <div>
                           <span className="text-[10px] font-mono text-white/45 block uppercase font-bold">Comandante</span>
                           <span className={`text-[12px] font-sans font-black tracking-wide ${isCaptainSpeaking ? 'text-[#43E600]' : 'text-white'}`}>
-                            {simBriefData.nombrePiloto || "N. Sassano"}
+                            {getSpeakerName("captain")}
                           </span>
                         </div>
                       </div>
@@ -2740,8 +2944,7 @@ export default function VueloActualView({
 
                 {/* Cabin Crew Lead Card */}
                 {(() => {
-                  const isCrewSpeaking = lastAnnouncement && lastAnnouncement.reproduciendo && 
-                    (lastAnnouncement.tipo === "seguridad" || lastAnnouncement.tipo === "desembarque");
+                  const isCrewSpeaking = isAudioPlaying && currentAnnouncement?.speaker_role === "crew";
                   
                   return (
                     <div className={`p-3 rounded-[5px] border transition-all duration-300 flex items-center justify-between ${
@@ -2759,7 +2962,7 @@ export default function VueloActualView({
                         <div>
                           <span className="text-[10px] font-mono text-white/45 block uppercase font-bold font-mono">Jefe de Tripulación</span>
                           <span className={`text-[12px] font-sans font-black tracking-wide ${isCrewSpeaking ? 'text-[#43E600]' : 'text-white'}`}>
-                            Sofía Martínez
+                            {getSpeakerName("crew")}
                           </span>
                         </div>
                       </div>

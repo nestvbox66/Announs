@@ -154,6 +154,7 @@
         "narrator_label": "NARRATOR:",
         "narrator_captain": "Captain",
         "narrator_crew": "Crew",
+        "narrator_gate": "Gate Agent",
         "mode_off": "Off",
         "mode_pack": "Pack",
         "mode_ia": "IA",
@@ -342,6 +343,10 @@
     "immersion_speed_brief": "Metric unit in Km/h",
     "immersion_speed_deep": "Changes the captain's official speed mention from miles per hour to Km/h.",
     "immersion_music_label": "SELECTED BOARDING TRACK:",
+    "immersion_gate_agent_brief": "Gate Agent Voice",
+    "immersion_gate_agent_deep": "Custom voice for boarding announcements made by the gate agent at the terminal.",
+    "immersion_gate_agent_label": "GATE AGENT:",
+    "immersion_gate_agent_loading": "Loading voices...",
     "events": {
       "yes": "Yes",
       "no": "No",

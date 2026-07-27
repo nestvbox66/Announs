@@ -100,3 +100,16 @@ export interface UltimoAnuncio {
   reproduciendo: boolean;
   duracion: number; // en segundos, p.ej. 15
 }
+
+export interface AnnouncementInfo {
+  audio_url: string;
+  text: string;
+  speaker_role: string;
+  language_id: string;
+  is_pre_recorded: boolean;
+}
+
+export interface AudioResponse {
+  success: boolean;
+  announcement: AnnouncementInfo;
+}

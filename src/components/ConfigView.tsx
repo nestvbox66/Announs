@@ -191,6 +191,25 @@ export default function ConfigView({
         setSpeedKph(true);
       }
 
+      // Load gate agent voices from stock
+      const { data: gateVoices, error: gateErr } = await supabase
+        .from("voices_stock")
+        .select("id, voice_name")
+        .eq("voice_role", "gate");
+
+      if (cancelled || gateErr) return;
+
+      if (gateVoices && gateVoices.length > 0) {
+        setGateAgentVoices(gateVoices.map(v => ({ id: v.id, name: v.voice_name })));
+
+        const loadedGateId = data?.gate_agent_voice_id;
+        if (loadedGateId && gateVoices.some(v => v.id === loadedGateId)) {
+          setGateAgentVoiceId(loadedGateId);
+        } else {
+          setGateAgentVoiceId(gateVoices[0].id);
+        }
+      }
+
       // Load announcements from setting_announcements
       const { data: annData, error: annError } = await supabase
         .from("setting_announcements")
@@ -420,6 +439,12 @@ export default function ConfigView({
     return localStorage.getItem("cfg_speed_kph") !== "false"; // default true
   });
 
+  // Gate Agent Voice
+  const [gateAgentVoiceId, setGateAgentVoiceId] = useState<string>(() => {
+    return localStorage.getItem("cfg_gate_agent_voice_id") || "";
+  });
+  const [gateAgentVoices, setGateAgentVoices] = useState<{ id: string; name: string }[]>([]);
+
   // Bloque 2: Audio Config
   const [audio3dEnabled, setAudio3dEnabled] = useState<boolean>(() => {
     return localStorage.getItem("cfg_audio_3d_enabled") === "true"; // default false
@@ -543,6 +568,7 @@ export default function ConfigView({
     localStorage.setItem("cfg_play_boarding_music", String(playBoardingMusic));
     localStorage.setItem("cfg_song_boarding_music", songBoardingMusic);
     localStorage.setItem("cfg_speed_kph", String(speedKph));
+    localStorage.setItem("cfg_gate_agent_voice_id", gateAgentVoiceId);
 
     // Bloque 2
     localStorage.setItem("cfg_audio_3d_enabled", String(audio3dEnabled));
@@ -630,6 +656,7 @@ export default function ConfigView({
             play_boarding_music: playBoardingMusic,
             song_boarding_music: songBoardingMusic,
             speed_kph: speedKph,
+            gate_agent_voice_id: gateAgentVoiceId,
           };
 
           const upsertAnnouncementsPayload: Record<string, any> = {
@@ -785,8 +812,8 @@ export default function ConfigView({
   ];
 
   const eventDefinitionList: EventDefinition[] = [
-    { key: "gate_crew_start_soon", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.gate_crew_start_soon", phaseId: "fase1" },
-    { key: "gate_crew_started", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.gate_crew_started", phaseId: "fase1" },
+    { key: "gate_crew_start_soon", narratorKey: "config.events.narrator_gate", descKey: "config.events.desc.gate_crew_start_soon", phaseId: "fase1" },
+    { key: "gate_crew_started", narratorKey: "config.events.narrator_gate", descKey: "config.events.desc.gate_crew_started", phaseId: "fase1" },
     { key: "common_crew_boarding", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.common_crew_boarding", phaseId: "fase1" },
     { key: "preflight_crew_welcome", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.preflight_crew_welcome", phaseId: "fase1" },
     { key: "preflight_capt_welcome", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.preflight_capt_welcome", phaseId: "fase1" },
@@ -1398,7 +1425,8 @@ export default function ConfigView({
               
               {/* IMMERSION SPECIAL GROUP */}
               {activeGroupTab === "immersion" ? (
-                immersionOptions.map((item) => {
+                <>
+                {immersionOptions.map((item) => {
                   return (
                     <div 
                       key={item.key} 
@@ -1464,7 +1492,41 @@ export default function ConfigView({
                       )}
                     </div>
                   );
-                })
+                })}
+
+                {/* Gate Agent Voice selection */}
+                <div className="bg-[#002440]/45 hover:bg-[#002440]/75 border border-[#3B7EB2]/20 hover:border-[#3B7EB2]/40 p-4 rounded-[6px] flex flex-col transition-all gap-4">
+                  <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4">
+                    <div className="space-y-1.5 flex-1 min-w-0 pr-1 font-mono">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[12.5px] font-sans font-bold text-white leading-normal tracking-wide">
+                          {t("config.immersion_gate_agent_brief")}
+                        </span>
+                      </div>
+                      <span className="text-[10px] text-white/45 block max-w-sm leading-relaxed">
+                        {t("config.immersion_gate_agent_deep")}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="border-t border-white/5 pt-3 mt-1 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+                    <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">
+                      {t("config.immersion_gate_agent_label")}
+                    </span>
+                    <select
+                      className="bg-[#00172e] border border-[#3B7EB2]/50 text-white rounded-[4px] px-2.5 py-1 text-xs font-mono focus:outline-none w-full sm:w-auto min-w-[200px]"
+                      value={gateAgentVoiceId}
+                      onChange={(e) => setGateAgentVoiceId(e.target.value)}
+                    >
+                      {gateAgentVoices.length === 0 && (
+                        <option value="">{t("config.immersion_gate_agent_loading")}</option>
+                      )}
+                      {gateAgentVoices.map((v) => (
+                        <option key={v.id} value={v.id}>{v.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                </>
               ) : (
                 /* REGULAR TRIGGER EVENTS GROUPS (FLIGHT EVENTS) */
                 getFilteredEvents().map((item) => {
