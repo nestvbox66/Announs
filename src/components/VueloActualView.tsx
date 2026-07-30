@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.5
  */
 
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { supabase } from "../lib/supabase";
 import { generateManifest, getRegionFromICAO } from "../engine/PassengerManifest";
@@ -43,6 +43,15 @@ import {
   Loader2
 } from "lucide-react";
 import { FlightState, Pasajero, SimBriefData, ConfigVoces, ConfigAudio, UltimoAnuncio, AnnouncementInfo } from "../types";
+import { AnnouncementQueue } from "../services/AnnouncementQueue";
+import { FlightContext } from "../services/FlightContext";
+import { SimulationController } from "../services/SimulationController";
+import { Scheduler } from "../services/Scheduler";
+import { FlightFSM } from "../services/FlightFSM";
+import { RuleEngine } from "../services/RuleEngine";
+import { Clock } from "../services/Clock";
+import { TimerManager } from "../services/TimerManager";
+import { AnnouncementPlayer } from "../services/AnnouncementPlayer";
 import PasajeroSlideOver from "./PasajeroSlideOver";
 // @ts-ignore
 import siluetaAvion from "./Silueta Avion.png";
@@ -164,7 +173,6 @@ export default function VueloActualView({
   const [labelOpacity, setLabelOpacity] = useState(1);
 
   // Boarding audio
-  const [boardingAudioUrl, setBoardingAudioUrl] = useState<string | null>(null);
   const [currentAnnouncement, setCurrentAnnouncement] = useState<AnnouncementInfo | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
@@ -222,151 +230,110 @@ export default function VueloActualView({
   const [languageError, setLanguageError] = useState<string | null>(null);
   const [languagesLoading, setLanguagesLoading] = useState(false);
 
+  const announcementQueueRef = useRef<AnnouncementQueue | null>(null);
+  if (!announcementQueueRef.current) {
+    announcementQueueRef.current = new AnnouncementQueue();
+  }
+
+  const ruleEngineRef = useRef<RuleEngine | null>(null);
+  if (!ruleEngineRef.current) {
+    ruleEngineRef.current = new RuleEngine();
+  }
+
+  const clockRef = useRef<Clock | null>(null);
+  if (!clockRef.current) {
+    clockRef.current = new Clock();
+  }
+
+  const timerManagerRef = useRef<TimerManager | null>(null);
+  if (!timerManagerRef.current) {
+    timerManagerRef.current = new TimerManager(clockRef.current, announcementQueueRef.current);
+  }
+
+  const announcementPlayerRef = useRef<AnnouncementPlayer | null>(null);
+  if (!announcementPlayerRef.current) {
+    announcementPlayerRef.current = new AnnouncementPlayer(announcementQueueRef.current);
+  }
+
+  const schedulerRef = useRef<Scheduler | null>(null);
+  if (!schedulerRef.current) {
+    schedulerRef.current = new Scheduler(announcementPlayerRef.current, ruleEngineRef.current, timerManagerRef.current);
+  }
+
+  const flightFSMRef = useRef<FlightFSM | null>(null);
+  if (!flightFSMRef.current) {
+    flightFSMRef.current = new FlightFSM(schedulerRef.current);
+  }
+
+  const flightContextRef = useRef<FlightContext | null>(null);
+  if (!flightContextRef.current) {
+    flightContextRef.current = new FlightContext();
+  }
+
+  const simControllerRef = useRef<SimulationController | null>(null);
+  if (!simControllerRef.current) {
+    simControllerRef.current = new SimulationController(flightFSMRef.current);
+  }
+
+  // Subscribe to AnnouncementQueue events
+  useEffect(() => {
+    const q = announcementQueueRef.current!;
+    const unsubGen = q.on("generating", (v: boolean) => {
+      if (v) { setIsGenerating(true); setGeneratingError(null); }
+      else { setIsGenerating(false); }
+    });
+    const unsubAnn = q.on("announcement", (ann: AnnouncementInfo) => {
+      setCurrentAnnouncement(ann);
+    });
+    const unsubPlay = q.on("playing", (v: boolean) => {
+      setIsAudioPlaying(v);
+    });
+    const unsubErr = q.on("error", (msg: string | null) => {
+      if (msg) { setGeneratingError(msg); setIsGenerating(false); }
+    });
+    return () => {
+      unsubGen(); unsubAnn(); unsubPlay(); unsubErr();
+    };
+  }, []);
+
+  // Keep TimerManager flight context in sync
+  useEffect(() => {
+    timerManagerRef.current?.setEventContext(flightId, captainPrimaryLang);
+  }, [flightId, captainPrimaryLang]);
+
   // Fetch boarding audio when entering PreEmbarque
   React.useEffect(() => {
-    if (currentState !== FlightState.PreEmbarque) {
-      setBoardingAudioUrl(null);
-      return;
-    }
+    if (currentState !== FlightState.PreEmbarque) return;
 
-    let cancelled = false;
-    let tempAudio: HTMLAudioElement | null = null;
+    const player = announcementPlayerRef.current!;
 
     (async () => {
-      try {
-        const gateSoonMode = eventConfig["gate_crew_start_soon"];
-        const gateStartedMode = eventConfig["gate_crew_started"];
+      const gateSoonMode = eventConfig["gate_crew_start_soon"];
+      const gateStartedMode = eventConfig["gate_crew_started"];
+      const shouldPlaySoon = gateSoonMode === "IA";
+      const shouldPlayStarted = gateStartedMode === "IA";
 
-        const shouldPlaySoon = gateSoonMode === "IA";
-        const shouldPlayStarted = gateStartedMode === "IA";
+      if (shouldPlaySoon) {
+        player.play("gate_crew_start_soon").catch(() => {});
+      }
 
-        const destName = destCityName || simBriefData.destino;
+      // Step 2: Wait 30 seconds
+      await new Promise((resolve) => setTimeout(resolve, 30000));
 
-        if (shouldPlaySoon) {
-          setIsGenerating(true);
-          const startSoonResult = await supabase.functions.invoke("audio-get", {
-            method: "POST",
-            body: {
-              event_key: "gate_crew_start_soon",
-              flight_id: flightId,
-              language_id: captainPrimaryLang,
-              event_data: {
-                airline: getAirlineName(airline) || airline,
-                flight_number: flightCode,
-                destination: destName,
-                gate,
-                departure_time: departureTimeStr,
-              },
-            },
-          });
-
-          if (!cancelled && startSoonResult.data?.success && startSoonResult.data?.announcement?.audio_url) {
-            const ann = startSoonResult.data.announcement;
-            const url = new URL(ann.audio_url, window.location.origin);
-            url.searchParams.set("_t", Date.now().toString());
-            tempAudio = new Audio(url.toString());
-            tempAudio.preload = "auto";
-            tempAudio.crossOrigin = "anonymous";
-            tempAudio.addEventListener("canplaythrough", () => {
-              tempAudio!.play().catch(() => {});
-            });
-            tempAudio.addEventListener("play", () => setIsAudioPlaying(true));
-            tempAudio.addEventListener("ended", () => setIsAudioPlaying(false));
-            tempAudio.load();
-            setCurrentAnnouncement({ ...ann });
-          }
-          setIsGenerating(false);
-        }
-
-        // Step 2: Wait 30 seconds
-        await new Promise((resolve) => setTimeout(resolve, 30000));
-        if (cancelled) return;
-
-        if (shouldPlayStarted) {
-          setIsGenerating(true);
-          const { data, error } = await supabase.functions.invoke("audio-get", {
-            method: "POST",
-            body: {
-              event_key: "gate_crew_started",
-              flight_id: flightId,
-              language_id: captainPrimaryLang,
-            },
-          });
-
-          if (cancelled) return;
-          if (error) throw error;
-
-          if (data?.success && data?.announcement?.audio_url) {
-            setBoardingAudioUrl(data.announcement.audio_url);
-            setCurrentAnnouncement({ ...data.announcement });
-          } else {
-            console.error("Error al cargar audio de embarque:", data?.error ?? "unknown error");
-          }
-          setIsGenerating(false);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          console.error("Error al cargar audio de embarque:", err);
-          setIsGenerating(false);
-          setGeneratingError("Error generando anuncio");
-        }
+      if (shouldPlayStarted) {
+        player.play("gate_crew_started").catch(() => {});
       }
     })();
 
     return () => {
-      cancelled = true;
-      if (tempAudio) {
-        tempAudio.pause();
-        tempAudio.src = "";
-        tempAudio.load();
-        tempAudio = null;
-      }
+      announcementQueueRef.current?.clear();
     };
   }, [currentState]);
 
-  // Play boarding audio when URL is loaded
-  React.useEffect(() => {
-    if (!boardingAudioUrl) return;
-
-    const url = new URL(boardingAudioUrl, window.location.origin);
-    url.searchParams.set("_t", Date.now().toString());
-
-    const audio = new Audio(url.toString());
-    audio.preload = "auto";
-    audio.crossOrigin = "anonymous";
-
-    let cancelled = false;
-
-    const onCanPlay = () => {
-      if (!cancelled) audio.play().catch(() => {});
-    };
-    const onPlay = () => {
-      if (!cancelled) setIsAudioPlaying(true);
-    };
-    const onEnded = () => {
-      if (!cancelled) setIsAudioPlaying(false);
-    };
-    const onError = () => {
-      if (!cancelled) console.error("Error al reproducir audio de embarque");
-    };
-
-    audio.addEventListener("canplaythrough", onCanPlay);
-    audio.addEventListener("play", onPlay);
-    audio.addEventListener("ended", onEnded);
-    audio.addEventListener("error", onError);
-    audio.load();
-
-    return () => {
-      cancelled = true;
-      audio.pause();
-      audio.removeEventListener("canplaythrough", onCanPlay);
-      audio.removeEventListener("play", onPlay);
-      audio.removeEventListener("ended", onEnded);
-      audio.removeEventListener("error", onError);
-      audio.src = "";
-      audio.load();
-    };
-  }, [boardingAudioUrl]);
+  // Sync current FSM state to FlightContext
+  useEffect(() => {
+    flightContextRef.current?.updateFSM({ currentState });
+  }, [currentState]);
 
   useEffect(() => {
       let cancelled = false;
@@ -1319,6 +1286,39 @@ export default function VueloActualView({
     }
     return "12:45";
   }, [simbriefRawData, originICAO]);
+
+  // Sync all editable flight data to FlightContext
+  useEffect(() => {
+    const ctx = flightContextRef.current;
+    const player = announcementPlayerRef.current;
+    if (ctx) {
+      ctx.updateFlight({
+        airline,
+        flightNumber: flightCode,
+        originICAO,
+        destICAO,
+        originCity: originCityName,
+        destCity: destCityName,
+        gate,
+        departureTime: departureTimeStr,
+        captainPrimaryLang,
+        captainSecondaryLang,
+        flightId,
+      });
+      ctx.updateVoices({
+        captain: captainVoice,
+        crew: crewVoice,
+        gateAgent: gateAgentVoiceId,
+      });
+    }
+    if (player && ctx) {
+      player.setFlightContext(ctx);
+    }
+  }, [
+    airline, flightCode, originICAO, destICAO, originCityName, destCityName,
+    gate, departureTimeStr, captainPrimaryLang, captainSecondaryLang, flightId,
+    captainVoice, crewVoice, gateAgentVoiceId,
+  ]);
 
   // Compute flight duration from SimBrief air_time (seconds)
   const flightDuration = React.useMemo(() => {
@@ -2865,31 +2865,23 @@ export default function VueloActualView({
               
               <div className="bg-black/45 p-3.5 rounded-[5px] border border-[#3B7EB2]/30 text-xs font-sans relative overflow-hidden">
                 <div className="absolute top-1 right-2 animate-pulse flex items-center gap-1">
-                  <span className={`w-1.5 h-1.5 rounded-full ${isAudioPlaying ? 'bg-[#43E600]' : 'bg-white/20'}`} />
-                  <span className="text-[8px] font-mono text-white/30">{isAudioPlaying ? 'ON AIR' : 'MUTED'}</span>
+                  <span className={`w-1.5 h-1.5 rounded-full ${isAudioPlaying ? 'bg-[#43E600]' : isGenerating ? 'bg-yellow-400' : 'bg-white/20'}`} />
+                  <span className="text-[8px] font-mono text-white/30">{isAudioPlaying ? 'ON AIR' : isGenerating ? 'GENERATING' : 'MUTED'}</span>
                 </div>
                 
                 <p className="text-white/95 italic leading-relaxed pt-1.5">
                   {generatingError
                     ? <span className="text-red-400">{generatingError}</span>
-                    : isGenerating
-                      ? "Generando anuncio..."
-                      : currentAnnouncement
-                        ? `"${currentAnnouncement.text}"`
-                        : '"Seleccione o simule un anuncio para emitirlo a los altavoces de la cabina."'}
+                    : currentAnnouncement
+                      ? `"${currentAnnouncement.text}"`
+                      : isGenerating
+                        ? "Generando anuncio..."
+                        : null}
                 </p>
                 
                 <div className="mt-3 pt-2.5 border-t border-white/15 flex justify-between items-center text-[9.5px] font-mono text-white/50">
                   {(() => {
-                    if (!currentAnnouncement) {
-                      const name = simBriefData.nombrePiloto || "N. Sassano";
-                      return (
-                        <>
-                          <span>NARRACIÓN: <strong className="text-white font-bold">{name}</strong></span>
-                          <span className="text-[#45AFFF] uppercase font-black text-[8px] tracking-wider bg-[#45AFFF]/10 px-1.5 py-0.5 rounded border border-[#45AFFF]/20">Capitán</span>
-                        </>
-                      );
-                    }
+                    if (!currentAnnouncement) return null;
                     const roleLabel = currentAnnouncement.speaker_role === "captain" ? "Capitán" : currentAnnouncement.speaker_role === "crew" ? "Tripulación de Cabina" : "Agente de Puerta";
                     return (
                       <>
@@ -3457,18 +3449,15 @@ export default function VueloActualView({
                 </div>
                 
                 <p className="text-white/95 italic leading-relaxed pt-1.5 font-medium">
-                  "{p26Announcement ? p26Announcement.texto : 'Seleccione o simule un anuncio para emitirlo a los altavoces de la cabina.'}"
+                  {p26Announcement ? `"${p26Announcement.texto}"` : null}
                 </p>
                 
                 <div className="mt-3 pt-2.5 border-t border-white/15 flex justify-between items-center text-[9.5px] font-mono text-white/50">
                   {(() => {
-                    const isCaptain = p26Announcement && ["bienvenida", "turbulencia", "descenso", "aterrizaje"].includes(p26Announcement.tipo);
-                    const name = p26Announcement 
-                      ? (isCaptain ? (simBriefData.nombrePiloto || "N. Sassano") : "Sofía Martínez") 
-                      : (simBriefData.nombrePiloto || "N. Sassano");
-                    const role = p26Announcement 
-                      ? (isCaptain ? "Capitán" : "Tripulación de Cabina") 
-                      : "Capitán";
+                    if (!p26Announcement) return null;
+                    const isCaptain = ["bienvenida", "turbulencia", "descenso", "aterrizaje"].includes(p26Announcement.tipo);
+                    const name = isCaptain ? (simBriefData.nombrePiloto || "N. Sassano") : "Sofía Martínez";
+                    const role = isCaptain ? "Capitán" : "Tripulación de Cabina";
                     
                     return (
                       <>
