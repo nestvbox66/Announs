@@ -4,6 +4,7 @@ import { FlightFSM } from "./FlightFSM";
 export class SimulationController {
   private running = false;
   private flightFSM: FlightFSM;
+  private simCallId = 0;
 
   constructor(flightFSM: FlightFSM) {
     this.flightFSM = flightFSM;
@@ -22,7 +23,22 @@ export class SimulationController {
     console.log("[Simulation] Stopped");
   }
 
+  enterBoarding(): void {
+    this.simCallId++;
+    const callId = this.simCallId;
+
+    console.log("[SIM TRACE]");
+    console.log("action: enterBoarding");
+    console.log("callId: " + callId);
+    console.log("currentFSMState: " + this.flightFSM.getCurrentState());
+
+    this.flightFSM.transition(FlightPhase.BOARDING);
+  }
+
   nextPhase(): void {
+    this.simCallId++;
+    const callId = this.simCallId;
+
     const orderedPhases: FlightPhase[] = [
       FlightPhase.PRE_BOARDING,
       FlightPhase.BOARDING,
@@ -40,6 +56,13 @@ export class SimulationController {
     ];
 
     const currentIdx = orderedPhases.indexOf(this.flightFSM.getCurrentState());
+
+    console.log("[SIM TRACE]");
+    console.log("action: nextPhase");
+    console.log("callId: " + callId);
+    console.log("currentFSMState: " + this.flightFSM.getCurrentState());
+    console.log("next: " + (currentIdx >= 0 && currentIdx < orderedPhases.length - 1 ? orderedPhases[currentIdx + 1] : "none"));
+
     if (currentIdx >= 0 && currentIdx < orderedPhases.length - 1) {
       const next = orderedPhases[currentIdx + 1];
       this.flightFSM.transition(next);

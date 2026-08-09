@@ -49,6 +49,9 @@ export class AnnouncementService {
     this.aborted = false;
     this.emit("generating", true);
     this.emit("error", null);
+    console.log("[SERVICE]");
+    console.log("Generating / Loading Audio");
+    console.log("Event: " + eventKey);
 
     const { data, error } = await supabase.functions.invoke("audio-get", {
       method: "POST",
@@ -103,6 +106,8 @@ export class AnnouncementService {
       audio.addEventListener("canplaythrough", () => {
         if (!done) {
           this.emit("playing", true);
+          console.log("[SERVICE]");
+          console.log("Audio Started");
           audio.play().catch((err) => {
             if (!done) {
               done = true;
@@ -122,6 +127,7 @@ export class AnnouncementService {
           this.currentAudio = null;
           this.emit("playing", false);
           this.emit("generating", false);
+          this.emit("completed", eventKey);
           resolve();
         }
       });

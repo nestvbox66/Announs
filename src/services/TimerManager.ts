@@ -5,6 +5,7 @@ export interface TimerAction {
   id: string;
   delayMs: number;
   event: string;
+  onFire?: (id: string) => void;
 }
 
 interface TimerRecord {
@@ -68,11 +69,15 @@ export class TimerManager {
       const record = this.timers.get(id);
       if (record) {
         this.timers.delete(id);
-        this.queue.enqueue({
-          eventKey: record.action.event,
-          flightId: this.flightId,
-          languageId: this.languageId ?? "",
-        }).catch(() => {});
+        if (record.action.onFire) {
+          record.action.onFire(id);
+        } else {
+          this.queue.enqueue({
+            eventKey: record.action.event,
+            flightId: this.flightId,
+            languageId: this.languageId ?? "",
+          }).catch(() => {});
+        }
       }
     }
 

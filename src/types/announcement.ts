@@ -9,4 +9,5 @@ export type AnnouncementEvent =
   | "generating"
   | "announcement"
   | "playing"
-  | "error";
+  | "error"
+  | "completed";

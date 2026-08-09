@@ -26,6 +26,7 @@ export class FlightFSM {
   private currentState: FlightPhase = FlightPhase.PRE_BOARDING;
   private scheduler: Scheduler;
   private listeners = new Set<FSMListener>();
+  private fsmCallId = 0;
 
   constructor(scheduler: Scheduler) {
     this.scheduler = scheduler;
@@ -37,6 +38,16 @@ export class FlightFSM {
   }
 
   transition(nextState: FlightPhase): boolean {
+    this.fsmCallId++;
+    const callId = this.fsmCallId;
+    const from = this.currentState;
+
+    console.log("[FSM TRACE]");
+    console.log("action: transition");
+    console.log("from: " + from);
+    console.log("to: " + nextState);
+    console.log("callId: " + callId);
+
     const key = this.currentState + "\0" + nextState;
     if (!transitionAllowed.has(key)) {
       console.log(
@@ -62,6 +73,13 @@ export class FlightFSM {
   }
 
   reset(): void {
+    this.fsmCallId++;
+    console.log("[FSM TRACE]");
+    console.log("action: reset");
+    console.log("from: " + this.currentState);
+    console.log("to: " + FlightPhase.PRE_BOARDING);
+    console.log("callId: " + this.fsmCallId);
+
     this.currentState = FlightPhase.PRE_BOARDING;
     console.log("[FSM] Reset a " + this.currentState);
   }

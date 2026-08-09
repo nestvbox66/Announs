@@ -52,6 +52,8 @@ import { RuleEngine } from "../services/RuleEngine";
 import { Clock } from "../services/Clock";
 import { TimerManager } from "../services/TimerManager";
 import { AnnouncementPlayer } from "../services/AnnouncementPlayer";
+import { AnnouncementEventHandler } from "../dispatcher/handlers/AnnouncementEventHandler";
+import { DefaultEventDispatcher } from "../dispatcher/DefaultEventDispatcher";
 import PasajeroSlideOver from "./PasajeroSlideOver";
 // @ts-ignore
 import siluetaAvion from "./Silueta Avion.png";
@@ -255,19 +257,35 @@ export default function VueloActualView({
     announcementPlayerRef.current = new AnnouncementPlayer(announcementQueueRef.current);
   }
 
+  const flightContextRef = useRef<FlightContext | null>(null);
+  if (!flightContextRef.current) {
+    flightContextRef.current = new FlightContext();
+  }
+
+  const announcementEventHandlerRef = useRef<AnnouncementEventHandler | null>(null);
+  if (!announcementEventHandlerRef.current) {
+    announcementEventHandlerRef.current = new AnnouncementEventHandler(announcementQueueRef.current);
+  }
+
+  const eventDispatcherRef = useRef<DefaultEventDispatcher | null>(null);
+  if (!eventDispatcherRef.current) {
+    eventDispatcherRef.current = new DefaultEventDispatcher([announcementEventHandlerRef.current]);
+  }
+
   const schedulerRef = useRef<Scheduler | null>(null);
   if (!schedulerRef.current) {
-    schedulerRef.current = new Scheduler(announcementPlayerRef.current, ruleEngineRef.current, timerManagerRef.current);
+    schedulerRef.current = new Scheduler(
+      ruleEngineRef.current,
+      timerManagerRef.current,
+      eventDispatcherRef.current,
+      flightContextRef.current,
+      announcementQueueRef.current
+    );
   }
 
   const flightFSMRef = useRef<FlightFSM | null>(null);
   if (!flightFSMRef.current) {
     flightFSMRef.current = new FlightFSM(schedulerRef.current);
-  }
-
-  const flightContextRef = useRef<FlightContext | null>(null);
-  if (!flightContextRef.current) {
-    flightContextRef.current = new FlightContext();
   }
 
   const simControllerRef = useRef<SimulationController | null>(null);
@@ -291,6 +309,10 @@ export default function VueloActualView({
     const unsubErr = q.on("error", (msg: string | null) => {
       if (msg) { setGeneratingError(msg); setIsGenerating(false); }
     });
+
+    // Start the simulation clock so TimerManager timers can fire.
+    clockRef.current?.start();
+
     return () => {
       unsubGen(); unsubAnn(); unsubPlay(); unsubErr();
     };
@@ -301,7 +323,12 @@ export default function VueloActualView({
     timerManagerRef.current?.setEventContext(flightId, captainPrimaryLang);
   }, [flightId, captainPrimaryLang]);
 
-  // Fetch boarding audio when entering PreEmbarque
+  // TODO Migration:
+  //
+  // Legacy boarding announcement flow.
+  // Disabled after FlightFSM became the source of truth.
+  // Stage 18A.1 (Handover): the narrative is now governed by
+  // FlightFSM -> Scheduler -> Scenario -> Narrative -> Dispatcher.
   React.useEffect(() => {
     if (currentState !== FlightState.PreEmbarque) return;
 
@@ -314,14 +341,15 @@ export default function VueloActualView({
       const shouldPlayStarted = gateStartedMode === "IA";
 
       if (shouldPlaySoon) {
-        player.play("gate_crew_start_soon").catch(() => {});
+        // player.play("gate_crew_start_soon").catch(() => {});
+        void player;
       }
 
       // Step 2: Wait 30 seconds
       await new Promise((resolve) => setTimeout(resolve, 30000));
 
       if (shouldPlayStarted) {
-        player.play("gate_crew_started").catch(() => {});
+        // player.play("gate_crew_started").catch(() => {});
       }
     })();
 
@@ -545,7 +573,8 @@ export default function VueloActualView({
         const { data: userVoices, error: voicesError } = await supabase
           .from('voices')
           .select('voicestock_id')
-          .eq('user_id', userId);
+          .eq('user_id', userId)
+          .eq('voice_enabled', true);
         if (voicesError) throw voicesError;
         if (cancelled) return;
 
@@ -897,6 +926,11 @@ export default function VueloActualView({
 
       setIsFlightSettingsOpen(false);
       onStateChange(FlightState.PreEmbarque);
+      // Stage 18A.2: once the flight is started, enter the operational
+      // boarding phase through the existing FSM. This triggers
+      // Scheduler.enterPhase(BOARDING) -> PreBoardingScenario automatically.
+      simControllerRef.current?.enterBoarding();
+      console.log("[UI] Iniciar vuelo -> FlightFSM enterBoarding()");
     } catch (err: any) {
       console.error("Error al iniciar vuelo:", err);
     } finally {
@@ -1192,10 +1226,16 @@ export default function VueloActualView({
 
   const mockInfo = stageMockData[currentSubStage];
 
-  // 10 seconds auto-advance for phases 2 to 7
+  // TODO Migration (Stage 18D):
+  //
+  // Legacy mockup auto-advance timer for phases 2 to 7.
+  // DISABLED: the FlightFSM/SimulationController is the only authority that
+  // may advance flight phases. The UI must NOT auto-advance between phases.
+  // Kept as documentation; not replaced by another timer.
   React.useEffect(() => {
     if (!isPhase2To7) return;
-
+    return;
+    // eslint-disable-next-line no-unreachable
     const timer = setInterval(() => {
       const currentIndex = getCurrentPhaseIndex();
       // Only advance if we are in phases 2 to 6 (indices 1 to 5) - so we can advance to 7 (Plataforma, index 6)
@@ -1208,6 +1248,7 @@ export default function VueloActualView({
     }, 10000); // 10 seconds
 
     return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPhase2To7, currentSubStage]);
 
   React.useEffect(() => {
@@ -1247,14 +1288,18 @@ export default function VueloActualView({
     }
   }, [currentSubStage]);
 
-  // 30 seconds auto-advance after boarding is complete ("listo para cerrar puertas")
+  // TODO Migration (Stage 18D):
+  //
+  // Legacy mockup auto-advance after boarding is complete.
+  // DISABLED: the FlightFSM/SimulationController is the only authority that
+  // may advance flight phases. The UI must NOT auto-advance to "Pre-vuelo".
+  // Kept as documentation; not replaced by another timer.
   React.useEffect(() => {
     if (boardedCount >= passengers.length && passengers.length > 0 && currentState === FlightState.PreEmbarque && currentSubStage === "Embarque") {
-      const autoAdvanceTimer = setTimeout(() => {
-        // Advance sub-stage to "Pre-vuelo" (Phase 2)
-        setCurrentSubStage("Pre-vuelo");
-      }, 30000); // 30 seconds
-      return () => clearTimeout(autoAdvanceTimer);
+      // const autoAdvanceTimer = setTimeout(() => {
+      //   setCurrentSubStage("Pre-vuelo");
+      // }, 30000);
+      // return () => clearTimeout(autoAdvanceTimer);
     }
   }, [boardedCount, passengers.length, currentState, currentSubStage]);
 
@@ -1293,7 +1338,7 @@ export default function VueloActualView({
     const player = announcementPlayerRef.current;
     if (ctx) {
       ctx.updateFlight({
-        airline,
+        airline: getAirlineName(airline),
         flightNumber: flightCode,
         originICAO,
         destICAO,
@@ -1310,14 +1355,27 @@ export default function VueloActualView({
         crew: crewVoice,
         gateAgent: gateAgentVoiceId,
       });
+      ctx.updateSettings({
+        eventConfig,
+      });
     }
     if (player && ctx) {
       player.setFlightContext(ctx);
     }
+
+    // TEMP DIAGNOSTIC LOG (Stage 19A) — remove later.
+    const cfg = ctx?.getSettings()?.eventConfig;
+    if (cfg) {
+      console.log("[CONFIG]");
+      console.log("Flight event configuration loaded");
+      for (const key of ["preflight_crew_welcome", "preflight_crew_basic_info", "preflight_capt_welcome", "preflight_capt_basic_info"]) {
+        console.log(key + " = " + (cfg[key] ?? "(missing)"));
+      }
+    }
   }, [
     airline, flightCode, originICAO, destICAO, originCityName, destCityName,
     gate, departureTimeStr, captainPrimaryLang, captainSecondaryLang, flightId,
-    captainVoice, crewVoice, gateAgentVoiceId,
+    captainVoice, crewVoice, gateAgentVoiceId, eventConfig,
   ]);
 
   // Compute flight duration from SimBrief air_time (seconds)
@@ -1594,8 +1652,11 @@ export default function VueloActualView({
                   key={phase.label}
                   type="button"
                   onClick={() => {
+                    // Stage 18D: phase stepper is visual only. It must NOT
+                    // trigger a real simulation phase transition. The
+                    // FlightFSM/SimulationController is the only authority.
                     setCurrentSubStage(phase.label);
-                    onStateChange(phase.state);
+                    // onStateChange(phase.state); // DISABLED — visual only
                   }}
                   className={`relative flex md:flex-col items-center gap-3 md:gap-2 flex-1 text-left md:text-center z-10 transition-all focus:outline-none cursor-pointer group ${
                     isPassedOrActive ? "opacity-100" : "opacity-35 hover:opacity-70"
@@ -1874,8 +1935,17 @@ export default function VueloActualView({
                     <button 
                       id="header-btn-toggle-boarding"
                       onClick={() => {
-                        setIsBoardingActive(!isBoardingActive);
+                        const wasActive = isBoardingActive;
+                        setIsBoardingActive(!wasActive);
                         setBoardingStarted(true);
+
+                        // Stage 18A.2: the boarding button does NOT change the
+                        // FlightPhase. FlightFSM already remains in BOARDING.
+                        // It only starts the "boarding" narrative scenario.
+                        if (!wasActive) {
+                          console.log("[UI] Comenzar embarque -> Scheduler.startScenario('boarding')");
+                          schedulerRef.current?.startScenario("boarding");
+                        }
                       }}
                       className={`font-mono font-bold px-4 py-2 rounded-[5px] text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-all hover:scale-[1.02] active:scale-[0.98] shadow-md h-9 shrink-0 ${
                         isBoardingActive 
