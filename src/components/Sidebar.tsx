@@ -11,13 +11,12 @@ import {
   User, 
   Settings, 
   Plane, 
-  Users, 
-  Wifi, 
-  WifiOff, 
-  Activity,
   Terminal,
-  Volume2
+  ChevronsLeft,
+  ChevronsRight,
 } from "lucide-react";
+import ConnectionStatus from "./flight/ConnectionStatus";
+import type { FlightController } from "../services/FlightController";
 
 interface SidebarProps {
   currentView: string;
@@ -26,15 +25,21 @@ interface SidebarProps {
   activeFlightCode?: string;
   copilotVolume: number;
   isLoggedIn?: boolean;
+  flightController?: FlightController | null;
+  collapsed?: boolean;
+  onToggleCollapsed?: () => void;
 }
 
 export default function Sidebar({
   currentView,
   onViewChange,
   isConnected,
-  activeFlightCode = "AR1842",
+  activeFlightCode = "",
   copilotVolume,
-  isLoggedIn = false
+  isLoggedIn = false,
+  flightController = null,
+  collapsed = false,
+  onToggleCollapsed,
 }: SidebarProps) {
   const { t } = useTranslation();
   const menuItems = isLoggedIn 
@@ -50,12 +55,12 @@ export default function Sidebar({
   return (
     <aside 
       id="sidebar-container"
-      className="w-72 bg-[#002440] border-r border-[#3B7EB2] flex flex-col justify-between h-screen sticky top-0 shrink-0 select-none z-10"
+      className={`${collapsed ? "w-16" : "w-72"} bg-[#002440] border-r border-[#3B7EB2] flex flex-col justify-between h-screen sticky top-0 shrink-0 select-none z-10 transition-all duration-300`}
     >
       {/* Upper Branding Area */}
       <div>
-        <div id="brand-logo-area" className="p-6 border-b border-[#3B7EB2]/50 flex flex-col items-center justify-center">
-          <div className="flex items-center justify-center mb-2">
+        <div id="brand-logo-area" className={`border-b border-[#3B7EB2]/50 flex flex-col items-center justify-center ${collapsed ? "py-3" : "p-6"}`}>
+          {!collapsed && (
             <img 
               src={logoImg} 
               alt="Announs Logo" 
@@ -63,11 +68,23 @@ export default function Sidebar({
               id="announs-logo-img"
               referrerPolicy="no-referrer"
             />
-          </div>
+          )}
+          {/* Toggle expandir/colapsar */}
+          {onToggleCollapsed && (
+            <button
+              type="button"
+              onClick={onToggleCollapsed}
+              id="sidebar-toggle"
+              title={collapsed ? "Expandir menú" : "Colapsar menú"}
+              className={`${collapsed ? "" : "mt-3"} flex items-center justify-center w-7 h-7 rounded hover:bg-white/10 text-[#45AFFF]/70 hover:text-white transition-colors cursor-pointer`}
+            >
+              {collapsed ? <ChevronsRight className="w-4 h-4" /> : <ChevronsLeft className="w-4 h-4" />}
+            </button>
+          )}
         </div>
 
         {/* Navigation Items */}
-        <nav id="sidebar-navigation" className="p-4 space-y-2 mt-4">
+        <nav id="sidebar-navigation" className={`space-y-2 ${collapsed ? "p-2 mt-2 flex flex-col items-center" : "p-4 mt-4"}`}>
           {menuItems.map((item) => {
             const IconComponent = item.icon;
             const isActive = currentView === item.id;
@@ -76,19 +93,20 @@ export default function Sidebar({
                 key={item.id}
                 id={`nav-${item.id}`}
                 onClick={() => onViewChange(item.id)}
-                className={`w-full flex items-center gap-4 px-4 py-3 rounded-none text-xs font-bold tracking-wider uppercase transition-all duration-200 border-y border-transparent border-l-2 ${
+                title={collapsed ? item.label : undefined}
+                className={`${collapsed ? "justify-center w-11 px-0" : "justify-start w-full px-4"} flex items-center gap-4 py-3 rounded-none text-xs font-bold tracking-wider uppercase transition-all duration-200 border-y border-transparent border-l-2 ${
                   isActive
                     ? "bg-[#45AFFF]/10 border-l-[#45AFFF] text-[#45AFFF] font-black"
                     : "bg-transparent text-[#45AFFF]/70 hover:text-white hover:bg-[#2C6591]/20 border-l-transparent"
                 }`}
               >
                 <IconComponent 
-                  className={`w-4 h-4 transition-transform duration-300 ${
+                  className={`w-4 h-4 transition-transform duration-300 shrink-0 ${
                     isActive ? "scale-110 text-[#43E600]" : "text-[#45AFFF]"
                   }`} 
                 />
-                <span className="tracking-widest">{item.label}</span>
-                {isActive && (
+                {!collapsed && <span className="tracking-widest">{item.label}</span>}
+                {!collapsed && isActive && (
                   <span className="ml-auto w-1.5 h-1.5 rounded-full bg-[#43E600] animate-pulse" />
                 )}
               </button>
@@ -97,34 +115,16 @@ export default function Sidebar({
         </nav>
       </div>
 
-      {/* Bottom Status Panel - Custom Design with Glasses and Borders */}
-      <div className="p-4 border-t border-[#3B7EB2]/50 bg-[#001b33]/60">
-        <div id="sim-status-card" className="bg-[#2C6591]/20 border border-white/20 rounded-[5px] p-3 text-xs mb-3">
-          <div className="flex items-center justify-between">
-            <span className="font-mono text-white/70">CONEXIÓN AL SIMULADOR:</span>
-            {isConnected ? (
-              <span className="flex items-center gap-1.5 text-[#43E600] font-bold">
-                <Wifi className="w-3.5 h-3.5" />
-                CONECTADO
-              </span>
-            ) : (
-              <span className="flex items-center gap-1.5 text-[#E68B00] font-bold">
-                <WifiOff className="w-3.5 h-3.5" />
-                DESCONECTADO
-              </span>
-            )}
-          </div>
-          
-          <div className="mt-1.5 pt-1.5 border-t border-white/10 flex items-center justify-between text-[11px] text-white/90 font-mono">
-            <span>MSFS 2020</span>
-          </div>
-        </div>
+      {/* Bottom Status Panel - Estado de conexión con simuladores */}
+      <div className={`border-t border-[#3B7EB2]/50 bg-[#001b33]/60 ${collapsed ? "px-0 py-2" : "p-4"}`}>
+        <ConnectionStatus flightController={flightController} compact={collapsed} />
 
-        {/* Application Credits/Version info */}
-        <div className="mt-4 flex items-center justify-center gap-1.5 text-[10px] font-mono text-[#45AFFF]/50">
-          <Terminal className="w-3 h-3" />
-          <span>Announs Desktop. v.0.1.0</span>
-        </div>
+        {!collapsed && (
+          <div className="mt-4 flex items-center justify-center gap-1.5 text-[10px] font-mono text-[#45AFFF]/50">
+            <Terminal className="w-3 h-3" />
+            <span>Announs Desktop. v.0.1.0</span>
+          </div>
+        )}
       </div>
     </aside>
   );

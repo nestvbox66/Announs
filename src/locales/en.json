@@ -1,4 +1,26 @@
 {
+  "flight": {
+    "phase": {
+      "gate": "GATE",
+      "pre_boarding": "Pre-Boarding",
+      "boarding": "Boarding",
+      "pre_flight": "Pre-Flight",
+      "taxi": "Taxi",
+      "takeoff": "Takeoff",
+      "climb": "Climb",
+      "cruise": "Cruise",
+      "descent": "Descent",
+      "approach": "Approach",
+      "landing": "Landing",
+      "taxi_to_gate": "Taxi to Gate",
+      "at_gate": "At Gate",
+      "flight_completed": "Flight Completed"
+    },
+    "settings": {
+      "start_flight_btn": "Start Flight",
+      "start_test_btn": "Start Test"
+    }
+  },
   "narrator": {
     "captain": "Captain",
     "crew": "Cabin Crew"
@@ -100,7 +122,7 @@
         "simbrief_no_plan": "No active flight plan found. Make sure to generate the flight in SimBrief before importing.",
         "simbrief_generic_error": "Error connecting to SimBrief."
       },
-      "load_btn": "Load Flight",
+      "no_flight_loaded": "No flight loaded. Import a flight from SimBrief to start.",
       "start_flight_btn": "Next",
       "starting_flight_btn": "Starting...",
       "reimport_btn": "Re-import",
@@ -159,7 +181,7 @@
         "mode_pack": "Pack",
         "mode_ia": "IA",
         "tooltip_no_package": "You must select an active Package to enable the PACK option",
-        "group_immersion": "Immersion (7)",
+        "group_immersion": "Immersion",
         "group_taxi": "Taxi (5)",
         "group_cruise": "Cruise (7)",
         "group_descent": "Descent (6)",
@@ -248,7 +270,10 @@
       },
       "event_config": {
         "title": "Configure Events",
-        "description": "Select the type of announcer for each regulated event that will occur during the flight:"
+        "description": "Select the type of announcer for each regulated event that will occur during the flight:",
+        "scenario_label": "Scenario",
+        "scenario_loading": "Loading scenario...",
+        "scenario_no_events": "This scenario has no events configured for this phase."
       },
       "package_box": {
         "active_label": "Active Package:",
@@ -256,13 +281,13 @@
         "manage_btn": "[ Manage ]"
       },
       "crew": {
-        "title": "Crew & Cabin",
-        "voice_config_title": "Voice Configuration",
+        "title": "Language & Voices",
+        "language": "Language:",
+        "gate_voice": "Gate Agent Voice:",
         "captain_voice": "Captain Voice:",
-        "cabin_voice": "Cabin Voice (TCP):",
-        "lang_config_title": "Language Configuration",
-        "primary_lang": "Primary Language:",
-        "secondary_lang": "Secondary Language:"
+        "cabin_voice": "Crew Voice:",
+        "select_voice": "Select voice",
+        "voices_hint": "Available voices depend on the selected language."
       },
       "identifications": {
         "title": "Identifications",
@@ -310,11 +335,8 @@
     "preset_vhf": "VHF Radio",
     "preset_muffled": "Muffled Intercom",
     "preset_custom": "Custom Equalization [Custom]",
-    "staff_title": "FLIGHT STAFF",
-    "staff_pilot_label": "Customize Captain name",
-    "staff_pilot_placeholder": "e.g. Captain Alberto",
-    "staff_crew_label": "Customize crew lead name",
-    "staff_crew_placeholder": "e.g. Chief Sofia",
+    "staff_title": "LANGUAGE & FLIGHT STAFF",
+    "staff_desc": "Set the language and the voices used for the captain, cabin crew and gate agent on your flights.",
     "passenger_title": "PASSENGER EXPERIENCE",
     "passenger_desc": "Configure situations that affect the passenger experience",
     "passenger_gforce": "G-Force Sensor:",
@@ -326,6 +348,9 @@
     "passenger_delay_feedback_helper": "Penalizes if delays are not announced",
     "eventos_title": "Configure Smart Cabin Events",
     "eventos_desc": "Select announcement preferences for each flight phase. Enable AI voiceovers for greater route detail.",
+    "scenario_label": "Scenario",
+    "scenario_loading": "Loading scenario...",
+    "scenario_no_events": "This scenario has no events configured for this phase.",
     "package_active_label": "Active Package:",
     "package_no_package": "No package configured",
     "immersion_chime_brief": "Chime tone before announcements",
@@ -405,6 +430,21 @@
         "common_capt_seatbelt": "Manual seatbelt audio signal for bumps or changes.",
         "common_crew_seatbelt": "Verbal requirement to comply with safety light adjustment."
       }
+    }
+  },
+  "music": {
+    "track_label": "Boarding track:",
+    "no_music": "No music",
+    "random": "Random music",
+    "loading_tracks": "Loading tracks...",
+    "preview": {
+      "play": "Preview",
+      "stop": "Stop",
+      "loading": "Loading...",
+      "playing": "Playing",
+      "stopped": "Stopped",
+      "no_audio": "No audio available for this track",
+      "error": "Error playing audio"
     }
   },
   "passenger_details": {

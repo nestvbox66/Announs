@@ -4,7 +4,7 @@ import { Scheduler } from "./Scheduler";
 type FSMListener = (phase: FlightPhase) => void;
 
 const VALID_TRANSITIONS: [FlightPhase, FlightPhase][] = [
-  [FlightPhase.PRE_BOARDING, FlightPhase.BOARDING],
+  [FlightPhase.GATE, FlightPhase.BOARDING],
   [FlightPhase.BOARDING, FlightPhase.PRE_FLIGHT],
   [FlightPhase.PRE_FLIGHT, FlightPhase.TAXI],
   [FlightPhase.TAXI, FlightPhase.TAKEOFF],
@@ -23,7 +23,7 @@ const transitionAllowed = new Set(
 );
 
 export class FlightFSM {
-  private currentState: FlightPhase = FlightPhase.PRE_BOARDING;
+  private currentState: FlightPhase = FlightPhase.GATE;
   private scheduler: Scheduler;
   private listeners = new Set<FSMListener>();
   private fsmCallId = 0;
@@ -37,7 +37,7 @@ export class FlightFSM {
     return this.currentState;
   }
 
-  transition(nextState: FlightPhase): boolean {
+  transition(nextState: FlightPhase, source: 'simulator' | 'user' | 'auto' = 'auto'): boolean {
     this.fsmCallId++;
     const callId = this.fsmCallId;
     const from = this.currentState;
@@ -46,6 +46,7 @@ export class FlightFSM {
     console.log("action: transition");
     console.log("from: " + from);
     console.log("to: " + nextState);
+    console.log("source: " + source);
     console.log("callId: " + callId);
 
     const key = this.currentState + "\0" + nextState;
@@ -63,7 +64,7 @@ export class FlightFSM {
     console.log("[FSM] Transition aceptada");
     console.log("[FSM] Notificando Scheduler");
 
-    this.scheduler.enterPhase(this.currentState);
+    this.scheduler.enterPhase(this.currentState, source);
 
     for (const listener of this.listeners) {
       listener(this.currentState);
@@ -77,10 +78,10 @@ export class FlightFSM {
     console.log("[FSM TRACE]");
     console.log("action: reset");
     console.log("from: " + this.currentState);
-    console.log("to: " + FlightPhase.PRE_BOARDING);
+    console.log("to: " + FlightPhase.GATE);
     console.log("callId: " + this.fsmCallId);
 
-    this.currentState = FlightPhase.PRE_BOARDING;
+    this.currentState = FlightPhase.GATE;
     console.log("[FSM] Reset a " + this.currentState);
   }
 

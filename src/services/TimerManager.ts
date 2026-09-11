@@ -55,6 +55,16 @@ export class TimerManager {
     return this.timers.has(id);
   }
 
+  /** Instantánea de timers pendientes (diagnóstico para el monitor). */
+  getPendingTimers(): { id: string; event: string; remainingMs: number }[] {
+    const now = this.clock.now();
+    return Array.from(this.timers.entries()).map(([id, record]) => ({
+      id,
+      event: record.action.event,
+      remainingMs: Math.max(0, record.deadlineMs - now),
+    }));
+  }
+
   private onTick = (): void => {
     const now = this.clock.now();
     const fired: string[] = [];

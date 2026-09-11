@@ -1,5 +1,5 @@
 export enum FlightPhase {
-  PRE_BOARDING = "PRE_BOARDING",
+  GATE = "GATE",
   BOARDING = "BOARDING",
   PRE_FLIGHT = "PRE_FLIGHT",
   TAXI = "TAXI",

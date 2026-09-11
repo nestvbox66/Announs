@@ -10,4 +10,6 @@ export interface EventDefinition {
   description?: string;
   speakerRole?: "captain" | "crew" | "gate";
   preRecorded?: boolean;
+  /** Umbral de demora en ms para delay_detection (default: 600000 / 10 min). */
+  default_delay_ms?: number;
 }

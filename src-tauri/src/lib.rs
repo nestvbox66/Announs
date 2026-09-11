@@ -1,3 +1,5 @@
+mod simconnect;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
@@ -11,6 +13,13 @@ pub fn run() {
       }
       Ok(())
     })
+    .invoke_handler(tauri::generate_handler![
+      simconnect::simconnect_connect,
+      simconnect::simconnect_disconnect,
+      simconnect::simconnect_subscribe,
+      simconnect::simconnect_poll,
+      simconnect::simconnect_emit_telemetry
+    ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
 }

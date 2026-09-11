@@ -10,4 +10,6 @@ export type AnnouncementEvent =
   | "announcement"
   | "playing"
   | "error"
-  | "completed";
+  | "completed"
+  | "announcement:started"
+  | "announcement:completed";

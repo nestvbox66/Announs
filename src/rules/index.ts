@@ -12,7 +12,7 @@ import { taxiInRules } from "./taxiIn";
 import { atGateRules } from "./atGate";
 
 export const phaseRules: Record<string, RuleDefinition[]> = {
-  PRE_BOARDING: [],
+  GATE: [],
   BOARDING: boardingRules,
   PRE_FLIGHT: preflightRules,
   TAXI: taxiRules,

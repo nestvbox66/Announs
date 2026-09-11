@@ -2,25 +2,170 @@ import { FlightPhase } from "../engine/FlightEngine";
 import { FlightScenario } from "./FlightScenario";
 import { BoardingScenario } from "./BoardingScenario";
 import { PreBoardingScenario } from "./PreBoardingScenario";
+import { ScenarioLoader } from "../services/ScenarioLoader";
+import { ScenarioDefinition } from "./definitions/ScenarioDefinition";
+import { NarrativeStep } from "./narrative/NarrativeStep";
+import { FlightContext } from "../services/FlightContext";
+import { TEST_SCENARIO_KEY } from "../services/ScenarioResolver";
+
+interface ScenarioSource {
+  edgePhaseKey: string;
+  fallback: () => FlightScenario | null;
+}
+
+const PHASE_SOURCES: Partial<Record<FlightPhase, ScenarioSource>> = {
+  [FlightPhase.GATE]: {
+    edgePhaseKey: "GATE",
+    fallback: () => new PreBoardingScenario(),
+  },
+  [FlightPhase.BOARDING]: {
+    edgePhaseKey: "BOARDING",
+    fallback: () => new BoardingScenario(),
+  },
+};
+
+const NAME_SOURCES: Record<string, ScenarioSource> = {
+  preboarding: {
+    edgePhaseKey: "GATE",
+    fallback: () => new PreBoardingScenario(),
+  },
+  boarding: {
+    edgePhaseKey: "BOARDING",
+    fallback: () => new BoardingScenario(),
+  },
+};
 
 export class ScenarioFactory {
-  static getForPhase(phase: FlightPhase): FlightScenario | null {
-    switch (phase) {
-      case FlightPhase.BOARDING:
-        return new PreBoardingScenario();
-      default:
-        return null;
-    }
+  private static loader: ScenarioLoader = new ScenarioLoader();
+
+  static setLoader(loader: ScenarioLoader): void {
+    this.loader = loader;
   }
 
-  static getByName(name: string): FlightScenario | null {
-    switch (name) {
-      case "preboarding":
-        return new PreBoardingScenario();
-      case "boarding":
-        return new BoardingScenario();
-      default:
-        return null;
+  static clearCache(): void {
+    this.loader.clearCache();
+    console.log("[ScenarioFactory] Caché de escenarios limpiada.");
+  }
+
+  static async getForPhase(
+    phase: FlightPhase,
+    scenarioKey?: string,
+    forceRefresh = false
+  ): Promise<FlightScenario | null> {
+    const source = PHASE_SOURCES[phase];
+    // Cualquier fase (PRE_FLIGHT, TAXI, CRUISE, ...) intenta cargar su
+    // escenario publicado desde el Backoffice. Solo GATE y BOARDING tienen
+    // fallback hardcodeado; el resto devuelve null si no hay publicación.
+    const edgePhaseKey = source?.edgePhaseKey ?? phase;
+
+    const definition = await this.loader.loadPublishedScenario(
+      edgePhaseKey,
+      scenarioKey,
+      forceRefresh
+    );
+    if (definition) {
+      return ScenarioFactory.fromDefinition(definition);
     }
+
+    if (!source?.fallback) {
+      console.log(
+        `[ScenarioFactory] Sin escenario publicado para fase: ${phase} (sin fallback)`
+      );
+      return null;
+    }
+
+    console.log(
+      `[ScenarioFactory] Fallback a escenario hardcodeado para fase: ${phase} (razón: no hay escenario publicado)`
+    );
+
+    const fallback = source.fallback();
+    if (!fallback) return null;
+
+    if (scenarioKey === TEST_SCENARIO_KEY) {
+      console.log(
+        "[ScenarioFactory] Modo pruebas: marcando pasos del escenario de respaldo como manuales"
+      );
+      return ScenarioFactory.fromDefinition(
+        ScenarioFactory.toManualDefinition(fallback.definition)
+      );
+    }
+
+    return fallback;
+  }
+
+  static async getByName(
+    name: string,
+    scenarioKey: string = name,
+    forceRefresh = false
+  ): Promise<FlightScenario | null> {
+    const source = NAME_SOURCES[name];
+    if (!source) return null;
+
+    const definition = await this.loader.loadPublishedScenario(
+      source.edgePhaseKey,
+      scenarioKey,
+      forceRefresh
+    );
+    if (definition) {
+      return ScenarioFactory.fromDefinition(definition);
+    }
+
+    console.log(
+      `[ScenarioLoader] Fallback a escenario hardcodeado para: ${name} (razón: no hay escenario publicado)`
+    );
+
+    const fallback = source.fallback();
+    if (!fallback) return null;
+
+    if (scenarioKey === TEST_SCENARIO_KEY) {
+      console.log(
+        "[ScenarioFactory] Modo pruebas: marcando pasos del escenario de respaldo como manuales"
+      );
+      return ScenarioFactory.fromDefinition(
+        ScenarioFactory.toManualDefinition(fallback.definition)
+      );
+    }
+
+    return fallback;
+  }
+
+  private static fromDefinition(definition: ScenarioDefinition): FlightScenario {
+    return {
+      name: definition.scenario,
+      phases: definition.phases ? Array.from(definition.phases) : [],
+      definition,
+      onEnter(_context: FlightContext): void {},
+      onExit(_context: FlightContext): void {},
+      update(_context: FlightContext): void {},
+    };
+  }
+
+  // Convierte una definición en una versión "modo pruebas": todos los pasos
+  // esperan la acción manual del usuario.
+  private static toManualDefinition(
+    definition: ScenarioDefinition
+  ): ScenarioDefinition {
+    return {
+      scenario: definition.scenario,
+      steps: definition.steps.map(
+        (step) =>
+          new NarrativeStep(
+            step.id,
+            step.eventKey,
+            step.transition,
+            step.blocking,
+            step.optional,
+            step.delayMs,
+            step.conditions,
+            step.parameters,
+            step.preconditions,
+            step.restrictions,
+            ["desktop", "user"],
+            "manual",
+            "user",
+            step.scheduler_rule
+          )
+      ),
+    };
   }
 }

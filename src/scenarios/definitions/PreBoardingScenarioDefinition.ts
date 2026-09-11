@@ -5,6 +5,8 @@ import { ScenarioDefinition } from "./ScenarioDefinition";
 export class PreBoardingScenarioDefinition implements ScenarioDefinition {
   readonly scenario = "preboarding";
 
+  readonly phases = ["GATE"];
+
   readonly steps = [
     new NarrativeStep(
       1,

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.5
  */
 
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { supabase } from "../lib/supabase";
 import { generateManifest, getRegionFromICAO } from "../engine/PassengerManifest";
@@ -14,7 +14,6 @@ import {
   Plane, 
   Download, 
   Play, 
-  Save, 
   Volume2, 
   Wifi, 
   Compass, 
@@ -33,20 +32,30 @@ import {
   CalendarCheck,
   Info,
   ShieldAlert,
-  Pause,
   ArrowLeft,
   RotateCcw,
   XCircle,
   CheckCircle,
   ChevronDown,
   ChevronUp,
-  Loader2
+  Loader2,
+  DoorClosed,
+  Globe,
+  Activity
 } from "lucide-react";
 import { FlightState, Pasajero, SimBriefData, ConfigVoces, ConfigAudio, UltimoAnuncio, AnnouncementInfo } from "../types";
+import { FlightPhase } from "../engine/FlightEngine";
 import { AnnouncementQueue } from "../services/AnnouncementQueue";
-import { FlightContext } from "../services/FlightContext";
+import { FlightContext, FlightInfo } from "../services/FlightContext";
 import { SimulationController } from "../services/SimulationController";
 import { Scheduler } from "../services/Scheduler";
+import { MockFlightController } from "../services/MockFlightController";
+import { MsfsFlightController } from "../services/MsfsFlightController";
+import { FlightPhaseDetector } from "../services/FlightPhaseDetector";
+import type { FlightController } from "../services/FlightController";
+import { config } from "../config";
+import { ScenarioResolver } from "../services/ScenarioResolver";
+import { ScenarioLoader } from "../services/ScenarioLoader";
 import { FlightFSM } from "../services/FlightFSM";
 import { RuleEngine } from "../services/RuleEngine";
 import { Clock } from "../services/Clock";
@@ -54,11 +63,68 @@ import { TimerManager } from "../services/TimerManager";
 import { AnnouncementPlayer } from "../services/AnnouncementPlayer";
 import { AnnouncementEventHandler } from "../dispatcher/handlers/AnnouncementEventHandler";
 import { DefaultEventDispatcher } from "../dispatcher/DefaultEventDispatcher";
+import { NarrativeStep } from "../scenarios/narrative/NarrativeStep";
+import { EventCatalogService } from "../events/EventCatalogService";
+import { UserEventDefaultsService } from "../services/UserEventDefaultsService";
+import { FlightEventConfigService } from "../services/FlightEventConfigService";
+import { ScenarioConfigService } from "../services/ScenarioConfigService";
+import { BoardingMusicService, BoardingMusicTrack } from "../services/BoardingMusicService";
+import { musicController, RANDOM_MUSIC_ID } from "../services/MusicController";
+import { fileLogger } from "../services/FileLogger";
+import { secondsToHHMM } from "../utils/timeUtils";
+import { isInternationalFlight, getCountryKey } from "../utils/flightUtils";
+import MusicPreview from "./music/MusicPreview";
+import type {
+  ScenarioConfigSnapshot,
+  ScenarioEventConfig,
+  ScenarioOption,
+} from "../services/ScenarioConfigService";
+import { EVENT_CONFIG_FLAVOR_KEY, EVENT_CONFIG_PACKAGE_KEY, NORMAL_SCENARIO_KEY, EventSwitchValue, isEventSwitchValue } from "../services/eventConfigConstants";
+import {
+  StepPendingEvent,
+  StepExecutedEvent,
+  StepSkippedEvent,
+} from "../narrative/NarrativeOrchestrator";
+import ManualStepControls from "./flight/ManualStepControls";
+import StepHistory, { StepHistoryEntry } from "./flight/StepHistory";
+import FlightStepper from "./flight/FlightStepper";
+import LastAnnouncementBox from "./flight/LastAnnouncementBox";
+import VoiceIndicator from "./flight/VoiceIndicator";
 import PasajeroSlideOver from "./PasajeroSlideOver";
+import DebugMonitor from "./flight/DebugMonitor";
+import DebugMonitorButton from "./flight/DebugMonitorButton";
+import { connectionStatusService } from "../services/ConnectionStatusService";
+import { isTauri } from "@tauri-apps/api/core";
+import FlightStartPopup from "./flight/FlightStartPopup";
+import type { FlightStartPreferences } from "../services/FlightContext";
 // @ts-ignore
 import siluetaAvion from "./Silueta Avion.png";
 // @ts-ignore
 import siluetaAvionFill from "./Silueta Avion Fill.png";
+
+// ── Delay configurable de gate_crew_started (slider en Configurar Eventos) ──
+const GATE_STARTED_DELAY_KEY = "gate_crew_started";
+const GATE_STARTED_DELAY_MIN = 15;
+const GATE_STARTED_DELAY_MAX = 180;
+const GATE_STARTED_DELAY_DEFAULT = 15;
+
+// ── Sliders de eventos de demora (minutos) en "Configurar Eventos" ──
+// El usuario puede reparametrizar el umbral (default_delay_ms) de estos
+// eventos de detección de demora con un slider de minutos (5-60).
+const DELAY_SLIDER_EVENT_KEYS = [
+  "preflight_capt_delay_parked",
+  "preflight_capt_delay_taxi",
+  "preflight_capt_delay_takeoff",
+] as const;
+const DELAY_SLIDER_MIN_MIN = 5;
+const DELAY_SLIDER_MAX_MIN = 60;
+// Fallback (ms) solo si la DB `events.default_delay_ms` no define el evento.
+const DELAY_SLIDER_DEFAULT_MS: Record<string, number> = {
+  preflight_capt_delay_parked: 600000, // 10 min
+  preflight_capt_delay_taxi: 900000, // 15 min
+  preflight_capt_delay_takeoff: 900000, // 15 min (mismo que taxi)
+};
+const MINUTE_MS = 60000;
 
 interface VueloActualViewProps {
   currentState: FlightState;
@@ -78,6 +144,32 @@ interface VueloActualViewProps {
   onResetSimulation: () => void;
   onTriggerBriefImport: (realData?: any) => void;
   onNavigateToAccount?: () => void;
+}
+
+/** Convierte una clave de fase canónica a la sub-etapa + estado de la UI. */
+function phaseToSubStage(phase: string): { subStage: string; state: FlightState } {
+  switch (phase) {
+    case "GATE":
+    case "BOARDING":
+      return { subStage: "Embarque", state: FlightState.PreEmbarque };
+    case "PRE_FLIGHT":
+      return { subStage: "Pre-vuelo", state: FlightState.PreEmbarque };
+    case "TAXI":
+      return { subStage: "Rodaje", state: FlightState.PreEmbarque };
+    case "TAKEOFF":
+    case "CLIMB":
+    case "CRUISE":
+      return { subStage: "Crucero", state: FlightState.EnVuelo };
+    case "DESCENT":
+    case "LANDING":
+      return { subStage: "Descenso", state: FlightState.EnVuelo };
+    case "TAXI_TO_GATE":
+      return { subStage: "Rodaje a Puerta", state: FlightState.Aterrizado };
+    case "AT_GATE":
+      return { subStage: "Plataforma", state: FlightState.Aterrizado };
+    default:
+      return { subStage: "Crucero", state: FlightState.EnVuelo };
+  }
 }
 
 function ToggleSwitch({ 
@@ -103,6 +195,42 @@ function ToggleSwitch({
       </div>
     </label>
   );
+}
+
+/** Resuelve el escenario de un vuelo: `flights.scenario_key` o el del usuario. */
+async function resolveFlightScenario(flightId: string, userId: string): Promise<string> {
+  const { data, error } = await supabase
+    .from("flights")
+    .select("scenario_key")
+    .eq("id", flightId)
+    .maybeSingle();
+
+  if (!error && data?.scenario_key) {
+    return data.scenario_key;
+  }
+
+  const defaultResult = await ScenarioConfigService.getUserDefaultScenario(userId);
+  return defaultResult.data ?? NORMAL_SCENARIO_KEY;
+}
+
+/**
+ * Lee la pista de música ambiental que el usuario eligió en la configuración
+ * previa al vuelo (`setting_general.song_boarding_music`), para heredarla en
+ * vuelos que aún no tienen una pista explícita.
+ */
+async function loadUserMusicDefault(userId: string): Promise<string | null> {
+  try {
+    const { data, error } = await supabase
+      .from("setting_general")
+      .select("song_boarding_music")
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (error || !data) return null;
+    const value = (data as any).song_boarding_music;
+    return typeof value === "string" && value !== "" ? value : null;
+  } catch {
+    return null;
+  }
 }
 
 export default function VueloActualView({
@@ -131,13 +259,26 @@ export default function VueloActualView({
   const [airline, setAirline] = useState(simBriefData.aerolinea);
   const [originCityName, setOriginCityName] = useState<string>(getAirportName(simBriefData.origen) || simBriefData.origen);
   const [destCityName, setDestCityName] = useState<string>(getAirportName(simBriefData.destino) || simBriefData.destino);
-  const [gate, setGate] = useState<string>("A01");
+  const [gate, setGate] = useState<string>("");
 
   // Phase 1 Boarding states
   const [boardedCount, setBoardedCount] = useState<number>(0);
   const [isBoardingActive, setIsBoardingActive] = useState<boolean>(false);
   const [boardingStarted, setBoardingStarted] = useState<boolean>(false);
   const [showCancelConfirm, setShowCancelConfirm] = useState<boolean>(false);
+  const [flightPhase, setFlightPhase] = useState<"GATE" | "BOARDING" | null>(null);
+  // Fase actual del stepper dinámico (construido a partir del escenario cargado).
+  const [stepperCurrentPhase, setStepperCurrentPhase] = useState<string>("GATE");
+  // true cuando el escenario de BOARDING completó todos sus pasos narrativos.
+  const [boardingStepsDone, setBoardingStepsDone] = useState<boolean>(false);
+
+  // --- TEST MODE (manual step-by-step) STATES ---
+  const [executionMode, setExecutionMode] = useState<"normal" | "test">("normal");
+  const [pendingManualStep, setPendingManualStep] = useState<NarrativeStep | null>(null);
+  const [stepIndex, setStepIndex] = useState<number>(0);
+  const [stepTotal, setStepTotal] = useState<number>(0);
+  const [stepHistory, setStepHistory] = useState<StepHistoryEntry[]>([]);
+  const isTestModeFlight = executionMode === "test";
 
   // Phase 7 States
   const [isReportGenerating, setIsReportGenerating] = useState<boolean>(true);
@@ -146,16 +287,35 @@ export default function VueloActualView({
   // Flight Plan Import local state matching the new flow
   const [isBriefImported, setIsBriefImported] = useState<boolean>(false);
   const [canStartFlight, setCanStartFlight] = useState<boolean>(false);
+  // Hay un vuelo real cargado (importado desde SimBrief o vuelo guardado).
+  // Sin esto no se habilita "Iniciar Vuelo" / "Iniciar Pruebas".
+  const hasValidFlight = !!flightCode && !!originICAO && !!destICAO && !!destCityName;
+  // Estado de conexión en tiempo real (MSFS / X-Plane / Mock / Sin conexión)
+  // y modo pruebas (permite iniciar sin conexión real).
+  const [isConnected, setIsConnected] = useState<boolean>(false);
+  const [isTestMode, setIsTestMode] = useState<boolean>(false);
+  const [showFlightStartPopup, setShowFlightStartPopup] = useState<boolean>(false);
+  const [pendingFlightMode, setPendingFlightMode] = useState<"normal" | "test">("normal");
   const [activeGroupTab, setActiveGroupTab] = useState<string>("immersion");
   const [selectedPackage, setSelectedPackage] = useState<string>("aerolineas");
   const [showPackageManager, setShowPackageManager] = useState<boolean>(false);
   const [selectedPasajero, setSelectedPasajero] = useState<Pasajero | null>(null);
   
+  // --- DEBUG MONITOR ---
+  const [isDebugOpen, setIsDebugOpen] = useState<boolean>(false);
+  const [lastEventVars, setLastEventVars] = useState<Record<string, unknown> | null>(null);
+
   // --- FLIGHT SETTINGS SCREEN STATES ---
   const [isFlightSettingsOpen, setIsFlightSettingsOpen] = useState<boolean>(false);
   const [flightId, setFlightId] = useState<string | null>(null);
   const [isStartingFlight, setIsStartingFlight] = useState<boolean>(false);
   const [boardingManifest, setBoardingManifest] = useState<Pasajero[]>([]);
+
+  // Escenario efectivo del vuelo: selector + eventos dinámicos (como ConfigView).
+  const [scenarios, setScenarios] = useState<ScenarioOption[]>([]);
+  const [selectedScenarioKey, setSelectedScenarioKey] = useState<string>(NORMAL_SCENARIO_KEY);
+  const [scenarioSnapshot, setScenarioSnapshot] = useState<ScenarioConfigSnapshot | null>(null);
+  const [scenarioLoading, setScenarioLoading] = useState<boolean>(false);
 
   // Block 1: Tripulación e Identificación
   const [captainVoice, setCaptainVoice] = useState<string>("93d91fee-541a-46cd-b615-f5d57c05c7d4");
@@ -166,9 +326,12 @@ export default function VueloActualView({
 
   const [captainPrimaryLang, setCaptainPrimaryLang] = useState<string>("300a6cfd-bc1f-43e2-bde6-60a3abdccd0f");
   const [captainSecondaryLang, setCaptainSecondaryLang] = useState<string>(LANG_NONE);
-  const [boardingMusicTrack, setBoardingMusicTrack] = useState<string>("Vivaldi Concert VIII");
-
+  const [boardingMusicTrackId, setBoardingMusicTrackId] = useState<string>("");
+  const [musicTracks, setMusicTracks] = useState<BoardingMusicTrack[]>([]);
+  const [musicTracksLoading, setMusicTracksLoading] = useState<boolean>(false);
   const [showSecondaryLang, setShowSecondaryLang] = useState<boolean>(false);
+  // Evita sobrescribir los valores guardados antes de que termine la carga.
+  const musicSettingsLoadedRef = useRef(false);
 
   // Alternating bilingual display for GateMonitor (15s cycle)
   const [showEnglish, setShowEnglish] = useState<boolean>(true);
@@ -187,6 +350,7 @@ export default function VueloActualView({
     id: string;
     name: string;
     role: string;
+    languages: string[];
   }
 
   const [availableVoices, setAvailableVoices] = useState<VoiceOption[]>([]);
@@ -194,8 +358,84 @@ export default function VueloActualView({
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [voicesLoading, setVoicesLoading] = useState(false);
 
-  const captainVoiceOptions = availableVoices.filter((v) => v.role === "captain");
-  const crewVoiceOptions = availableVoices.filter((v) => v.role === "crew");
+  // Una voz sin `languages` (schema viejo o sin etiquetar) se considera
+  // disponible para cualquier idioma (no se filtra).
+  const voiceMatchesLanguage = (v: VoiceOption, langId: string): boolean =>
+    !v.languages || v.languages.length === 0 || v.languages.includes(langId);
+
+  const getVoiceOptionsForRole = (role: string): VoiceOption[] =>
+    availableVoices.filter(
+      (v) => v.role === role && voiceMatchesLanguage(v, captainPrimaryLang)
+    );
+
+  const captainVoiceOptions = getVoiceOptionsForRole("captain");
+  const crewVoiceOptions = getVoiceOptionsForRole("crew");
+  const gateVoiceOptions = getVoiceOptionsForRole("gate");
+
+  // ── Consistencia idioma ↔ voces ──────────────────────────────────────
+  // Garantiza que las voces seleccionadas pertenezcan al idioma elegido.
+  // Si una voz guardada (preferencia del usuario) no es válida para el idioma
+  // o ya no está disponible, se reemplaza por la primera voz válida de ese
+  // rol para el idioma. Esto evita iniciar el vuelo con una voz que no
+  // corresponde al idioma (causa de "audio no encontrado" en la Edge Function).
+  const firstVoiceForRole = (role: string, langId: string): string => {
+    const v = availableVoices.find(
+      (item) => item.role === role && voiceMatchesLanguage(item, langId)
+    );
+    return v?.id ?? "";
+  };
+
+  const isVoiceValidForLanguage = (role: string, voiceId: string, langId: string): boolean => {
+    if (!voiceId) return false;
+    const v = availableVoices.find((item) => item.id === voiceId);
+    return !!v && v.role === role && voiceMatchesLanguage(v, langId);
+  };
+
+  // Re-sincroniza automáticamente captain/crew/gate con el idioma actual cada
+  // vez que cambia el idioma, se terminan de cargar las voces disponibles o se
+  // cargan preferencias (setting_general). Es idempotente: si la voz actual ya
+  // es válida para el idioma no hace nada (evita loops); si es vacía no fuerza
+  // selección (respeta la elección manual pendiente).
+  const voicesLangRef = useRef<{ lang: string; captain: string; crew: string; gate: string }>({
+    lang: captainPrimaryLang,
+    captain: captainVoice,
+    crew: crewVoice,
+    gate: gateAgentVoiceId,
+  });
+  useEffect(() => {
+    if (!voicesReady || availableVoices.length === 0) return;
+    const prev = voicesLangRef.current;
+    const resolve = (role: string, current: string): string => {
+      if (!current) return current;
+      if (isVoiceValidForLanguage(role, current, captainPrimaryLang)) return current;
+      return firstVoiceForRole(role, captainPrimaryLang);
+    };
+    const next = {
+      lang: captainPrimaryLang,
+      captain: resolve("captain", captainVoice),
+      crew: resolve("crew", crewVoice),
+      gate: resolve("gate", gateAgentVoiceId),
+    };
+    voicesLangRef.current = next;
+    if (
+      next.lang !== prev.lang ||
+      next.captain !== prev.captain ||
+      next.crew !== prev.crew ||
+      next.gate !== prev.gate
+    ) {
+      console.log("[VueloActualView] Voces re-sincronizadas al idioma:", {
+        lang: next.lang,
+        captain: next.captain,
+        crew: next.crew,
+        gate: next.gate,
+        previous: prev,
+      });
+      setCaptainVoice(next.captain);
+      setCrewVoice(next.crew);
+      setGateAgentVoiceId(next.gate);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [captainPrimaryLang, captainVoice, crewVoice, gateAgentVoiceId, availableVoices, voicesReady]);
 
   const getSpeakerName = (role: string): string => {
     if (role === "captain") {
@@ -272,6 +512,11 @@ export default function VueloActualView({
     eventDispatcherRef.current = new DefaultEventDispatcher([announcementEventHandlerRef.current]);
   }
 
+  const scenarioLoaderRef = useRef<ScenarioLoader | null>(null);
+  if (!scenarioLoaderRef.current) {
+    scenarioLoaderRef.current = new ScenarioLoader();
+  }
+
   const schedulerRef = useRef<Scheduler | null>(null);
   if (!schedulerRef.current) {
     schedulerRef.current = new Scheduler(
@@ -279,7 +524,9 @@ export default function VueloActualView({
       timerManagerRef.current,
       eventDispatcherRef.current,
       flightContextRef.current,
-      announcementQueueRef.current
+      announcementQueueRef.current,
+      new ScenarioResolver(scenarioLoaderRef.current),
+      musicController
     );
   }
 
@@ -293,21 +540,256 @@ export default function VueloActualView({
     simControllerRef.current = new SimulationController(flightFSMRef.current);
   }
 
+  // Fase 3+4: FlightController — MsfsFlightController (MSFS) con fallback
+  // a MockFlightController. El Mock ahora simula vuelo completo GATE→AT_GATE
+  // con timeline determinístico. Detector independiente para transiciones.
+  // autoStart: false → no conectar automáticamente al montar, solo en handleStartFlight
+  const flightControllerRef = useRef<FlightController | null>(null);
+  if (!flightControllerRef.current) {
+    flightControllerRef.current =
+      config.sim.provider === "msfs"
+        ? new MsfsFlightController()
+        : new MockFlightController({
+            speedMultiplier: config.mock.speedMultiplier,
+            autoTransition: config.mock.autoTransition,
+            autoStart: false,
+          });
+  }
+
+  // Mantener alias para compatibilidad con código que esperaba mockControllerRef
+  const mockControllerRef = flightControllerRef as React.MutableRefObject<FlightController | null>;
+
+  const lastDetectedPhaseRef = useRef<FlightPhase | null>(null);
+  const phaseDetectorRef = useRef<FlightPhaseDetector | null>(null);
+  if (!phaseDetectorRef.current) phaseDetectorRef.current = new FlightPhaseDetector();
+
+  const bindFlightController = useCallback((controller: FlightController) => {
+    const ctx = flightContextRef.current!;
+    const scheduler = schedulerRef.current!;
+    const fsm = flightFSMRef.current!;
+    controller.onTelemetry = (snap) => {
+      ctx.updateTelemetry(snap);
+      scheduler.notifyTelemetry(snap);
+
+      // Transición automática vía detector con histéresis (evita saltos por ruido)
+      // Sincronizar boardingCompleted para PRE_FLIGHT (evita transición temprana)
+      if (config.mock.enabled && config.mock.autoTransition) {
+        const boardingDone = scheduler.isBoardingStepsCompleted();
+        phaseDetectorRef.current!.setBoardingCompleted(boardingDone);
+        const ctrl: any = flightControllerRef.current;
+        if (ctrl && typeof ctrl.setBoardingCompleted === 'function') {
+          ctrl.setBoardingCompleted(boardingDone);
+        }
+        const detected = phaseDetectorRef.current!.detectPhase(snap);
+        if (!detected) return; // aún no estable
+        if (detected !== lastDetectedPhaseRef.current) {
+          const prev = lastDetectedPhaseRef.current;
+          lastDetectedPhaseRef.current = detected;
+          // BOARDING manual: no auto-transicionar, esperar "Comenzar Embarque"
+          if (detected === FlightPhase.BOARDING) {
+            console.log("[VueloActualView] BOARDING detectado pero requiere acción del usuario");
+            return;
+          }
+          const currentFSM = fsm.getCurrentState();
+          if (detected !== currentFSM) {
+            if (prev !== null) {
+              console.log("[VueloActualView] 🔄 Transición de fase (simulator):", { from: prev, to: detected });
+            }
+            const ok = fsm.transition(detected, 'simulator');
+            if (!ok) {
+              console.warn(`[VueloActualView] FSM rechazó transición ${currentFSM} → ${detected}`);
+            }
+          }
+        }
+      }
+    };
+  }, []);
+
+  // Sincronizar controlador activo con ConnectionStatusService
+  useEffect(() => {
+    const ctrl = flightControllerRef.current;
+    if (ctrl) {
+      connectionStatusService.setActiveController(ctrl);
+      connectionStatusService.start();
+    }
+    return () => {
+      // No detener el servicio global; solo limpiar si es el mismo
+    };
+  }, []);
+
+  // Capturar variables resueltas de eventos para el monitor
+  useEffect(() => {
+    const q = announcementQueueRef.current!;
+    // Cuando se despacha un evento, capturar su EventContext si es posible
+    // Por ahora capturamos flight+telemetry como representación de variables resueltas
+    const unsub = q.on("announcement", () => {
+      try {
+        const ctx = flightContextRef.current;
+        if (ctx) {
+          const snap = ctx.getDebugSnapshot();
+          const vars: Record<string, unknown> = {};
+          for (const [k, v] of Object.entries(snap.flight as any)) vars[`flight.${k}`] = v;
+          for (const [k, v] of Object.entries(snap.telemetry as any)) {
+            if (["altitude","groundspeed","heading","verticalSpeed"].includes(k)) vars[`telemetry.${k}`] = v;
+          }
+          if (snap.simbrief) {
+            const sb: any = snap.simbrief;
+            if (sb.general) vars["simbrief.general"] = sb.general;
+          }
+          setLastEventVars(vars);
+        }
+      } catch {}
+    });
+    return () => { try { unsub(); } catch {} };
+  }, []);
+
+  // Integración FlightController: onTelemetry → FlightContext + Scheduler + auto transición de fase
+  // No conecta automáticamente (autoStart: false). La conexión se hace en handleStartFlight.
+  useEffect(() => {
+    console.log('[VueloActualView] 🔍 Creando FlightController');
+    console.log('[VueloActualView] 📡 Configuración:', {
+      provider: config.sim.provider,
+      autoConnect: config.sim.autoConnect
+    });
+    fileLogger.log('[VueloActualView] 🔍 Creando FlightController');
+    fileLogger.log('[VueloActualView] 📡 Configuración', {
+      provider: config.sim.provider,
+      autoConnect: config.sim.autoConnect,
+      isTauri: isTauri()
+    });
+    const activeController = flightControllerRef.current!;
+    bindFlightController(activeController);
+    connectionStatusService.setActiveController(activeController);
+
+    // No auto-connect: el vuelo inicia solo con "Iniciar Vuelo" (autoStart: false)
+
+    return () => {
+      // No desconectar si la conexión ya está establecida: en StrictMode el
+      // cleanup del doble montaje correría disconnect() y mataría una conexión
+      // activa que el segundo montaje reutilizaría. La desconexión real se
+      // maneja al desmontar la vista o explícitamente.
+      try {
+        const ctrl = flightControllerRef.current ?? activeController;
+        if (ctrl && !ctrl.isConnected()) ctrl.disconnect();
+      } catch {}
+    };
+  }, [bindFlightController]);
+
+  // Estado de conexión en tiempo real → `isConnected` para la UI (Iniciar Vuelo / banner).
+  useEffect(() => {
+    const unsub = connectionStatusService.onStatusChange((status) => {
+      setIsConnected(status.connected);
+      fileLogger.log('[VueloActualView] 📡 Conexión actualizada', {
+        type: status.type,
+        connected: status.connected,
+        label: status.label,
+      });
+    });
+    return unsub;
+  }, []);
+
+  // Detección temprana de conexión al entrar a "Vuelo Actual": intenta conectar
+  // el controlador real (MSFS); si falla (p. ej. simulador cerrado), hace
+  // fallback a Mock. Para provider `mock` no se conecta al montar (autoStart:false
+  // conserva el flujo existente de "Iniciar Vuelo").
+  //
+  // Compatible con React StrictMode (doble montaje en dev): el cleanup del primer
+  // montaje NO desconecta una conexión ya establecida, y el segundo montaje
+  // reutiliza la conexión (connect es idempotente) en vez de quedar desconectado
+  // con objects=0 / emits=0.
+  useEffect(() => {
+    let isMounted = true;
+
+    const connect = async () => {
+      const controller = flightControllerRef.current;
+      if (!controller || !isMounted) return;
+
+      console.log('[VueloActualView] 🔍 Montaje', {
+        isMounted,
+        connected: controller.isConnected(),
+      });
+
+      if (config.sim.provider !== "msfs") return;
+
+      // Ya conectado (p. ej. segundo montaje de StrictMode): no reconectar.
+      if (controller.isConnected()) {
+        fileLogger.log('[VueloActualView] 🔍 Ya conectado, omitiendo reconexión');
+        connectionStatusService.setActiveController(controller);
+        connectionStatusService.refresh();
+        return;
+      }
+
+      try {
+        await controller.connect();
+        if (!isMounted) return;
+        console.log('[VueloActualView] ✅ Conectado');
+        fileLogger.log('[VueloActualView] ✅ Conexión exitosa');
+        connectionStatusService.setActiveController(controller);
+        connectionStatusService.refresh();
+      } catch (error) {
+        console.warn('[VueloActualView] ⚠️ Conexión fallida');
+        if (!isMounted) return;
+        fileLogger.log('[VueloActualView] ⚠️ Conexión fallida, usando Mock', { error: String(error) });
+        // Detener watchdog del controlador real huérfano antes de sustituirlo por Mock
+        try { controller.disconnect(); } catch {}
+        // Fallback a Mock
+        const mock = new MockFlightController({
+          speedMultiplier: config.mock.speedMultiplier,
+          autoTransition: config.mock.autoTransition,
+          autoStart: false,
+        });
+        flightControllerRef.current = mock;
+        bindFlightController(mock);
+        connectionStatusService.setActiveController(mock);
+        connectionStatusService.refresh();
+      }
+    };
+
+    connect();
+
+    return () => {
+      isMounted = false;
+      console.log('[VueloActualView] 🔍 Desmontaje', { isMounted });
+      fileLogger.log('[VueloActualView] 🔍 Desmontaje', { isMounted });
+
+      // No desconectar si la conexión ya está establecida: en StrictMode el
+      // cleanup del primer montaje correría disconnect() y mataría la conexión
+      // que el segundo montaje reutiliza. Solo desconectar estados incompletos.
+      const controller = flightControllerRef.current;
+      if (controller && !controller.isConnected()) {
+        try { controller.disconnect(); } catch {}
+      }
+    };
+  }, [bindFlightController]);
+
+  // El MusicController escucha los anuncios de la cola para atenuar/restaurar
+  // la música ambiental (ducking).
+  useEffect(() => {
+    return musicController.bindQueue(announcementQueueRef.current!);
+  }, []);
+
   // Subscribe to AnnouncementQueue events
   useEffect(() => {
     const q = announcementQueueRef.current!;
+    const ctx = flightContextRef.current!;
     const unsubGen = q.on("generating", (v: boolean) => {
       if (v) { setIsGenerating(true); setGeneratingError(null); }
       else { setIsGenerating(false); }
+      ctx.updateAnnouncement({ isGenerating: v });
     });
     const unsubAnn = q.on("announcement", (ann: AnnouncementInfo) => {
       setCurrentAnnouncement(ann);
+      // FlightContext almacena el último anuncio real para que cualquier vista
+      // (p. ej. la pantalla de vuelo) pueda leerlo.
+      ctx.updateAnnouncement({ currentAnnouncement: ann, generatingError: null });
     });
     const unsubPlay = q.on("playing", (v: boolean) => {
       setIsAudioPlaying(v);
+      ctx.updateAnnouncement({ isAudioPlaying: v });
     });
     const unsubErr = q.on("error", (msg: string | null) => {
       if (msg) { setGeneratingError(msg); setIsGenerating(false); }
+      ctx.updateAnnouncement({ generatingError: msg, isGenerating: false });
     });
 
     // Start the simulation clock so TimerManager timers can fire.
@@ -315,6 +797,131 @@ export default function VueloActualView({
 
     return () => {
       unsubGen(); unsubAnn(); unsubPlay(); unsubErr();
+    };
+  }, []);
+
+  // Refs para evitar closures obsoletos en los handlers del Scheduler.
+  const currentStateRef = useRef(currentState);
+  const onStateChangeRef = useRef(onStateChange);
+  useEffect(() => {
+    currentStateRef.current = currentState;
+    onStateChangeRef.current = onStateChange;
+  });
+
+  // Subscribe to Scheduler phase events (Fase 0 GATE -> BOARDING flow)
+  useEffect(() => {
+    const scheduler = schedulerRef.current;
+    if (!scheduler) return;
+
+    const unsubGate = scheduler.on("phase:gate:entered", () => {
+      console.log("[UI] phase:gate:entered -> mostrando 'Comenzar embarque'");
+      setFlightPhase("GATE");
+      setStepperCurrentPhase("GATE");
+    });
+    const unsubBoarding = scheduler.on("phase:boarding:started", () => {
+      console.log("[UI] phase:boarding:started -> embarque en curso");
+      setFlightPhase("BOARDING");
+      setBoardingStarted(true);
+      setStepperCurrentPhase("BOARDING");
+    });
+
+    // Fase actual gobernada por el Scheduler/FlightFSM (transiciones reales).
+    const unsubPhaseChanged = scheduler.on("phase:changed", (payload) => {
+      const phase = (payload as { phase?: string })?.phase;
+      if (!phase) return;
+      // GATE y BOARDING no transicionan el FlightState: el flujo existente
+      // (phase:gate:entered / phase:boarding:started) ya las maneja.
+      if (phase === "GATE" || phase === "BOARDING") return;
+      console.log(`[UI] phase:changed -> ${phase}`);
+      setStepperCurrentPhase(phase);
+      const mapped = phaseToSubStage(phase);
+      setCurrentSubStage(mapped.subStage);
+      if (mapped.state !== FlightState.NoIniciado && mapped.state !== currentStateRef.current) {
+        onStateChangeRef.current(mapped.state);
+      }
+    });
+
+    return () => {
+      unsubGate(); unsubBoarding(); unsubPhaseChanged();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Subscribe to NarrativeOrchestrator events (modo pruebas: avance manual)
+  useEffect(() => {
+    const scheduler = schedulerRef.current;
+    if (!scheduler) return;
+    const orchestrator = scheduler.getNarrativeOrchestrator();
+
+    const unsubPending = orchestrator.on("step:pending", (payload) => {
+      const data = payload as StepPendingEvent;
+      console.log(
+        `[UI] step:pending -> ${data.step.eventKey} (${data.index + 1}/${data.total})`
+      );
+      setPendingManualStep(data.step);
+      setStepIndex(data.index);
+      setStepTotal(data.total);
+    });
+
+    const unsubExecuted = orchestrator.on("step:executed", (payload) => {
+      const data = payload as StepExecutedEvent;
+      console.log(
+        `[UI] step:executed -> ${data.step.eventKey} (modo: ${data.mode})`
+      );
+      setPendingManualStep((prev) =>
+        prev && prev.eventKey === data.step.eventKey ? null : prev
+      );
+      setStepHistory((prev) => [
+        ...prev,
+        {
+          step: data.step,
+          index: data.index,
+          mode: data.mode,
+          timestamp: new Date().toLocaleTimeString("es-ES", { hour12: false }),
+        },
+      ]);
+    });
+
+    const unsubSkipped = orchestrator.on("step:skipped", (payload) => {
+      const data = payload as StepSkippedEvent;
+      console.log(`[UI] step:skipped -> ${data.step.eventKey}`);
+      setPendingManualStep((prev) =>
+        prev && prev.eventKey === data.step.eventKey ? null : prev
+      );
+      setStepHistory((prev) => [
+        ...prev,
+        {
+          step: data.step,
+          index: data.index,
+          mode: "skipped",
+          timestamp: new Date().toLocaleTimeString("es-ES", { hour12: false }),
+        },
+      ]);
+    });
+
+    const unsubCompleted = orchestrator.on("scenario:completed", () => {
+      console.log("[UI] scenario:completed");
+      setPendingManualStep(null);
+      setBoardingStepsDone(true);
+    });
+
+    const unsubClear = orchestrator.on("step:clear", () => {
+      console.log("[UI] step:clear -> escenario cambiado");
+      setPendingManualStep(null);
+      setStepIndex(0);
+      setStepTotal(0);
+      setBoardingStepsDone(false);
+      // El historial pertenece al escenario actual: al cambiar de escenario
+      // (p. ej. GATE -> BOARDING) se resetea para no mezclar pasos.
+      setStepHistory([]);
+    });
+
+    return () => {
+      unsubPending();
+      unsubExecuted();
+      unsubSkipped();
+      unsubCompleted();
+      unsubClear();
     };
   }, []);
 
@@ -389,8 +996,55 @@ export default function VueloActualView({
     return () => { cancelled = true; };
   }, []);
 
+  // Cargar preferencias de Personal de Vuelo desde setting_general (persistencia entre sesiones)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user || cancelled) return;
+        const { data: settings, error } = await supabase
+          .from("setting_general")
+          .select("language_id, captain_voice_id, crew_voice_id, gate_agent_voice_id")
+          .eq("user_id", user.id)
+          .maybeSingle();
+
+        if (cancelled || error) {
+          if (error) console.warn("[VueloActualView] setting_general load error:", error.message);
+          return;
+        }
+        if (!settings) {
+          console.log("[VueloActualView] setting_general sin fila, usando valores por defecto");
+          return;
+        }
+
+        console.log("[VueloActualView] setting_general cargado (Personal de Vuelo):", settings);
+
+        // Pre-seleccionar en los selectores si existen y son válidos
+        if (settings.language_id) {
+          setCaptainPrimaryLang(settings.language_id);
+          console.log("[VueloActualView] language_id pre-seleccionado:", settings.language_id);
+        }
+        if (settings.captain_voice_id) {
+          setCaptainVoice(settings.captain_voice_id);
+          console.log("[VueloActualView] captain_voice_id pre-seleccionado:", settings.captain_voice_id);
+        }
+        if (settings.crew_voice_id) {
+          setCrewVoice(settings.crew_voice_id);
+          console.log("[VueloActualView] crew_voice_id pre-seleccionado:", settings.crew_voice_id);
+        }
+        if (settings.gate_agent_voice_id) {
+          setGateAgentVoiceId(settings.gate_agent_voice_id);
+          console.log("[VueloActualView] gate_agent_voice_id pre-seleccionado:", settings.gate_agent_voice_id);
+        }
+      } catch (err) {
+        console.warn("[VueloActualView] Error cargando setting_general:", err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   const langOptions = languageOptions;
-  const secondaryLangOptions = [{ id: LANG_NONE, name: "Ninguno" }, ...langOptions];
 
   function getLangName(id: string): string {
     return langOptions.find((l) => l.id === id)?.name || id;
@@ -438,6 +1092,7 @@ export default function VueloActualView({
 
   // Block 2: Eventos Especiales
   const [specialEvents, setSpecialEvents] = useState<string>("");
+  const [specialEventEnabled, setSpecialEventEnabled] = useState<boolean>(false);
 
   // Block 3: Plan de Cabina
   // 1) Gastronomía
@@ -521,31 +1176,31 @@ export default function VueloActualView({
   ];
 
   // 33 Active attributes with user preset values
-  const [eventConfig, setEventConfig] = useState<Record<string, "off" | "pack" | "IA">>({
-    gate_crew_start_soon: "off",
+  const [eventConfig, setEventConfig] = useState<Record<string, EventSwitchValue>>({
+    gate_crew_start_soon: "OFF",
     gate_crew_started: "IA",
     common_crew_boarding: "IA",
     preflight_crew_welcome: "IA",
     preflight_capt_welcome: "IA",
     preflight_capt_delay: "IA",
     preflight_capt_basic_info: "IA",
-    preflight_crew_basic_info: "off",
+    preflight_crew_basic_info: "OFF",
     taxi_capt_armdoors: "IA",
     taxi_crew_safety_brief: "IA",
-    taxi_capt_dimlights: "off",
-    taxi_crew_dimlights: "off",
+    taxi_capt_dimlights: "OFF",
+    taxi_crew_dimlights: "OFF",
     takeoff_capt_prepare: "IA",
     climb_crew_upcoming_service: "IA",
     cruise_capt_general_info: "IA",
     cruise_crew_service_info1: "IA",
-    cruise_crew_service_info2: "off",
-    cruise_crew_shopping_info: "off",
-    cruise_crew_customs_forms: "off",
-    cruise_crew_service_info3: "off",
+    cruise_crew_service_info2: "OFF",
+    cruise_crew_shopping_info: "OFF",
+    cruise_crew_customs_forms: "OFF",
+    cruise_crew_service_info3: "OFF",
     descent_capt_close_desc: "IA",
     descent_capt_upcoming_actions: "IA",
     descent_crew_upcoming_actions: "IA",
-    descent_capt_10kfeet: "off",
+    descent_capt_10kfeet: "OFF",
     descent_crew_landing_fewmin: "IA",
     final_capt_take_seats: "IA",
     taxitogate_crew_welcome: "IA",
@@ -582,28 +1237,32 @@ export default function VueloActualView({
 
         let mapped: VoiceOption[] = [];
         if (stockIds.length > 0) {
-          const { data: stockData, error: stockError } = await supabase
+          let stockResult: any = await supabase
             .from('voices_stock')
-            .select('id, voice_name, voice_role')
+            .select('id, voice_name, voice_role, languages')
             .in('id', stockIds);
-          if (stockError) throw stockError;
+          if (stockResult.error) {
+            // Schema sin columna `languages`: reintentar sin ella.
+            stockResult = await supabase
+              .from('voices_stock')
+              .select('id, voice_name, voice_role')
+              .in('id', stockIds);
+          }
+          if (stockResult.error) throw stockResult.error;
           if (cancelled) return;
-          mapped = (stockData || []).map((vs: any) => ({
+          mapped = (stockResult.data || []).map((vs: any) => ({
             id: vs.id,
             name: vs.voice_name,
             role: vs.voice_role,
+            languages: Array.isArray(vs.languages)
+              ? vs.languages
+              : vs.languages
+                ? [vs.languages]
+                : [],
           }));
         }
         if (mapped.length > 0) {
           setAvailableVoices(mapped);
-          if (!mapped.find((v) => v.id === captainVoice)) {
-            const captain = mapped.find((v) => v.role === "captain");
-            if (captain) setCaptainVoice(captain.id);
-          }
-          if (!mapped.find((v) => v.id === crewVoice)) {
-            const crew = mapped.find((v) => v.role === "crew");
-            if (crew) setCrewVoice(crew.id);
-          }
         }
         setVoicesReady(true);
       } catch (e: any) {
@@ -633,11 +1292,18 @@ export default function VueloActualView({
         setSimbriefId(userData.simbrief_pilot_id);
       }
 
-      const [genResult, annResult] = await Promise.all([
-        supabase.from("setting_general").select("*").eq("user_id", user.id).maybeSingle(),
-        supabase.from("setting_announcements").select("*").eq("user_id", user.id).maybeSingle(),
-      ]);
+      const userDefaultScenario = await ScenarioConfigService.getUserDefaultScenario(user.id);
+      const userScenarioKey = userDefaultScenario.data ?? NORMAL_SCENARIO_KEY;
+      if (!cancelled) {
+        setSelectedScenarioKey(userScenarioKey);
+      }
 
+      const scenarioListResult = await ScenarioConfigService.listActiveScenarios();
+      if (!cancelled && scenarioListResult.success && scenarioListResult.data.length > 0) {
+        setScenarios(scenarioListResult.data);
+      }
+
+      const genResult = await supabase.from("setting_general").select("*").eq("user_id", user.id).maybeSingle();
       if (cancelled) return;
 
       if (genResult.data) {
@@ -669,94 +1335,180 @@ export default function VueloActualView({
           setGateAgentVoiceId((d as any).gate_agent_voice_id);
         }
       }
-
-      if (annResult.data) {
-        const ad = annResult.data;
-        const dbKeys = [
-          "gate_crew_start_soon", "gate_crew_started", "common_crew_boarding",
-          "preflight_crew_welcome", "preflight_capt_welcome", "preflight_capt_delay",
-          "preflight_capt_basic_info", "preflight_crew_basic_info", "taxi_capt_armdoors",
-          "taxi_crew_safety_brief", "taxi_capt_dimlights", "taxi_crew_dimlights",
-          "takeoff_capt_prepare", "climb_crew_upcoming_service", "cruise_capt_general_info",
-          "cruise_crew_service_info1", "cruise_crew_service_info2", "cruise_crew_shopping_info",
-          "cruise_crew_customs_forms", "cruise_crew_service_info3", "descent_capt_close_desc",
-          "descent_capt_upcoming_actions", "descent_crew_upcoming_actions", "descent_capt_10kfeet",
-          "descent_crew_landing_fewmin", "final_capt_take_seats", "taxitogate_crew_welcome",
-          "taxitogate_crew_ramining_seating", "taxitogate_crew_delay_apologies",
-          "atgate_capt_disarm_doors", "atgate_crew_deboarding", "common_capt_seatbelt",
-          "common_crew_seatbelt"
-        ];
-        const annPayload: Record<string, "off" | "pack" | "IA"> = {};
-        for (const key of dbKeys) {
-          if ((ad as any)[key] != null) {
-            annPayload[key] = (ad as any)[key] as "off" | "pack" | "IA";
-          }
-        }
-        if (Object.keys(annPayload).length > 0) {
-          setEventConfig(prev => ({ ...prev, ...annPayload }));
-        }
-        if ((ad as any).announcement_flavor != null) {
-          const flavorMap: Record<string, number> = { operative: 1, cultural: 2, scenic: 3, casual: 4 };
-          const mapped = flavorMap[(ad as any).announcement_flavor];
-          if (mapped != null) setCommunicationStyle(mapped);
-        }
-      }
     })();
     return () => { cancelled = true; };
   }, []);
 
-  interface EventDefinition {
-    key: string;
-    narrator: "Capitán" | "Tripulación" | "Agente de Puerta";
-    desc: string;
-    phaseId: string;
-    descKey?: string;
-    narratorKey?: string;
-  }  const eventDefinitionList: EventDefinition[] = [
+  // Carga las pistas de música ambiental activas desde `boarding_music`.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setMusicTracksLoading(true);
+      const result = await BoardingMusicService.listActiveTracks();
+      if (cancelled) return;
+      if (result.success && result.data) {
+        setMusicTracks(result.data);
+        // Migración retrocompatible: un nombre de pista guardado (esquema
+        // anterior) se convierte al id de la pista correspondiente.
+        setBoardingMusicTrackId((prev) => {
+          if (!prev || prev === RANDOM_MUSIC_ID) return prev;
+          if (result.data!.some((track) => track.id === prev)) return prev;
+          const byName = result.data!.find((track) => track.name === prev);
+          return byName ? byName.id : "";
+        });
+      } else {
+        console.warn("[VueloActualView] No se pudieron cargar las pistas de música:", result.error);
+      }
+      if (!cancelled) setMusicTracksLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
+  // Carga la configuración de música ambiental del vuelo
+  // (`flight_setting_announcements.boarding_music_enabled / _id`).
+  // Si el vuelo no tiene una pista explícita, se hereda la selección previa
+  // al vuelo del usuario (`setting_general.song_boarding_music`).
+  useEffect(() => {
+    if (!flightId) return;
+    let cancelled = false;
+    musicSettingsLoadedRef.current = false;
+    (async () => {
+      const result = await BoardingMusicService.loadForFlight(flightId);
+      if (cancelled) return;
+      if (result.success && result.data) {
+        const { enabled, musicId } = result.data;
+        setImmersionConfig((prev) => ({ ...prev, play_boarding_music: enabled }));
+        if (musicId) {
+          setBoardingMusicTrackId(musicId);
+        } else if (userId) {
+          const userDefault = await loadUserMusicDefault(userId);
+          if (cancelled) return;
+          if (userDefault) setBoardingMusicTrackId(userDefault);
+        }
+      } else {
+        console.warn("[VueloActualView] No se pudo cargar la música del vuelo:", result.error);
+      }
+      musicSettingsLoadedRef.current = true;
+    })();
+    return () => { cancelled = true; };
+  }, [flightId, userId]);
 
-    // Fase 1
-    { key: "gate_crew_start_soon", narrator: "Agente de Puerta", desc: "Anuncio en la terminal indicando que el proceso de embarque comenzará en breve.", phaseId: "fase1", descKey: "current_flight.not_started.boarding.gate_crew_start_soon", narratorKey: "current_flight.not_started.events.narrator_gate" },
-    { key: "gate_crew_started", narrator: "Agente de Puerta", desc: "Aviso oficial del inicio del abordaje por grupos o zonas.", phaseId: "fase1", descKey: "current_flight.not_started.boarding.gate_crew_started", narratorKey: "current_flight.not_started.events.narrator_gate" },
-    { key: "common_crew_boarding", narrator: "Tripulación", desc: "Mensajes rutinarios emitidos dentro de la cabina mientras los pasajeros buscan sus asientos y guardan el equipaje.", phaseId: "fase1", descKey: "current_flight.not_started.boarding.common_crew_boarding", narratorKey: "current_flight.not_started.events.narrator_crew" },
-    // Fase 2
-    { key: "preflight_crew_welcome", narrator: "Tripulación", desc: "Mensaje inicial de bienvenida a bordo una vez que el flujo principal de pasajeros se ha estabilizado.", phaseId: "fase2", descKey: "current_flight.not_started.preflight.crew_welcome", narratorKey: "current_flight.not_started.events.narrator_crew" },
-    { key: "preflight_capt_welcome", narrator: "Capitán", desc: "Saludo inicial oficial desde la cabina de mando.", phaseId: "fase2", descKey: "current_flight.not_started.preflight.capt_welcome", narratorKey: "current_flight.not_started.events.narrator_captain" },
-    { key: "preflight_capt_delay", narrator: "Capitán", desc: "Explicación sobre posibles demoras por tráfico ATC o carga (anuncio condicional).", phaseId: "fase2", descKey: "current_flight.not_started.preflight.capt_delay", narratorKey: "current_flight.not_started.events.narrator_captain" },
-    { key: "preflight_capt_basic_info", narrator: "Capitán", desc: "Resumen operativo detallando la altitud, tiempo en ruta y meteorología esperada.", phaseId: "fase2", descKey: "current_flight.not_started.preflight.capt_basic_info", narratorKey: "current_flight.not_started.events.narrator_captain" },
-    { key: "preflight_crew_basic_info", narrator: "Tripulación", desc: "Complemento informativo repasando normas generales o disponibilidad de servicios.", phaseId: "fase2", descKey: "current_flight.not_started.preflight.crew_basic_info", narratorKey: "current_flight.not_started.events.narrator_crew" },
-    // Fase 3
-    { key: "taxi_capt_armdoors", narrator: "Capitán", desc: "Orden estricta a la tripulación para armar toboganes y verificar puertas cerradas (Cross-check).", phaseId: "fase3", descKey: "current_flight.not_started.taxi.capt_armdoors", narratorKey: "current_flight.not_started.events.narrator_captain" },
-    { key: "taxi_crew_safety_brief", narrator: "Tripulación", desc: "Ejecución de la demostración de seguridad (manual o por pantallas).", phaseId: "fase3", descKey: "current_flight.not_started.taxi.crew_safety_brief", narratorKey: "current_flight.not_started.events.narrator_crew" },
-    { key: "taxi_capt_dimlights", narrator: "Capitán", desc: "Orden a la tripulación para reducir la iluminación general (típicamente en vuelos nocturnos).", phaseId: "fase3", descKey: "current_flight.not_started.taxi.capt_dimlights", narratorKey: "current_flight.not_started.events.narrator_captain" },
-    { key: "taxi_crew_dimlights", narrator: "Tripulación", desc: "Aviso a los pasajeros sobre la atenuación de luces para el despegue.", phaseId: "fase3", descKey: "current_flight.not_started.taxi.crew_dimlights", narratorKey: "current_flight.not_started.events.narrator_crew" },
-    { key: "takeoff_capt_prepare", narrator: "Capitán", desc: "Orden ejecutiva indicando a los tripulantes que tomen sus lugares para el despegue inminente.", phaseId: "fase3", descKey: "current_flight.not_started.taxi.capt_prepare", narratorKey: "current_flight.not_started.events.narrator_captain" },
-    // Fase 4
-    { key: "climb_crew_upcoming_service", narrator: "Tripulación", desc: "Aviso sobre los servicios a bordo que se ofrecerán, emitido generalmente al superar los 10.000 pies.", phaseId: "fase4", descKey: "current_flight.not_started.cruise.crew_upcoming_service", narratorKey: "current_flight.not_started.events.narrator_crew" },
-    { key: "cruise_capt_general_info", narrator: "Capitán", desc: "Actualización a mitad del vuelo sobre el progreso, puntos de interés geográficos o cambios en la ruta.", phaseId: "fase4", descKey: "current_flight.not_started.cruise.capt_general_info", narratorKey: "current_flight.not_started.events.narrator_captain" },
-    { key: "cruise_crew_service_info1", narrator: "Tripulación", desc: "Inicio del servicio primario de comidas o bebidas.", phaseId: "fase4", descKey: "current_flight.not_started.cruise.crew_service_info1", narratorKey: "current_flight.not_started.events.narrator_crew" },
-    { key: "cruise_crew_service_info2", narrator: "Tripulación", desc: "Segundo pase en cabina (recolección de bandejas, oferta de té/café).", phaseId: "fase4", descKey: "current_flight.not_started.cruise.crew_service_info2", narratorKey: "current_flight.not_started.events.narrator_crew" },
-    { key: "cruise_crew_shopping_info", narrator: "Tripulación", desc: "Promoción de la venta a bordo (Duty Free).", phaseId: "fase4", descKey: "current_flight.not_started.cruise.crew_shopping_info", narratorKey: "current_flight.not_started.events.narrator_crew" },
-    { key: "cruise_crew_customs_forms", narrator: "Tripulación", desc: "Aviso sobre la distribución de los formularios de migraciones y aduanas para vuelos internacionales.", phaseId: "fase4", descKey: "current_flight.not_started.cruise.crew_customs_forms", narratorKey: "current_flight.not_started.events.narrator_crew" },
-    { key: "cruise_crew_service_info3", narrator: "Tripulación", desc: "Tercer servicio ocasional, típicamente un desayuno o snack en vuelos de largo radio antes del descenso.", phaseId: "fase4", descKey: "current_flight.not_started.cruise.crew_service_info3", narratorKey: "current_flight.not_started.events.narrator_crew" },
-    // Fase 5
-    { key: "descent_capt_close_desc", narrator: "Capitán", desc: "Aviso previo informando que el avión está a punto de abandonar la altitud de crucero (Top of Descent).", phaseId: "fase5", descKey: "current_flight.not_started.descent.capt_close_desc", narratorKey: "current_flight.not_started.events.narrator_captain" },
-    { key: "descent_capt_upcoming_actions", narrator: "Capitán", desc: "Detalles finales sobre la pista de aterrizaje, terminal asignada y clima local en destino.", phaseId: "fase5", descKey: "current_flight.not_started.descent.capt_upcoming_actions", narratorKey: "current_flight.not_started.events.narrator_captain" },
-    { key: "descent_crew_upcoming_actions", narrator: "Tripulación", desc: "Solicitud a los pasajeros de guardar mesas, enderezar respaldos y prepararse para la llegada.", phaseId: "fase5", descKey: "current_flight.not_started.descent.crew_upcoming_actions", narratorKey: "current_flight.not_started.events.narrator_crew" },
-    { key: "descent_capt_10kfeet", narrator: "Capitán", desc: "Señal acústica o verbal al cruzar 10.000 pies hacia abajo, indicando el inicio de la cabina estéril.", phaseId: "fase5", descKey: "current_flight.not_started.descent.capt_10kfeet", narratorKey: "current_flight.not_started.events.narrator_captain" },
-    { key: "descent_crew_landing_fewmin", narrator: "Tripulación", desc: "Chequeo final de cabina y confirmación de que el aterrizaje ocurrirá en breves minutos.", phaseId: "fase5", descKey: "current_flight.not_started.descent.crew_landing_fewmin", narratorKey: "current_flight.not_started.events.narrator_crew" },
-    { key: "final_capt_take_seats", narrator: "Capitán", desc: "Orden perentoria a la tripulación de ocupar sus transportines para el aterrizaje.", phaseId: "fase5", descKey: "current_flight.not_started.descent.capt_take_seats", narratorKey: "current_flight.not_started.events.narrator_captain" },
-    // Fase 6
-    { key: "taxitogate_crew_welcome", narrator: "Tripulación", desc: "Anuncio protocolar dando la bienvenida oficial al destino y confirmando la hora local.", phaseId: "fase6", descKey: "current_flight.not_started.taxitogate.crew_welcome", narratorKey: "current_flight.not_started.events.narrator_crew" },
-    { key: "taxitogate_crew_ramining_seating", narrator: "Tripulación", desc: "Recordatorio preventivo para que nadie se levante antes de que se apague la señal correspondiente.", phaseId: "fase6", descKey: "current_flight.not_started.taxitogate.crew_ramining_seating", narratorKey: "current_flight.not_started.events.narrator_crew" },
-    { key: "taxitogate_crew_delay_apologies", narrator: "Tripulación", desc: "Mensaje para gestionar la impaciencia si la puerta de desembarque está ocupada y hay demoras en plataforma (condicional).", phaseId: "fase6", descKey: "current_flight.not_started.taxitogate.crew_delay_apologies", narratorKey: "current_flight.not_started.events.narrator_crew" },
-    // Fase 7
-    { key: "atgate_capt_disarm_doors", narrator: "Capitán", desc: "Orden ejecutiva para desarmar los toboganes de evacuación una vez detenidos por completo.", phaseId: "fase7", descKey: "current_flight.not_started.atgate.capt_disarm_doors", narratorKey: "current_flight.not_started.events.narrator_captain" },
-    { key: "atgate_crew_deboarding", narrator: "Tripulación", desc: "Instrucciones finales sobre el flujo de salida, despedida y recordatorio sobre objetos personales.", phaseId: "fase7", descKey: "current_flight.not_started.atgate.crew_deboarding", narratorKey: "current_flight.not_started.events.narrator_crew" },
-    // Transversales
-    { key: "common_capt_seatbelt", narrator: "Capitán", desc: "Cambio de estado de la señal lumínica de cinturones (se dispara en cualquier momento por turbulencia).", phaseId: "transversal", descKey: "current_flight.not_started.transversal.capt_seatbelt", narratorKey: "current_flight.not_started.events.narrator_captain" },
-    { key: "common_crew_seatbelt", narrator: "Tripulación", desc: "Refuerzo verbal exigiendo que todos vuelvan a sus asientos inmediatamente tras el aviso del capitán.", phaseId: "transversal", descKey: "current_flight.not_started.transversal.crew_seatbelt", narratorKey: "current_flight.not_started.events.narrator_crew" }
-  ];
+  // Persiste la música ambiental en `flight_setting_announcements` cuando el
+  // usuario cambia la selección (toggle + pista). Solo después de la carga
+  // inicial para no sobrescribir los valores guardados del vuelo.
+  useEffect(() => {
+    if (!flightId || !musicSettingsLoadedRef.current) return;
+    BoardingMusicService.saveForFlight(flightId, {
+      enabled: immersionConfig.play_boarding_music ?? true,
+      musicId: boardingMusicTrackId || null,
+    }).then((result) => {
+      if (!result.success) {
+        console.warn("[VueloActualView] Error al guardar la música del vuelo:", result.error);
+      }
+    });
+  }, [flightId, boardingMusicTrackId, immersionConfig.play_boarding_music]);
+
+  // Mantiene configurado el MusicController con las pistas y la selección del
+  // usuario antes de que el Scheduler inicie/detenga la música ambiental.
+  useEffect(() => {
+    musicController.configure({
+      tracks: musicTracks,
+      selectedTrackId: boardingMusicTrackId || null,
+      enabled: immersionConfig.play_boarding_music ?? true,
+    });
+  }, [musicTracks, boardingMusicTrackId, immersionConfig.play_boarding_music]);
+
+  // Al cargar un vuelo, resuelve su escenario (flights.scenario_key o el del
+  // usuario) y lo selecciona en el selector. Al cambiar el selector, el efecto
+  // de configuración consolidado recarga el snapshot + la configuración.
+  useEffect(() => {
+    if (!flightId || !userId) return;
+    let cancelled = false;
+    (async () => {
+      const flightScenario = await resolveFlightScenario(flightId, userId);
+      if (cancelled) return;
+      setSelectedScenarioKey(flightScenario);
+    })();
+    return () => { cancelled = true; };
+  }, [flightId, userId]);
+
+  // Carga el snapshot del escenario seleccionado + la configuración combinada
+  // (sistema → usuario → vuelo) para ese escenario, y alimenta eventConfig.
+  useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+    (async () => {
+      setScenarioLoading(true);
+
+      const [snapshotResult, userConfigResult] = await Promise.all([
+        ScenarioConfigService.loadPublishedSnapshot(selectedScenarioKey),
+        UserEventDefaultsService.loadEffectiveUserConfig(userId, selectedScenarioKey),
+      ]);
+      if (cancelled) return;
+
+      if (snapshotResult.success && snapshotResult.data) {
+        setScenarioSnapshot(snapshotResult.data);
+      } else {
+        console.warn("[VueloActualView] No se pudo cargar el escenario:", snapshotResult.error);
+        setScenarioSnapshot(null);
+      }
+
+      const merged: Record<string, string> = { ...(userConfigResult.data ?? {}) };
+      let flightOverrides: Record<string, string> = {};
+
+      if (flightId) {
+        const flightResult = await FlightEventConfigService.loadForFlight(flightId, selectedScenarioKey);
+        if (cancelled) return;
+        if (flightResult.success) {
+          flightOverrides = flightResult.data ?? {};
+          Object.assign(merged, flightOverrides);
+        }
+      }
+
+      const switchMap: Record<string, EventSwitchValue> = {};
+      for (const [key, value] of Object.entries(merged)) {
+        if (isEventSwitchValue(value)) {
+          switchMap[key] = value;
+        }
+      }
+      if (Object.keys(switchMap).length > 0) {
+        setEventConfig(switchMap);
+      }
+
+      const packageLocation = flightOverrides[EVENT_CONFIG_PACKAGE_KEY];
+      if (packageLocation != null) {
+        setSelectedPackage(packageLocation);
+      }
+
+      const flavor = merged[EVENT_CONFIG_FLAVOR_KEY];
+      if (flavor != null) {
+        const flavorMap: Record<string, number> = { operative: 1, cultural: 2, scenic: 3, casual: 4 };
+        const mapped = flavorMap[flavor];
+        if (mapped != null) setCommunicationStyle(mapped);
+      }
+
+      setScenarioLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [selectedScenarioKey, userId, flightId]);
+
+  // Carga los umbrales por defecto (events.default_delay_ms) de los eventos de
+  // demora para inicializar sus sliders con el valor publicado en la DB.
+  useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+    (async () => {
+      const thresholds = await ScenarioConfigService.loadDelayThresholds(
+        DELAY_SLIDER_EVENT_KEYS as unknown as string[]
+      );
+      if (cancelled) return;
+      if (Object.keys(thresholds).length > 0) {
+        setDelayEventThresholdsMs((prev) => ({ ...prev, ...thresholds }));
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, selectedScenarioKey]);
 
   const getRouteDetails = (origen: string, destino: string) => {
     const o = (origen || "SABE").toUpperCase();
@@ -833,12 +1585,17 @@ export default function VueloActualView({
     };
   }, [isBoardingActive, boardedCount, boardingManifest.length, passengers.length]);
 
-  // Check when boarding is complete to deactivate active boarding state
+  // Check when boarding is complete to deactivate active boarding state.
+  // IMPORTANTE: el objetivo es el mismo que el del intervalo (manifiesto si
+  // existe, sino pasajeros). Usar solo `passengers.length` cortaba el embarque
+  // al tamaño del mock (8 pax) en vez del manifiesto real (142+), dejando el
+  // botón en "Reanudar embarque" para siempre e impidiendo "Cerrar puertas".
   React.useEffect(() => {
-    if (boardedCount >= passengers.length && isBoardingActive) {
+    const target = boardingManifest.length > 0 ? boardingManifest.length : passengers.length;
+    if (target > 0 && boardedCount >= target && isBoardingActive) {
       setIsBoardingActive(false);
     }
-  }, [boardedCount, passengers.length, isBoardingActive]);
+  }, [boardedCount, boardingManifest.length, passengers.length, isBoardingActive]);
 
   // Reset boarding whenever entering PreEmbarque phase
   React.useEffect(() => {
@@ -850,16 +1607,217 @@ export default function VueloActualView({
     }
   }, [currentState]);
 
-  const handleEventConfigChange = (key: string, value: "off" | "pack" | "IA") => {
+  const handleEventConfigChange = (key: string, value: EventSwitchValue) => {
     setEventConfig(prev => ({
       ...prev,
       [key]: value
     }));
   };
 
+  // Delay de gate_crew_started (solo en memoria, para el vuelo actual).
+  const [gateStartedDelaySec, setGateStartedDelaySec] = useState<number>(GATE_STARTED_DELAY_DEFAULT);
+  const handleGateStartedDelayChange = (value: number) => {
+    const clamped = Math.min(GATE_STARTED_DELAY_MAX, Math.max(GATE_STARTED_DELAY_MIN, Math.round(value)));
+    setGateStartedDelaySec(clamped);
+    flightContextRef.current?.setDelayOverride(GATE_STARTED_DELAY_KEY, clamped * 1000);
+    fileLogger.log('[VueloActualView] Delay gate_crew_started', { seconds: clamped });
+  };
+
+  // Umbrales de demora (ms) por defecto de los eventos de demora, cargados desde
+  // `events.default_delay_ms` (DB). Sobrescribe el fallback local por evento.
+  const [delayEventThresholdsMs, setDelayEventThresholdsMs] = useState<Record<string, number>>({});
+  // Overrides del usuario (en minutos) para los sliders de eventos de demora.
+  const [delaySliderMinutes, setDelaySliderMinutes] = useState<Record<string, number>>({});
+
+  const clampDelayMinutes = (value: number): number =>
+    Math.min(DELAY_SLIDER_MAX_MIN, Math.max(DELAY_SLIDER_MIN_MIN, Math.round(value)));
+
+  const handleDelaySliderChange = (eventKey: string, value: number) => {
+    const clamped = clampDelayMinutes(value);
+    setDelaySliderMinutes((prev) => ({ ...prev, [eventKey]: clamped }));
+    flightContextRef.current?.setDelayOverride(eventKey, clamped * MINUTE_MS);
+    fileLogger.log('[VueloActualView] Delay evento de demora', { eventKey, minutes: clamped });
+  };
+
+  const getDelaySliderMinutes = (eventKey: string): number => {
+    if (delaySliderMinutes[eventKey] !== undefined) return delaySliderMinutes[eventKey];
+    const overrideMs = flightContextRef.current?.getDelayOverride(eventKey);
+    const effectiveMs =
+      typeof overrideMs === "number" && overrideMs > 0
+        ? overrideMs
+        : delayEventThresholdsMs[eventKey] ?? DELAY_SLIDER_DEFAULT_MS[eventKey] ?? MINUTE_MS * DELAY_SLIDER_MIN_MIN;
+    return clampDelayMinutes(Math.round(effectiveMs / MINUTE_MS));
+  };
+
+  // Re-aplica los delays de eventos de demora elegidos por el usuario al
+  // FlightContext. Se invoca tras Scheduler.startFlight porque ahí se
+  // resincronizan los umbrales desde la DB (events.default_delay_ms) y podrían
+  // pisar lo modificado. gate_crew_started no forma parte de esa sincronización,
+  // por lo que no hace falta re-aplicarlo.
+  const applyUserDelayOverridesToContext = () => {
+    const ctx = flightContextRef.current;
+    if (!ctx) return;
+    for (const key of DELAY_SLIDER_EVENT_KEYS) {
+      if (delaySliderMinutes[key] !== undefined) {
+        ctx.setDelayOverride(key, delaySliderMinutes[key] * MINUTE_MS);
+      }
+    }
+  };
+
+  // Pista de música seleccionada actualmente (para preview y etiqueta).
+  const selectedMusicTrack = musicTracks.find((track) => track.id === boardingMusicTrackId) ?? null;
+
+  const getNarratorLabel = (role: string | null | undefined): string => {
+    if (role === "captain") return t("current_flight.not_started.events.narrator_captain");
+    if (role === "crew") return t("current_flight.not_started.events.narrator_crew");
+    if (role === "gate") return t("current_flight.not_started.events.narrator_gate") || "Agente de Puerta";
+    return "—";
+  };
+
   const { showToast } = useToast();
 
-  const handleStartFlight = async () => {
+  // Ejecuta el inicio real del vuelo con las preferencias elegidas en el popup
+  const executeFlightStart = async (mode: "normal" | "test", preferences: FlightStartPreferences) => {
+    setIsStartingFlight(true);
+    try {
+      const flavorMapRev: Record<number, string> = { 1: "operative", 2: "cultural", 3: "scenic", 4: "casual" };
+
+      if (flightId) {
+        const saveResult = await FlightEventConfigService.saveForFlight(flightId, eventConfig, {
+          scenarioKey: selectedScenarioKey,
+          flavor: flavorMapRev[communicationStyle] || "operative",
+          packageLocation: selectedPackage || "aerolineas",
+        });
+        if (!saveResult.success) throw new Error(saveResult.error ?? "Error al guardar la configuración del vuelo");
+      }
+
+      const flightUpdatePayload: Record<string, any> = {
+        flight_status: "started",
+        scenario_key: selectedScenarioKey,
+        lang_primary_id: captainPrimaryLang,
+        lang_secondary_id: captainSecondaryLang === LANG_NONE || captainSecondaryLang === "" ? null : captainSecondaryLang,
+        voice_captain_id: captainVoice,
+        voice_crew_id: crewVoice,
+      };
+      console.log("[handleStartFlight] flights.update payload:", JSON.stringify(flightUpdatePayload, null, 2));
+
+      const { error: flightError } = await supabase
+        .from("flights")
+        .update(flightUpdatePayload)
+        .eq("id", flightId);
+      if (flightError) throw new Error(flightError.message);
+
+      setIsFlightSettingsOpen(false);
+      setExecutionMode(mode);
+      if (mode === "test") {
+        setIsTestMode(true);
+      }
+      // Almacenar preferencias de inicio en FlightContext
+      flightContextRef.current?.setFlightStartPreferences(preferences);
+      fileLogger.log('[VueloActualView] ✈️ Preferencias de inicio', preferences);
+      onStateChange(FlightState.PreEmbarque);
+      // Forzar la sincronización completa de FlightContext con los datos de la
+      // UI ANTES de entrar a GATE: así los anuncios (gate_crew_start_soon, etc.)
+      // usan los datos del vuelo recién importado y no los del vuelo anterior.
+      // (El useEffect de sync corre recién después del render, por lo que sin
+      // esta llamada explícita había una condición de carrera al iniciar vuelo.)
+      syncFlightContext("handleStartFlight");
+      console.log("[DEBUG] Datos de vuelo ANTES de enterPhase:", {
+        dataSource: getContextDataSource(),
+        flight: flightContextRef.current?.getFlight(),
+        preferences,
+        uiState: {
+          airline: getAirlineName(airline),
+          flightCode,
+          originICAO,
+          destICAO,
+          originCityName,
+          destCityName,
+          gate,
+          departureTime: departureTimeStr,
+        },
+      });
+      // Iniciar el FlightController (autoStart: false → solo al hacer clic en "Iniciar Vuelo")
+      if (flightControllerRef.current && !flightControllerRef.current.isConnected()) {
+        try {
+          bindFlightController(flightControllerRef.current);
+          await flightControllerRef.current.connect();
+          connectionStatusService.setActiveController(flightControllerRef.current);
+        } catch (e) {
+          console.warn("[handleStartFlight] FlightController connect falló:", e);
+          if (config.sim.provider === "msfs") {
+            try { flightControllerRef.current.disconnect(); } catch {}
+            const mock = new MockFlightController({
+              speedMultiplier: config.mock.speedMultiplier,
+              autoTransition: config.mock.autoTransition,
+              autoStart: false,
+            });
+            flightControllerRef.current = mock;
+            bindFlightController(mock);
+            await mock.connect();
+            connectionStatusService.setActiveController(mock);
+          } else {
+            throw e;
+          }
+        }
+      } else if (flightControllerRef.current) {
+        connectionStatusService.setActiveController(flightControllerRef.current);
+      }
+
+      // Aplicar preferencias de inicio en el scheduler / embarque
+      phaseDetectorRef.current?.reset();
+      lastDetectedPhaseRef.current = null;
+
+      await schedulerRef.current?.startFlight(mode);
+      // Scheduler.startFlight resincroniza los umbrales de demora desde la DB
+      // (events.default_delay_ms); se re-aplican los delays elegidos por el usuario
+      // en los sliders de "Configurar Eventos" para que se usen en el vuelo.
+      applyUserDelayOverridesToContext();
+      // Delegar lógica de fase inicial al Scheduler según preferencias
+      if (preferences.initialState === 'runway') {
+        // Cabecera de pista: embarcar a todos y saltar GATE/BOARDING
+        const total = boardingManifest.length > 0 ? boardingManifest.length : passengers.length;
+        if (total > 0) {
+          setBoardedCount(total);
+          setBoardingStarted(true);
+          setIsBoardingActive(false);
+          setBoardingStepsDone(true);
+        }
+        schedulerRef.current?.applyFlightStart(preferences);
+        await schedulerRef.current?.enterPhase(FlightPhase.TAKEOFF, 'simulator');
+        console.log(`[UI] Iniciar vuelo (modo: ${mode}, ${preferences.initialState}) -> Scheduler.enterPhase(TAKEOFF)`);
+      } else if (preferences.initialState === 'gate_engines_on' && !preferences.includeBoarding) {
+        const total = boardingManifest.length > 0 ? boardingManifest.length : passengers.length;
+        if (total > 0) {
+          setBoardedCount(total);
+          setBoardingStarted(true);
+          setIsBoardingActive(false);
+          setBoardingStepsDone(true);
+        }
+        schedulerRef.current?.applyFlightStart(preferences);
+        await schedulerRef.current?.enterPhase(FlightPhase.GATE, 'simulator');
+        console.log(`[UI] Iniciar vuelo (modo: ${mode}, gate_engines_on sin abordaje) -> GATE con embarque omitido`);
+      } else {
+        // cold_and_dark o gate_engines_on con abordaje: flujo normal desde GATE
+        schedulerRef.current?.applyFlightStart(preferences);
+        await schedulerRef.current?.enterPhase(FlightPhase.GATE, 'simulator');
+        console.log(`[UI] Iniciar vuelo (modo: ${mode}, ${preferences.initialState}) -> Scheduler.enterPhase(GATE)`);
+      }
+    } catch (err: any) {
+      console.error("Error al iniciar vuelo:", err);
+    } finally {
+      setIsStartingFlight(false);
+    }
+  };
+
+  const handleStartFlight = async (mode: "normal" | "test" = "normal") => {
+    // --- Validación: debe existir un vuelo real cargado (SimBrief / guardado) ---
+    if (!hasValidFlight) {
+      console.warn("[DEBUG] No se puede iniciar el vuelo sin datos de vuelo (hasValidFlight=false)");
+      showToast("No hay vuelo cargado. Importá un vuelo desde SimBrief para poder iniciar.", "error");
+      return;
+    }
+
     // --- Validation ---
     const errors: string[] = [];
     const resolvedAirline = getAirlineName(airline);
@@ -876,66 +1834,18 @@ export default function VueloActualView({
       showToast(errors.join("\n"), "error");
       return;
     }
-    // --------------------
+    // Mostrar popup de elección de estado inicial antes de iniciar
+    setPendingFlightMode(mode);
+    setShowFlightStartPopup(true);
+  };
 
-    setIsStartingFlight(true);
-    try {
-      const annEventKeys = [
-        "gate_crew_start_soon", "gate_crew_started", "common_crew_boarding",
-        "preflight_crew_welcome", "preflight_capt_welcome", "preflight_capt_delay",
-        "preflight_capt_basic_info", "preflight_crew_basic_info", "taxi_capt_armdoors",
-        "taxi_crew_safety_brief", "taxi_capt_dimlights", "taxi_crew_dimlights",
-        "takeoff_capt_prepare", "climb_crew_upcoming_service", "cruise_capt_general_info",
-        "cruise_crew_service_info1", "cruise_crew_service_info2", "cruise_crew_shopping_info",
-        "cruise_crew_customs_forms", "cruise_crew_service_info3", "descent_capt_close_desc",
-        "descent_capt_upcoming_actions", "descent_crew_upcoming_actions", "descent_capt_10kfeet",
-        "descent_crew_landing_fewmin", "final_capt_take_seats", "taxitogate_crew_welcome",
-        "taxitogate_crew_ramining_seating", "taxitogate_crew_delay_apologies",
-        "atgate_capt_disarm_doors", "atgate_crew_deboarding", "common_capt_seatbelt",
-        "common_crew_seatbelt"
-      ];
-      const annPayload: Record<string, any> = { flight_id: flightId, user_id: userId };
-      for (const key of annEventKeys) {
-        annPayload[key] = eventConfig[key] || "off";
-      }
-      const flavorMapRev: Record<number, string> = { 1: "operative", 2: "cultural", 3: "scenic", 4: "casual" };
-      annPayload.announcement_flavor = flavorMapRev[communicationStyle] || "operative";
-      annPayload.packages_location = selectedPackage || "aerolineas";
+  const handleConfirmFlightStart = async (preferences: FlightStartPreferences) => {
+    setShowFlightStartPopup(false);
+    await executeFlightStart(pendingFlightMode, preferences);
+  };
 
-      if (flightId) {
-        const { error: annError } = await supabase
-          .from("flight_setting_announcements")
-          .insert(annPayload);
-        if (annError) throw new Error(annError.message);
-      }
-
-      const flightUpdatePayload: Record<string, any> = {
-        flight_status: "started",
-        lang_primary_id: captainPrimaryLang,
-        lang_secondary_id: captainSecondaryLang === LANG_NONE || captainSecondaryLang === "" ? null : captainSecondaryLang,
-        voice_captain_id: captainVoice,
-        voice_crew_id: crewVoice,
-      };
-      console.log("[handleStartFlight] flights.update payload:", JSON.stringify(flightUpdatePayload, null, 2));
-
-      const { error: flightError } = await supabase
-        .from("flights")
-        .update(flightUpdatePayload)
-        .eq("id", flightId);
-      if (flightError) throw new Error(flightError.message);
-
-      setIsFlightSettingsOpen(false);
-      onStateChange(FlightState.PreEmbarque);
-      // Stage 18A.2: once the flight is started, enter the operational
-      // boarding phase through the existing FSM. This triggers
-      // Scheduler.enterPhase(BOARDING) -> PreBoardingScenario automatically.
-      simControllerRef.current?.enterBoarding();
-      console.log("[UI] Iniciar vuelo -> FlightFSM enterBoarding()");
-    } catch (err: any) {
-      console.error("Error al iniciar vuelo:", err);
-    } finally {
-      setIsStartingFlight(false);
-    }
+  const handleStartTests = () => {
+    handleStartFlight("test");
   };
 
   const handleImportSimbrief = async () => {
@@ -951,6 +1861,12 @@ export default function VueloActualView({
       }
       const data = await response.json();
       setSimbriefRawData(data);
+
+      // Logs detallados solicitados: verificar estructura SimBrief
+      console.log('[SimBrief] Estructura de datos:', Object.keys(data || {}));
+      console.log('[SimBrief] general:', data?.general);
+      console.log('[SimBrief] general.sched_out:', data?.general?.sched_out, '| tipo:', typeof data?.general?.sched_out);
+      console.log('[SimBrief] times:', data?.times);
 
       const userId = (await supabase.auth.getUser()).data.user?.id;
       if (!userId) throw new Error("User not authenticated");
@@ -1017,6 +1933,8 @@ export default function VueloActualView({
         flight_status: "pending",
         flight_services_config: defaultServices,
         simbrief_snapshot: data,
+        // Preservar el escenario seleccionado en la UI (si no, el default).
+        scenario_key: selectedScenarioKey,
         lang_primary_id: captainPrimaryLang,
         lang_secondary_id: captainSecondaryLang === LANG_NONE || captainSecondaryLang === "" ? null : captainSecondaryLang,
         voice_captain_id: captainVoice,
@@ -1079,6 +1997,13 @@ export default function VueloActualView({
       onTriggerBriefImport(mappedSimbriefData);
       setIsBriefImported(true);
       setCanStartFlight(true);
+
+      // Logs de depuración solicitados: verificar hora SimBrief UTC vs FlightContext
+      // Formato consistente HH:MM UTC (para comparar con ZULU TIME)
+      const utcDepartureHHMM = schedOutDate ? schedOutDate.toISOString().slice(11, 16) : null;
+      console.log('[SimBrief] Hora de salida (UTC):', flightRow.departure_time, '| sched_out raw:', gen.sched_out, '| UTC HH:MM:', utcDepartureHHMM);
+      // departureTimeStr se recalculará en el próximo render; log del valor derivado:
+      console.log('[SimBrief] departureTime derivado (UTC HH:MM):', utcDepartureHHMM);
     } catch (err: any) {
       setSimbriefError(err?.message || "Error desconocido al conectar con SimBrief");
     } finally {
@@ -1087,19 +2012,18 @@ export default function VueloActualView({
   };
 
   const eventGroups = useMemo(() => [
-    { id: "immersion", label: t("current_flight.not_started.events.group_immersion") },
-    { id: "fase1", label: t("current_flight.not_started.boarding.group_label") },
-    { id: "fase2", label: t("current_flight.not_started.preflight.group_label") },
-    { id: "fase3", label: t("current_flight.not_started.events.group_taxi") },
-    { id: "fase4", label: t("current_flight.not_started.events.group_cruise") },
-    { id: "fase5", label: t("current_flight.not_started.events.group_descent") },
-    { id: "fase6", label: t("current_flight.not_started.events.group_taxitogate") },
-    { id: "fase7", label: t("current_flight.not_started.events.group_atgate") },
-    { id: "transversal", label: t("current_flight.not_started.events.group_transversal") }
-  ], [t]);
+    { id: "immersion", label: t("current_flight.not_started.events.group_immersion"), count: immersionOptions.length },
+    ...(scenarioSnapshot?.phases ?? []).map((phase) => ({
+      id: phase.key,
+      label: phase.name,
+      count: phase.events.length,
+    })),
+  ], [t, scenarioSnapshot]);
 
-  const getFilteredEvents = (): EventDefinition[] => {
-    return eventDefinitionList.filter(item => item.phaseId === activeGroupTab);
+  const getFilteredEvents = (): ScenarioEventConfig[] => {
+    if (!scenarioSnapshot) return [];
+    const phase = scenarioSnapshot.phases.find((entry) => entry.key === activeGroupTab);
+    return phase?.events ?? [];
   };
 
   // Sub-stages state alignment according to user specs
@@ -1141,6 +2065,22 @@ export default function VueloActualView({
   };
 
   const activeIndex = getCurrentPhaseIndex();
+
+  // Fases del stepper dinámico, construidas a partir del escenario cargado
+  // (GATE y BOARDING siempre presentes). Se recalculan cuando cambia la fase.
+  const stepperPhases = useMemo(() => {
+    return schedulerRef.current?.getScenarioPhases() ?? ["GATE", "BOARDING"];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stepperCurrentPhase, flightPhase, currentState]);
+  // `activeIndex` se mantiene para compatibilidad con el auto-avance legacy
+  // (deshabilitado) de las fases 2 a 7.
+
+  // El stepper es visual (Stage 18D): no dispara transiciones reales del FSM.
+  const handleStepperPhaseChange = (phase: string) => {
+    setStepperCurrentPhase(phase);
+    const mapped = phaseToSubStage(phase);
+    setCurrentSubStage(mapped.subStage);
+  };
 
   const isPhase2To7 = ["Pre-vuelo", "Rodaje", "Crucero", "Descenso", "Rodaje a Puerta", "Plataforma"].includes(currentSubStage);
   const isPhase2To6 = ["Pre-vuelo", "Rodaje", "Crucero", "Descenso", "Rodaje a Puerta"].includes(currentSubStage);
@@ -1305,6 +2245,12 @@ export default function VueloActualView({
 
   const displayTotalPassengers = boardingManifest.length > 0 ? boardingManifest.length : passengers.length;
   const displayBoardedCount = boardedCount;
+  const boardingComplete = displayTotalPassengers > 0 && boardedCount >= displayTotalPassengers;
+  // El cierre de puertas requiere ÚNICAMENTE el embarque de pasajeros
+  // completo (boardedCount >= manifiesto). Los pasos opcionales pendientes
+  // (p. ej. demoras no disparadas) no deben bloquearlo: Scheduler.closeDoors()
+  // los omite automáticamente.
+  const canCloseDoors = boardingComplete;
 
   // Compute ETA block minutes from raw SimBrief data
   const blockMinutes = React.useMemo(() => {
@@ -1315,68 +2261,352 @@ export default function VueloActualView({
     return match ? parseInt(match[1]) : 75;
   }, [simbriefRawData, simBriefData]);
 
-  // Compute departure local time from SimBrief sched_out
+  // Compute departure time UTC from SimBrief sched_out (para comparar con ZULU TIME)
+  // FIX: antes se convertía a hora local del aeropuerto (getAirportTimezone), causando desfase vs SimBrief UTC.
+  // Ahora se almacena siempre en HH:MM UTC consistente.
+  // Se añaden logs detallados para diagnosticar por qué simbriefRawData puede no contener sched_out.
   const departureTimeStr = React.useMemo(() => {
-    if (simbriefRawData?.general?.sched_out) {
-      const ts = Number(simbriefRawData.general.sched_out);
-      if (!isNaN(ts)) {
-        const tz = getAirportTimezone(originICAO);
-        return new Intl.DateTimeFormat("es-ES", {
-          hour: "2-digit",
-          minute: "2-digit",
-          timeZone: tz,
-          hour12: false,
-        }).format(new Date(ts * 1000));
+    // Logs detallados solicitados
+    console.log('[DepartureTime] 🔍 simbriefRawData:', simbriefRawData);
+    console.log('[DepartureTime] 🔍 general.sched_out:', simbriefRawData?.general?.sched_out);
+    console.log('[SimBrief] Estructura de datos:', Object.keys(simbriefRawData || {}));
+    console.log('[SimBrief] general:', (simbriefRawData as any)?.general);
+
+    // Extracción robusta: SimBrief puede tener sched_out en general.sched_out (timestamp),
+    // en times.sched_out, o como string HH:MM / ISO. Probamos múltiples campos.
+    const candidates: Record<string, unknown> = {
+      'general.sched_out': (simbriefRawData as any)?.general?.sched_out,
+      'times.sched_out': (simbriefRawData as any)?.times?.sched_out,
+      'general.orig_time': (simbriefRawData as any)?.general?.orig_time,
+      'general.est_out': (simbriefRawData as any)?.general?.est_out,
+      'general.departure_time': (simbriefRawData as any)?.general?.departure_time,
+    };
+    let rawCandidate: unknown = null;
+    let candidateKey: string | null = null;
+    for (const [k, v] of Object.entries(candidates)) {
+      if (v !== undefined && v !== null && v !== '') {
+        rawCandidate = v;
+        candidateKey = k;
+        break;
       }
     }
-    return "12:45";
-  }, [simbriefRawData, originICAO]);
+    // Fallback: si times no existe pero general.sched_out es el primario
+    if (rawCandidate == null && simbriefRawData) {
+      rawCandidate = (simbriefRawData as any)?.general?.sched_out;
+      candidateKey = 'general.sched_out (fallback)';
+    }
 
-  // Sync all editable flight data to FlightContext
-  useEffect(() => {
-    const ctx = flightContextRef.current;
-    const player = announcementPlayerRef.current;
-    if (ctx) {
-      ctx.updateFlight({
-        airline: getAirlineName(airline),
-        flightNumber: flightCode,
-        originICAO,
-        destICAO,
-        originCity: originCityName,
-        destCity: destCityName,
+    const ts = Number(rawCandidate);
+    console.log('[DepartureTime] 🔍 sched_out parsed:', ts, '| candidateKey:', candidateKey, '| raw:', rawCandidate);
+    console.log('[DepartureTime] 🔍 Condición:', {
+      hasSimbrief: !!simbriefRawData,
+      hasGeneral: !!simbriefRawData?.general,
+      hasSchedOut: !!simbriefRawData?.general?.sched_out,
+      candidateKey,
+      rawCandidate,
+      isNumber: !isNaN(ts),
+      isPositive: ts > 0,
+    });
+
+    // Caso 1: timestamp numérico (SimBrief estándar: unix seconds)
+    if (!isNaN(ts) && ts > 0) {
+      // Validar rango unix plausible (1970-2100): > 1e9 y < 4e9
+      // Algunos OFP devuelven timestamp en string numérico, funciona con Number()
+      const utcTime = new Date(ts * 1000).toISOString().slice(11, 16); // "HH:MM"
+      console.log('[DepartureTime] ✅ UTC HH:MM desde timestamp:', utcTime);
+      return utcTime;
+    }
+
+    // Caso 2: string ya en formato HH:MM[:SS] o ISO datetime
+    if (typeof rawCandidate === 'string') {
+      const s = rawCandidate.trim();
+      // "01:10" o "01:10:00"
+      if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(s)) {
+        const hhmm = s.slice(0, 5).padStart(5, '0');
+        console.log('[DepartureTime] ✅ HH:MM desde string:', hhmm);
+        return hhmm;
+      }
+      // Intentar parsear fecha ISO / similar
+      const parsed = new Date(s);
+      if (!isNaN(parsed.getTime())) {
+        const hhmm = parsed.toISOString().slice(11, 16);
+        console.log('[DepartureTime] ✅ HH:MM desde Date string:', hhmm);
+        return hhmm;
+      }
+    }
+
+    // Si no se pudo extraer, log y fallback
+    if (simbriefRawData) {
+      console.warn('[DepartureTime] ⚠️ No se pudo extraer sched_out - usando fallback 12:45. Verificar estructura SimBrief arriba.');
+    }
+    return "12:45";
+  }, [simbriefRawData]);
+
+  // Hora local del aeropuerto de origen para mostrar en UI (pre-embarque)
+  // departureTime (UTC) se mantiene para cálculos internos (demoras vs ZULU TIME)
+  const departureTimeLocalStr = React.useMemo(() => {
+    // Reusar misma extracción robusta que departureTimeStr pero convertir a hora local
+    const candidates: Record<string, unknown> = {
+      'general.sched_out': (simbriefRawData as any)?.general?.sched_out,
+      'times.sched_out': (simbriefRawData as any)?.times?.sched_out,
+      'general.orig_time': (simbriefRawData as any)?.general?.orig_time,
+      'general.est_out': (simbriefRawData as any)?.general?.est_out,
+    };
+    let rawCandidate: unknown = null;
+    for (const v of Object.values(candidates)) {
+      if (v !== undefined && v !== null && v !== '') {
+        rawCandidate = v;
+        break;
+      }
+    }
+    if (rawCandidate == null) rawCandidate = (simbriefRawData as any)?.general?.sched_out;
+
+    const ts = Number(rawCandidate);
+    // Origen para timezone: prioridad SimBrief, fallback estado editable
+    const originForTz = (simbriefRawData as any)?.origin?.icao_code || originICAO || "";
+    const timezone = getAirportTimezone(originForTz);
+
+    if (!isNaN(ts) && ts > 0) {
+      try {
+        const localTime = new Date(ts * 1000).toLocaleTimeString('es-ES', {
+          hour: '2-digit',
+          minute: '2-digit',
+          timeZone: timezone,
+          hour12: false,
+        });
+        console.log('[DepartureTimeLocal] ✅ origin:', originForTz, '| timezone:', timezone, '| UTC ts:', ts, '| local HH:MM:', localTime, '| UTC HH:MM:', departureTimeStr);
+        return localTime;
+      } catch (e) {
+        console.warn('[DepartureTimeLocal] ⚠️ Error toLocaleTimeString con timezone', timezone, e);
+        return departureTimeStr; // fallback a UTC si falla timezone
+      }
+    }
+    if (typeof rawCandidate === 'string' && /^\d{1,2}:\d{2}/.test(rawCandidate.trim())) {
+      // Si ya es HH:MM, no hay conversión, devolver tal cual (asumimos local si no hay timestamp)
+      return rawCandidate.trim().slice(0, 5);
+    }
+    // Fallback: si no hay SimBrief, mantener mismo fallback que departureTimeStr pero en contexto local
+    return departureTimeStr;
+  }, [simbriefRawData, originICAO, departureTimeStr]);
+
+  // Verificar que simbriefRawData se actualiza correctamente después de importación
+  React.useEffect(() => {
+    console.log('[SimBrief] Verificación estado simbriefRawData:', {
+      isNull: simbriefRawData === null,
+      isUndefined: simbriefRawData === undefined,
+      keys: simbriefRawData ? Object.keys(simbriefRawData) : null,
+      hasGeneral: !!(simbriefRawData as any)?.general,
+      departureTimeStr,
+      departureTimeLocalStr,
+    });
+    console.log('[DepartureTime] Estado actualizado -> departureTimeStr (UTC):', departureTimeStr, '| departureTimeLocalStr:', departureTimeLocalStr);
+  }, [simbriefRawData, departureTimeStr, departureTimeLocalStr]);
+
+  // Datos de un vuelo guardado en el backend (futuro). Si se carga un vuelo
+  // persistido se setea aquí y tendrá prioridad sobre el estado editable.
+  const savedFlightData: FlightInfo | null = null;
+
+  // Fuente de datos efectiva para FlightContext.
+  // Prioridad: SimBrief (datos crudos) > Vuelo guardado > Estado editable.
+  // La pantalla de ajustes lee `simbriefRawData` para mostrar la ruta; si el
+  // estado editable quedó desactualizado (p. ej. falló la importación), se usa
+  // igual el vuelo de SimBrief para que pantalla y anuncios coincidan.
+  const getContextDataSource = (): "simbrief" | "saved" | "editable" => {
+    if (simbriefRawData?.general?.flight_number) return "simbrief";
+    if (savedFlightData) return "saved";
+    return "editable";
+  };
+
+  const buildFlightDataForContext = useCallback((): FlightInfo => {
+    const gen = simbriefRawData?.general ?? null;
+    const hasSimBrief = !!(gen && gen.flight_number);
+
+    // scheduledTakeoffTime (segundos del día UTC, 0-86400) derivado de SimBrief
+    // sched_out (epoch en segundos). Se normaliza para comparar contra zuluTime
+    // (que MSFS reporta como segundos desde medianoche UTC).
+    const schedOutRaw: unknown =
+      (simbriefRawData as any)?.general?.sched_out ??
+      (simbriefRawData as any)?.times?.sched_out ??
+      (simbriefRawData as any)?.general?.est_out ??
+      null;
+    const schedOutTs = Number(schedOutRaw);
+    let scheduledTakeoffSec: number | undefined;
+    if (!Number.isNaN(schedOutTs) && schedOutTs > 0) {
+      if (schedOutTs > 86400 && schedOutTs < 4102444800) {
+        const d = new Date(schedOutTs * 1000);
+        scheduledTakeoffSec = d.getUTCHours() * 3600 + d.getUTCMinutes() * 60 + d.getUTCSeconds();
+      } else {
+        scheduledTakeoffSec = Math.round(schedOutTs);
+      }
+      console.log("[VueloActualView] scheduledTakeoffTime asignado:", {
+        raw: schedOutRaw,
+        epochSeconds: schedOutTs,
+        scheduledTakeoffSec,
+        formatted: secondsToHHMM(scheduledTakeoffSec),
+      });
+    } else {
+      console.warn("[VueloActualView] scheduledTakeoffTime NO asignado:", schedOutRaw);
+    }
+
+    // ── Datos de crucero (fase CRUISE) ──────────────────────────────────
+    // cruise_time de SimBrief (segundos) + cálculo de vuelo internacional
+    // (una sola vez aquí, al construir los datos; se propaga vía syncFlightContext).
+    const cruiseTimeSeconds = Number((simbriefRawData as any)?.times?.cruise_time || 0);
+    const cruiseOriginICAO = simbriefRawData?.origin?.icao_code || originICAO || "";
+    const cruiseDestICAO = simbriefRawData?.destination?.icao_code || destICAO || "";
+    const cruiseIsInternational = cruiseOriginICAO && cruiseDestICAO
+      ? isInternationalFlight(cruiseOriginICAO, cruiseDestICAO)
+      : false;
+    if (hasSimBrief) {
+      console.log("[SimBrief] Datos de crucero:", {
+        cruiseTimeSeconds,
+        cruiseTimeFormatted: `${Math.floor(cruiseTimeSeconds / 60)}m`,
+        originICAO: cruiseOriginICAO,
+        destICAO: cruiseDestICAO,
+        isInternational: cruiseIsInternational,
+        originCountry: cruiseOriginICAO ? getCountryKey(cruiseOriginICAO) : "—",
+        destCountry: cruiseDestICAO ? getCountryKey(cruiseDestICAO) : "—",
+      });
+    }
+
+    if (hasSimBrief) {
+      const srcOriginIcao = simbriefRawData?.origin?.icao_code ?? "";
+      const srcDestIcao = simbriefRawData?.destination?.icao_code ?? "";
+      return {
+        airline:
+          getAirlineName(gen.icao_airline || gen.airline) ||
+          getAirlineName(airline) ||
+          airline,
+        flightNumber: gen.flight_number || flightCode,
+        originICAO: srcOriginIcao || originICAO,
+        destICAO: srcDestIcao || destICAO,
+        originCity:
+          getAirportName(srcOriginIcao) ||
+          simbriefRawData?.origin?.city ||
+          originCityName ||
+          getRouteDetails(originICAO, destICAO).orgCity,
+        destCity:
+          getAirportName(srcDestIcao) ||
+          simbriefRawData?.destination?.city ||
+          destCityName ||
+          getRouteDetails(originICAO, destICAO).destCity,
         gate,
         departureTime: departureTimeStr,
+        departureTimeLocal: departureTimeLocalStr,
+        scheduledTakeoffTime: scheduledTakeoffSec,
+        cruiseTimeSeconds,
+        isInternational: cruiseIsInternational,
         captainPrimaryLang,
         captainSecondaryLang,
         flightId,
-      });
+        specialEvent: specialEvents,
+        specialEventEnabled: specialEventEnabled,
+      };
+    }
+
+    if (savedFlightData) {
+      return {
+        ...savedFlightData,
+        scheduledTakeoffTime: scheduledTakeoffSec,
+        cruiseTimeSeconds,
+        isInternational: savedFlightData.isInternational ?? cruiseIsInternational,
+        specialEvent: specialEvents,
+        specialEventEnabled: specialEventEnabled,
+      };
+    }
+
+    return {
+      airline: getAirlineName(airline) || airline,
+      flightNumber: flightCode,
+      originICAO,
+      destICAO,
+      originCity: originCityName || getRouteDetails(originICAO, destICAO).orgCity,
+      destCity: destCityName || getRouteDetails(originICAO, destICAO).destCity,
+      gate,
+      departureTime: departureTimeStr,
+      departureTimeLocal: departureTimeLocalStr,
+      scheduledTakeoffTime: scheduledTakeoffSec,
+      cruiseTimeSeconds,
+      isInternational: cruiseIsInternational,
+      captainPrimaryLang,
+      captainSecondaryLang,
+      flightId,
+      specialEvent: specialEvents,
+      specialEventEnabled: specialEventEnabled,
+    };
+  }, [
+    airline, flightCode, originICAO, destICAO, originCityName, destCityName,
+    gate, departureTimeStr, departureTimeLocalStr, captainPrimaryLang, captainSecondaryLang, flightId,
+    simbriefRawData,
+    specialEvents, specialEventEnabled,
+  ]);
+
+  // Sincroniza FlightContext con los datos actuales de la UI. Es una función
+  // (no solo un efecto) porque también se invoca explícitamente en
+  // `handleStartFlight` para garantizar que los anuncios usen los datos del
+  // vuelo recién importado y no los del vuelo anterior (condición de carrera).
+  const syncFlightContext = useCallback((source = "useEffect sync") => {
+    const ctx = flightContextRef.current;
+    const player = announcementPlayerRef.current;
+    if (ctx) {
+      ctx.updateFlight(buildFlightDataForContext());
       ctx.updateVoices({
         captain: captainVoice,
         crew: crewVoice,
         gateAgent: gateAgentVoiceId,
       });
       ctx.updateSettings({
+        scenarioKey: selectedScenarioKey,
         eventConfig,
       });
+      ctx.updateSimbrief(simbriefRawData ? { data: simbriefRawData } : { data: {} });
     }
     if (player && ctx) {
       player.setFlightContext(ctx);
     }
+    // [DEBUG] Rastro de cuándo/cómo se actualizó FlightContext y con qué datos.
+    console.log("[DEBUG] FlightContext actualizado:", {
+      flight: ctx?.getFlight(),
+      dataSource: getContextDataSource(),
+      source,
+      timestamp: Date.now(),
+    });
+    // Log requerido para criterio de aceptación: verificar departureTime en UTC y local
+    console.log('[FlightContext] departureTime actualizado (UTC):', ctx?.getFlight().departureTime);
+    console.log('[FlightContext] departureTimeLocal actualizado:', ctx?.getFlight().departureTimeLocal);
+    // Verificación scheduledTakeoffTime (eventos de demora)
+    console.log('[FlightContext] scheduledTakeoffTime:', {
+      value: ctx?.getFlight().scheduledTakeoffTime,
+      formatted: typeof ctx?.getFlight().scheduledTakeoffTime === "number" ? secondsToHHMM(ctx.getFlight().scheduledTakeoffTime!) : "NO DEFINIDO",
+    });
+    // Log adicional SimBrief UTC si hay datos
+    if (simbriefRawData?.general?.sched_out) {
+      const schedOutUtc = new Date(Number(simbriefRawData.general.sched_out) * 1000).toISOString().slice(11, 16);
+      console.log('[SimBrief] Hora de salida (UTC):', schedOutUtc, '| raw sched_out:', simbriefRawData.general.sched_out, '| local:', departureTimeLocalStr);
+    }
+  }, [
+    airline, flightCode, originICAO, destICAO, originCityName, destCityName,
+    gate, departureTimeStr, departureTimeLocalStr, captainPrimaryLang, captainSecondaryLang, flightId,
+    captainVoice, crewVoice, gateAgentVoiceId, eventConfig, selectedScenarioKey, simbriefRawData,
+    buildFlightDataForContext,
+  ]);
+
+  // Sync all editable flight data to FlightContext
+  useEffect(() => {
+    syncFlightContext();
 
     // TEMP DIAGNOSTIC LOG (Stage 19A) — remove later.
+    const ctx = flightContextRef.current;
     const cfg = ctx?.getSettings()?.eventConfig;
     if (cfg) {
       console.log("[CONFIG]");
       console.log("Flight event configuration loaded");
+      console.log("Scenario: " + (ctx?.getSettings()?.scenarioKey ?? "(missing)"));
       for (const key of ["preflight_crew_welcome", "preflight_crew_basic_info", "preflight_capt_welcome", "preflight_capt_basic_info"]) {
         console.log(key + " = " + (cfg[key] ?? "(missing)"));
       }
     }
-  }, [
-    airline, flightCode, originICAO, destICAO, originCityName, destCityName,
-    gate, departureTimeStr, captainPrimaryLang, captainSecondaryLang, flightId,
-    captainVoice, crewVoice, gateAgentVoiceId, eventConfig,
-  ]);
+  }, [syncFlightContext]);
 
   // Compute flight duration from SimBrief air_time (seconds)
   const flightDuration = React.useMemo(() => {
@@ -1416,7 +2646,6 @@ export default function VueloActualView({
   const p26Fear = mockInfo ? mockInfo.fear : avgFear;
   const p26Hunger = mockInfo ? mockInfo.hunger : avgHunger;
   const p26Bathroom = mockInfo ? mockInfo.bathroom : avgBathroom;
-  const p26Announcement = mockInfo ? mockInfo.announcement : lastAnnouncement;
 
   // SVG parameters for satisfying circular gauge
   const radius = 50;
@@ -1619,85 +2848,53 @@ export default function VueloActualView({
           className="bg-[#00172e]/85 border border-[#3B7EB2]/45 rounded-[8px] p-4 text-xs shadow-lg space-y-4"
         >
           {/* Header line of the stepper */}
-          <div className="flex items-center justify-between border-b border-white/5 pb-2">
+          <div className="flex items-center justify-between border-b border-white/5 pb-2 gap-2">
             <div className="flex items-center gap-2 font-mono text-[#45AFFF] font-extrabold text-xs uppercase tracking-wider">
               <span className="w-2 h-2 rounded-full bg-[#43E600] animate-pulse" />
               <span>Etapas de Vuelo</span>
             </div>
-            <div className="text-[10px] font-mono text-white/55 uppercase">
-              Fase Activa: <span className="text-[#43E600] font-black">{currentSubStage}</span>
+            <div className="flex items-center gap-2">
+              <div className="text-[10px] font-mono text-white/55 uppercase hidden sm:block">
+                Fase Activa: <span className="text-[#43E600] font-black">{currentSubStage}</span>
+              </div>
+              <DebugMonitorButton onClick={() => setIsDebugOpen(true)} />
             </div>
           </div>
 
-          {/* Linear Stepper Track */}
-          <div className="relative flex flex-col md:flex-row items-stretch justify-between gap-3 md:gap-1 pl-1 pr-1 pt-1.5 pb-1">
-            {/* Connecting line for desktop background */}
-            <div className="absolute top-[18px] left-[20px] right-[20px] h-[2px] bg-white/5 hidden md:block z-0" />
-            
-            {/* Active Progress line for desktop */}
-            <div 
-              className="absolute top-[18px] left-[20px] h-[2px] bg-[#45AFFF]/60 hidden md:block z-0 transition-all duration-500"
-              style={{ 
-                width: `${(activeIndex / (simplifiedPhases.length - 1)) * 95}%`,
-                maxWidth: "calc(100% - 40px)"
-              }}
+          {/* Stepper dinámico construido a partir de las fases del escenario cargado */}
+          <div className="pl-1 pr-1 pt-1.5 pb-1">
+            <FlightStepper
+              phases={stepperPhases}
+              currentPhase={stepperCurrentPhase}
+              onPhaseChange={handleStepperPhaseChange}
             />
-
-            {simplifiedPhases.map((phase, idx) => {
-              const isPassedOrActive = idx <= activeIndex;
-              const isActive = idx === activeIndex;
-              
-              return (
-                <button
-                  key={phase.label}
-                  type="button"
-                  onClick={() => {
-                    // Stage 18D: phase stepper is visual only. It must NOT
-                    // trigger a real simulation phase transition. The
-                    // FlightFSM/SimulationController is the only authority.
-                    setCurrentSubStage(phase.label);
-                    // onStateChange(phase.state); // DISABLED — visual only
-                  }}
-                  className={`relative flex md:flex-col items-center gap-3 md:gap-2 flex-1 text-left md:text-center z-10 transition-all focus:outline-none cursor-pointer group ${
-                    isPassedOrActive ? "opacity-100" : "opacity-35 hover:opacity-70"
-                  }`}
-                >
-                  {/* Step Circle with conditional styling */}
-                  <div 
-                    className={`w-9 h-9 rounded-full flex items-center justify-center border font-mono text-xs font-bold transition-all duration-300 shrink-0 ${
-                      isActive 
-                        ? "bg-[#43E600] text-black border-[#43E600] shadow-[0_0_12px_rgba(67,230,0,0.5)] ring-4 ring-[#43E600]/10 animate-pulse scale-105"
-                        : isPassedOrActive
-                          ? "bg-[#002746] text-[#45AFFF] border-[#3B7EB2]/60 hover:border-[#45AFFF]"
-                          : "bg-[#001224] text-white/30 border-white/10"
-                    }`}
-                  >
-                    {idx + 1}
-                  </div>
-
-                  {/* Step Text Label */}
-                  <div className="flex flex-col md:items-center min-w-0">
-                    <span 
-                      className={`font-sans text-[11px] font-semibold tracking-tight transition-all duration-300 leading-snug break-words hyphens-auto ${
-                        isActive 
-                          ? "text-[#43E600] font-black"
-                          : isPassedOrActive
-                            ? "text-[#45AFFF] font-medium"
-                            : "text-white/40 font-normal"
-                      }`}
-                    >
-                      {phase.label}
-                    </span>
-                    
-                    {/* Small sub-indicator for additional polish */}
-                    <span className="text-[7.5px] font-mono text-white/20 tracking-wider uppercase mt-0.5 hidden lg:block">
-                      {phase.state === FlightState.NoIniciado ? "TIERRA" : phase.state === FlightState.PreEmbarque ? "PRE-FLT" : phase.state === FlightState.EnVuelo ? "EN VUELO" : "ARRIV"}
-                    </span>
-                  </div>
-                </button>
-              );
-            })}
           </div>
+
+          {/* Manual step-by-step controls (modo pruebas) */}
+          {isTestModeFlight && (
+            <div className="border-t border-white/5 pt-3 space-y-3">
+              <ManualStepControls
+                step={pendingManualStep}
+                index={stepIndex}
+                total={stepTotal}
+                displayName={
+                  pendingManualStep
+                    ? (EventCatalogService.get(pendingManualStep.eventKey)?.description ?? "")
+                    : ""
+                }
+                onNext={() => {
+                  console.log("[UI] Siguiente paso -> Scheduler.nextManualStep()");
+                  schedulerRef.current?.nextManualStep();
+                }}
+                onSkip={() => {
+                  console.log("[UI] Saltar paso -> Scheduler.skipStep()");
+                  schedulerRef.current?.skipStep();
+                }}
+                busy={false}
+              />
+              <StepHistory entries={stepHistory} />
+            </div>
+          )}
         </div>
       )}
 
@@ -1759,24 +2956,12 @@ export default function VueloActualView({
               </button>
               )}
 
-              <button 
-                id="btn-cargar-vuelo-header"
-                type="button"
-                onClick={() => {
-                  setCanStartFlight(true);
-                  onStateChange(FlightState.EnVuelo);
-                }}
-                className="bg-[#e68b00]/15 hover:bg-[#e68b00]/30 text-[#ffb03a] border border-[#e68b00]/50 px-5 py-2.5 rounded-[5px] text-xs font-mono font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow hover:scale-[1.01] active:scale-[0.99]"
-              >
-                <Save className="w-4 h-4" />
-                {t("current_flight.not_started.load_btn")}
-              </button>
-            </div>
-            {simbriefError && (
-              <div className="w-full text-center text-red-500 text-sm font-semibold">
-                {t(`current_flight.not_started.errors.${simbriefError}`, { defaultValue: simbriefError })}
+              {simbriefError && (
+                <div className="w-full text-center text-red-500 text-sm font-semibold">
+                  {t(`current_flight.not_started.errors.${simbriefError}`, { defaultValue: simbriefError })}
+                </div>
+              )}
               </div>
-            )}
             </div>
           )}
         </div>
@@ -1883,7 +3068,7 @@ export default function VueloActualView({
                 </button>
               )
             ) : (
-              currentState === FlightState.PreEmbarque && (
+              currentState === FlightState.PreEmbarque && (flightPhase === "GATE" || boardingStarted) && (
                 <div className="flex items-center gap-2">
                   {!boardingStarted ? (
                     <button 
@@ -1931,49 +3116,59 @@ export default function VueloActualView({
                     </button>
                   )}
 
-                  {boardedCount < passengers.length ? (
+                  {!boardingComplete && !isBoardingActive && (
                     <button 
                       id="header-btn-toggle-boarding"
                       onClick={() => {
-                        const wasActive = isBoardingActive;
-                        setIsBoardingActive(!wasActive);
                         setBoardingStarted(true);
+                        setIsBoardingActive(true);
 
-                        // Stage 18A.2: the boarding button does NOT change the
-                        // FlightPhase. FlightFSM already remains in BOARDING.
-                        // It only starts the "boarding" narrative scenario.
-                        if (!wasActive) {
-                          console.log("[UI] Comenzar embarque -> Scheduler.startScenario('boarding')");
-                          schedulerRef.current?.startScenario("boarding");
+                        // Stage 18A.2: "Comenzar embarque" solo inicia el
+                        // escenario narrativo de BOARDING cuando se está en
+                        // GATE (Fase 0). La transición GATE -> BOARDING es
+                        // controlada por el usuario vía Scheduler.startBoarding().
+                        // Además notifica al Mock para liberar GATE y transiciona FSM con fuente 'user'
+                        if (flightPhase === "GATE") {
+                          console.log("[UI] Comenzar embarque -> Scheduler.startBoarding()");
+                          schedulerRef.current?.startBoarding();
+                          // Notificar al Mock que el usuario solicitó embarque (libera GATE hold)
+                          const ctrl: any = flightControllerRef.current;
+                          if (ctrl && typeof ctrl.notifyBoardingRequested === "function") {
+                            ctrl.notifyBoardingRequested();
+                          }
+                          // Sincronizar FSM: GATE -> BOARDING solo con fuente 'user'
+                          flightFSMRef.current?.transition(FlightPhase.BOARDING, 'user');
                         }
                       }}
-                      className={`font-mono font-bold px-4 py-2 rounded-[5px] text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-all hover:scale-[1.02] active:scale-[0.98] shadow-md h-9 shrink-0 ${
-                        isBoardingActive 
-                          ? "bg-amber-500 hover:bg-amber-600 text-black shadow-[0_0_12px_rgba(245,158,11,0.2)]" 
-                          : "bg-[#43E600] hover:bg-[#3bcc00] text-black shadow-[0_0_15px_rgba(67,230,0,0.3)] animate-pulse"
+                      className="bg-[#43E600] hover:bg-[#3bcc00] text-black font-mono font-bold px-4 py-2 rounded-[5px] text-xs flex items-center justify-center gap-1.5 transition-all hover:scale-[1.02] active:scale-[0.98] shadow-md h-9 shrink-0 cursor-pointer animate-pulse shadow-[0_0_15px_rgba(67,230,0,0.3)]"
+                    >
+                      <Play className="w-3.5 h-3.5 fill-black" />
+                      COMENZAR EMBARQUE
+                    </button>
+                  )}
+
+                  {/* Cierre de puertas mixto: manual (fallback) y automático.
+                      Habilitado solo cuando todos los pasos de BOARDING
+                      están completados. En modo pruebas se usa para avanzar
+                      de BOARDING a PRE_FLIGHT. */}
+                  {boardingStarted && (
+                    <button
+                      id="header-btn-close-doors"
+                      onClick={() => {
+                        console.log("[UI] Cerrar puertas -> Scheduler.closeDoors()");
+                        schedulerRef.current?.closeDoors();
+                      }}
+                      disabled={!canCloseDoors}
+                      title={!boardingComplete ? "Esperando embarque completo" : "Cerrar puertas y pasar a PRE_FLIGHT"}
+                      className={`font-mono font-bold px-4 py-2 rounded-[5px] text-xs flex items-center justify-center gap-1.5 h-9 shrink-0 transition-all ${
+                        canCloseDoors
+                          ? "bg-[#E68B00] hover:bg-[#ffa726] text-black shadow-[0_0_15px_rgba(230,139,0,0.35)] cursor-pointer hover:scale-[1.02] active:scale-[0.98]"
+                          : "bg-white/5 border border-white/10 text-white/35 cursor-not-allowed"
                       }`}
                     >
-                      {isBoardingActive ? (
-                        <>
-                          <span className="w-1.5 h-1.5 rounded-full bg-black animate-ping" />
-                          <Pause className="w-3.5 h-3.5" />
-                          PAUSAR EMBARQUE
-                        </>
-                      ) : (
-                        <>
-                          <Play className="w-3.5 h-3.5 fill-black" />
-                          COMENZAR EMBARQUE
-                        </>
-                      )}
+                      <DoorClosed className="w-3.5 h-3.5" />
+                      CERRAR PUERTAS
                     </button>
-                  ) : (
-                    <div 
-                      id="header-label-listo-puertas"
-                      className="bg-[#002440]/85 border border-[#43E600]/80 text-[#43E600] font-mono font-black px-4 py-2 rounded-[5px] text-xs flex items-center justify-center gap-2 h-9 shrink-0 shadow-[0_0_15px_rgba(67,230,0,0.2)] select-none"
-                    >
-                      <span className="w-2 h-2 rounded-full bg-[#43E600] animate-pulse" />
-                      LISTO PARA CERRAR PUERTAS
-                    </div>
                   )}
                 </div>
               )
@@ -1985,8 +3180,34 @@ export default function VueloActualView({
       {/* ==================== ESTADO A: NO INICIADO ==================== */}
       {currentState === FlightState.NoIniciado && (
         <div id="vuelo-estado-A" className="space-y-6 animate-fadeIn text-white w-full">
+          {/* Advertencia si no hay conexión con un simulador real */}
+          {!isConnected && !isTestMode && (
+            <div className="warning-banner bg-amber-500/10 border border-amber-500/40 rounded-[5px] p-4 text-xs font-sans text-amber-300 leading-relaxed flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <span>⚠️ No hay conexión con un simulador. El sistema usará el modo Mock (simulado).</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsTestMode(true);
+                  fileLogger.log('[VueloActualView] Modo pruebas activado desde banner');
+                }}
+                className="bg-[#E68B00] hover:bg-[#ffa726] text-black font-mono font-black text-[10px] px-4 py-2 rounded-[5px] transition-all cursor-pointer shrink-0"
+              >
+                Usar modo pruebas
+              </button>
+            </div>
+          )}
+
           {isFlightSettingsOpen ? (
             <div id="pantalla-ajustes-vuelo" className="space-y-6 animate-fadeIn pb-8">
+
+              {/* Sin vuelo cargado: se requiere importar desde SimBrief antes de iniciar */}
+              {!canStartFlight && (
+                <div className="bg-[#E68B00]/10 border border-[#E68B00]/40 rounded-[5px] p-4 text-xs font-sans text-[#ffb03a] leading-relaxed">
+                  {t("current_flight.not_started.no_flight_loaded", {
+                    defaultValue: "No hay vuelo cargado. Importá un vuelo desde SimBrief para poder iniciar.",
+                  })}
+                </div>
+              )}
               
               {/* Horizontal route details banner maintained at the top */}
               {canStartFlight && (
@@ -2057,15 +3278,27 @@ export default function VueloActualView({
                       Volver
                     </button>
 
-                    <button
-                      type="button"
-                      disabled={isStartingFlight || languagesLoading || voicesLoading || !languagesReady || !!languageError || !voicesReady || !!voiceError}
-                      onClick={handleStartFlight}
-                      className="bg-[#43E600] hover:bg-[#3cd000] disabled:bg-[#43E600]/40 disabled:cursor-not-allowed text-black font-black px-5 py-2 rounded-[5px] text-xs font-mono flex items-center justify-center gap-1.5 transition-all shadow-[0_0_15px_rgba(67,230,0,0.3)] hover:scale-[1.02] active:scale-[0.98] cursor-pointer text-center"
-                    >
-                      <Play className="w-3.5 h-3.5 fill-black" strokeWidth={3} />
-                      {isStartingFlight ? t("current_flight.not_started.starting_flight_btn") : t("current_flight.not_started.flight_settings.start_flight_btn")}
-                    </button>
+                    <div className="flex flex-col items-stretch gap-1.5">
+                      <button
+                        type="button"
+                        disabled={!hasValidFlight || isStartingFlight || languagesLoading || voicesLoading || !languagesReady || !!languageError || !voicesReady || !!voiceError || (!isConnected && !isTestMode)}
+                        onClick={() => handleStartFlight("normal")}
+                        title={!isConnected && !isTestMode ? "Se requiere conexión con un simulador (o modo pruebas)" : undefined}
+                        className="bg-[#43E600] hover:bg-[#3cd000] disabled:bg-[#43E600]/40 disabled:cursor-not-allowed text-black font-black px-5 py-2 rounded-[5px] text-xs font-mono flex items-center justify-center gap-1.5 transition-all shadow-[0_0_15px_rgba(67,230,0,0.3)] hover:scale-[1.02] active:scale-[0.98] cursor-pointer text-center"
+                      >
+                        <Play className="w-3.5 h-3.5 fill-black" strokeWidth={3} />
+                        {isStartingFlight ? t("current_flight.not_started.starting_flight_btn") : t("flight.settings.start_flight_btn")}
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={!hasValidFlight || isStartingFlight || languagesLoading || voicesLoading || !languagesReady || !!languageError || !voicesReady || !!voiceError}
+                        onClick={handleStartTests}
+                        className="text-[10px] font-mono text-white/50 hover:text-white/80 hover:underline underline-offset-2 transition-colors cursor-pointer text-center disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        {t("flight.settings.start_test_btn")}
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
@@ -2073,106 +3306,110 @@ export default function VueloActualView({
               {/* BLOQUE 1: Tripulación y Cabina */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
 
-                {/* Tripulación block - occupies 2 columns */}
+                {/* Idioma y voces block - occupies 2 columns */}
                 <div className="md:col-span-2 bg-[#00172e]/85 border border-[#3B7EB2]/45 rounded-[8px] p-5 shadow-lg space-y-6">
                   <div className="flex items-center gap-2 border-b border-white/10 pb-2">
-                    <Volume2 className="w-5 h-5 text-[#45AFFF]" />
+                    <Globe className="w-5 h-5 text-[#45AFFF]" />
                     <h3 className="font-display font-bold text-base text-[#45AFFF]">
                       {t("current_flight.not_started.crew.title")}
                     </h3>
                   </div>
 
-                  {/* Voice Configuration */}
-                  <div className="space-y-3">
-                    <span className="text-[11px] font-mono font-extrabold tracking-widest text-white/60 uppercase block">
-                      {t("current_flight.not_started.crew.voice_config_title")}
-                    </span>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div>
-                        <label className="block text-[11px] font-mono text-white/70 mb-1">{t("current_flight.not_started.crew.captain_voice")}</label>
-                        <select
-                          value={captainVoice}
-                          onChange={(e) => setCaptainVoice(e.target.value)}
-                          className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF]"
-                        >
-                          {voicesLoading ? (
-                            <option value="" disabled>Cargando...</option>
-                          ) : captainVoiceOptions.length === 0 ? (
-                            <option value="" disabled>{voiceError || "Sin voces disponibles"}</option>
-                          ) : (
-                            captainVoiceOptions.map((v) => (
-                              <option key={v.id} value={v.id}>{v.name}</option>
-                            ))
-                          )}
-                        </select>
-                      </div>
-
-                      <div>
-                        <label className="block text-[11px] font-mono text-white/70 mb-1">{t("current_flight.not_started.crew.cabin_voice")}</label>
-                        <select
-                          value={crewVoice}
-                          onChange={(e) => setCrewVoice(e.target.value)}
-                          className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF]"
-                        >
-                          {voicesLoading ? (
-                            <option value="" disabled>Cargando...</option>
-                          ) : crewVoiceOptions.length === 0 ? (
-                            <option value="" disabled>{voiceError || "Sin voces disponibles"}</option>
-                          ) : (
-                            crewVoiceOptions.map((v) => (
-                              <option key={v.id} value={v.id}>{v.name}</option>
-                            ))
-                          )}
-                        </select>
-                      </div>
+                  {/* Idioma y voces */}
+                  <div className="space-y-4">
+                    {/* Idioma */}
+                    <div>
+                      <label className="block text-[11px] font-mono text-white/70 mb-1">{t("current_flight.not_started.crew.language")}</label>
+                      <select
+                        value={captainPrimaryLang}
+                        onChange={(e) => setCaptainPrimaryLang(e.target.value)}
+                        className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF]"
+                      >
+                        {languagesLoading ? (
+                          <option value="" disabled>Cargando...</option>
+                        ) : langOptions.length === 0 ? (
+                          <option value="" disabled>{languageError || "Sin idiomas disponibles"}</option>
+                        ) : (
+                          langOptions.map((lang) => (
+                            <option key={lang.id} value={lang.id}>{lang.name}</option>
+                          ))
+                        )}
+                      </select>
                     </div>
-                  </div>
 
-                  {/* Language Configuration */}
-                  <div className="space-y-3">
-                    <span className="text-[11px] font-mono font-extrabold tracking-widest text-white/60 uppercase block">
-                      {t("current_flight.not_started.crew.lang_config_title")}
-                    </span>
+                    {/* Voz del Agente de Puerta */}
+                    <div>
+                      <label className="block text-[11px] font-mono text-white/70 mb-1">{t("current_flight.not_started.crew.gate_voice")}</label>
+                      <select
+                        value={gateAgentVoiceId}
+                        onChange={(e) => setGateAgentVoiceId(e.target.value)}
+                        className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF]"
+                      >
+                        {voicesLoading ? (
+                          <option value="" disabled>Cargando...</option>
+                        ) : gateVoiceOptions.length === 0 ? (
+                          <option value="" disabled>{voiceError || "Sin voces de agente de puerta para este idioma"}</option>
+                        ) : (
+                          <>
+                            <option value="" disabled>{t("current_flight.not_started.crew.select_voice")}</option>
+                            {gateVoiceOptions.map((v) => (
+                              <option key={v.id} value={v.id}>{v.name}</option>
+                            ))}
+                          </>
+                        )}
+                      </select>
+                    </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div>
-                        <label className="block text-[11px] font-mono text-white/70 mb-1">{t("current_flight.not_started.crew.primary_lang")}</label>
-                        <select
-                          value={captainPrimaryLang}
-                          onChange={(e) => setCaptainPrimaryLang(e.target.value)}
-                          className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF]"
-                        >
-                          {languagesLoading ? (
-                            <option value="" disabled>Cargando...</option>
-                          ) : langOptions.length === 0 ? (
-                            <option value="" disabled>{languageError || "Sin idiomas disponibles"}</option>
-                          ) : (
-                            langOptions.map((lang) => (
-                              <option key={lang.id} value={lang.id}>{lang.name}</option>
-                            ))
-                          )}
-                        </select>
-                      </div>
+                    {/* Voz del Capitán */}
+                    <div>
+                      <label className="block text-[11px] font-mono text-white/70 mb-1">{t("current_flight.not_started.crew.captain_voice")}</label>
+                      <select
+                        value={captainVoice}
+                        onChange={(e) => setCaptainVoice(e.target.value)}
+                        className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF]"
+                      >
+                        {voicesLoading ? (
+                          <option value="" disabled>Cargando...</option>
+                        ) : captainVoiceOptions.length === 0 ? (
+                          <option value="" disabled>{voiceError || "Sin voces de capitán para este idioma"}</option>
+                        ) : (
+                          <>
+                            <option value="" disabled>{t("current_flight.not_started.crew.select_voice")}</option>
+                            {captainVoiceOptions.map((v) => (
+                              <option key={v.id} value={v.id}>{v.name}</option>
+                            ))}
+                          </>
+                        )}
+                      </select>
+                    </div>
 
-                      <div>
-                        <label className="block text-[11px] font-mono text-white/70 mb-1">{t("current_flight.not_started.crew.secondary_lang")}</label>
-                        <select
-                          value={captainSecondaryLang}
-                          onChange={(e) => setCaptainSecondaryLang(e.target.value)}
-                          className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF]"
-                        >
-                          {languagesLoading ? (
-                            <option value="" disabled>Cargando...</option>
-                          ) : secondaryLangOptions.length === 0 ? (
-                            <option value="" disabled>{languageError || "Sin idiomas disponibles"}</option>
-                          ) : (
-                            secondaryLangOptions.map((lang) => (
-                              <option key={lang.id} value={lang.id}>{lang.name}</option>
-                            ))
-                          )}
-                        </select>
-                      </div>
+                    {/* Voz de la Tripulación */}
+                    <div>
+                      <label className="block text-[11px] font-mono text-white/70 mb-1">{t("current_flight.not_started.crew.cabin_voice")}</label>
+                      <select
+                        value={crewVoice}
+                        onChange={(e) => setCrewVoice(e.target.value)}
+                        className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF]"
+                      >
+                        {voicesLoading ? (
+                          <option value="" disabled>Cargando...</option>
+                        ) : crewVoiceOptions.length === 0 ? (
+                          <option value="" disabled>{voiceError || "Sin voces de tripulación para este idioma"}</option>
+                        ) : (
+                          <>
+                            <option value="" disabled>{t("current_flight.not_started.crew.select_voice")}</option>
+                            {crewVoiceOptions.map((v) => (
+                              <option key={v.id} value={v.id}>{v.name}</option>
+                            ))}
+                          </>
+                        )}
+                      </select>
+                    </div>
+
+                    {/* Hint */}
+                    <div className="bg-[#45AFFF]/5 border border-[#45AFFF]/30 rounded-[5px] p-3 text-[11px] font-sans text-white/70 leading-relaxed">
+                      <Info className="w-3.5 h-3.5 inline mr-1 text-[#45AFFF]" />
+                      {t("current_flight.not_started.crew.voices_hint")}
                     </div>
                   </div>
                 </div>
@@ -2232,13 +3469,26 @@ export default function VueloActualView({
               {/* BLOQUE 2: Eventos Especiales */}
               <div className="bg-[#00172e]/85 border border-[#3B7EB2]/45 rounded-[8px] p-5 shadow-lg space-y-4">
                 <div className="flex items-center gap-2 border-b border-white/10 pb-2">
-                  <Sparkles className="w-5 h-5 text-[#45AFFF]" />
+                  <span className="text-base">🎉</span>
                   <h3 className="font-display font-bold text-base text-[#45AFFF]">
-                    Eventos Especiales en Cabina
+                    Eventos Especiales de Cabina
                   </h3>
                 </div>
 
-                <div className="space-y-2">
+                <div className="space-y-3">
+                  <label className="flex items-center justify-between gap-3 p-2.5 bg-[#002440]/35 border border-[#3B7EB2]/15 hover:border-[#3B7EB2]/35 rounded-[5px] cursor-pointer hover:bg-[#002440]/55 transition-all w-full select-none">
+                    <span className="text-white text-[11px] font-sans font-medium">Activar evento especial</span>
+                    <div className="relative inline-flex items-center shrink-0">
+                      <input
+                        type="checkbox"
+                        checked={specialEventEnabled}
+                        onChange={(e) => setSpecialEventEnabled(e.target.checked)}
+                        className="sr-only peer"
+                      />
+                      <div className="w-8 h-4.5 bg-[#00172e] border border-[#3B7EB2]/45 rounded-full peer peer-checked:after:translate-x-3.5 peer-checked:after:border-white after:content-[''] after:absolute after:top-[3.5px] after:left-[3px] after:bg-white/40 peer-checked:after:bg-[#43E600] after:border-white/10 after:border after:rounded-full after:h-2.5 after:w-2.5 after:transition-all peer-checked:bg-[#43E600]/20 peer-checked:border-[#43E600]/40"></div>
+                    </div>
+                  </label>
+
                   <div className="flex justify-between items-center text-[10px] font-mono text-white/50">
                     <span className="uppercase font-bold">Detalle de Eventos Especiales</span>
                     <span className={specialEvents.length >= 450 ? "text-[#e68b00] font-bold animate-pulse" : "text-white/40"}>
@@ -2250,12 +3500,16 @@ export default function VueloActualView({
                     maxLength={500}
                     value={specialEvents}
                     onChange={(e) => setSpecialEvents(e.target.value)}
-                    placeholder="Escribe algún acontecimiento imprevisto o evento que deba anunciarse a bordo..."
-                    className="w-full bg-[#002440]/60 border border-[#3B7EB2]/60 rounded-[5px] p-3 text-xs text-white placeholder-white/30 font-sans focus:outline-none resize-none leading-relaxed focus:border-[#45AFFF]"
+                    disabled={!specialEventEnabled}
+                    placeholder="Ingresa aquí el evento especial o situación especial del vuelo..."
+                    className={`w-full border rounded-[5px] p-3 text-xs placeholder-white/30 font-sans focus:outline-none resize-none leading-relaxed focus:border-[#45AFFF] ${specialEventEnabled ? "bg-[#002440]/60 border-[#3B7EB2]/60 text-white" : "bg-[#00172e]/40 border-white/10 text-white/40 cursor-not-allowed"}`}
                   />
-                  <p className="text-[11px] text-[#45AFFF]/70 italic leading-snug bg-black/20 p-2 border border-white/5 rounded">
-                    <strong className="text-[#43E600] not-italic font-mono uppercase tracking-wider text-[9px] mr-1 border border-[#43E600]/30 px-1 py-0.5 rounded bg-[#43E600]/5">Hint:</strong> 
-                    Hoy nos acompaña en el vuelo el reciente campeon del master mil de roma. Demosle nuestras felicitaciones.
+                  <p className="text-[11px] text-white/50 italic leading-snug">
+                    Ej: "Hoy viaja el equipo de fútbol" o "Es Navidad"
+                  </p>
+                  <p className="text-[11px] text-[#45AFFF]/70 italic leading-snug bg-black/20 p-2 border border-white/5 rounded flex items-start gap-1.5">
+                    <span>ℹ️</span>
+                    <span>El evento será narrado por el capitán durante la fase de crucero.</span>
                   </p>
                 </div>
               </div>
@@ -2501,28 +3755,53 @@ export default function VueloActualView({
                   {t("current_flight.not_started.event_config.title")}
                 </h3>
               </div>
-              <div id="package-selector-container" className="flex items-center gap-3 bg-black/30 border border-white/10 rounded-[5px] px-3 py-1.5 shrink-0 max-w-full overflow-x-auto">
-                <label className="text-[9px] font-mono font-bold text-white/55 uppercase tracking-wider whitespace-nowrap">{t("current_flight.not_started.package_box.active_label")}</label>
-                <select
-                  id="package-select"
-                  value={selectedPackage}
-                  onChange={(e) => setSelectedPackage(e.target.value)}
-                  className="bg-black/55 border border-[#3B7EB2]/45 text-xs text-white font-mono font-bold rounded-[3px] px-2 py-0.5 focus:outline-none cursor-pointer hover:border-[#45AFFF] transition-colors"
-                >
-                  <option value="">{t("current_flight.not_started.package_box.no_package")}</option>
-                  <option value="aerolineas">Aerolíneas Argentinas AR Pack</option>
-                  <option value="latam">LATAM Real Voice Pack v2</option>
-                  <option value="iberia">Iberia Premium Audio</option>
-                  <option value="flybondi">Flybondi Low-Cost set</option>
-                  <option value="default">Default FS Soundset</option>
-                </select>
-                <button
-                  type="button"
-                  onClick={() => setShowPackageManager(true)}
-                  className="text-[#45AFFF] hover:text-[#43E600] text-[10px] font-mono font-bold hover:underline cursor-pointer border-l border-white/10 pl-2 shrink-0 transition-colors"
-                >
-                  {t("current_flight.not_started.package_box.manage_btn")}
-                </button>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                {/* Scenario selector: la config de eventos está vinculada a un escenario */}
+                <div className="flex items-center gap-2 bg-black/30 border border-white/10 rounded-[5px] px-3 py-1.5">
+                  <label className="text-[9px] font-mono font-bold text-white/55 uppercase tracking-wider whitespace-nowrap">
+                    {t("current_flight.not_started.event_config.scenario_label")}
+                  </label>
+                  <select
+                    value={selectedScenarioKey}
+                    onChange={(e) => setSelectedScenarioKey(e.target.value)}
+                    className="bg-black/55 border border-[#3B7EB2]/45 text-xs text-white font-mono font-bold rounded-[3px] px-2 py-0.5 focus:outline-none cursor-pointer hover:border-[#45AFFF] transition-colors"
+                  >
+                    {scenarios.length === 0 && (
+                      <option value={selectedScenarioKey}>{selectedScenarioKey}</option>
+                    )}
+                    {scenarios.map((scenario) => (
+                      <option key={scenario.key} value={scenario.key}>{scenario.name}</option>
+                    ))}
+                  </select>
+                  {scenarioLoading && (
+                    <span className="text-[10px] font-mono text-[#45AFFF] animate-pulse">
+                      {t("current_flight.not_started.event_config.scenario_loading")}
+                    </span>
+                  )}
+                </div>
+                <div id="package-selector-container" className="flex items-center gap-3 bg-black/30 border border-white/10 rounded-[5px] px-3 py-1.5 shrink-0 max-w-full overflow-x-auto">
+                  <label className="text-[9px] font-mono font-bold text-white/55 uppercase tracking-wider whitespace-nowrap">{t("current_flight.not_started.package_box.active_label")}</label>
+                  <select
+                    id="package-select"
+                    value={selectedPackage}
+                    onChange={(e) => setSelectedPackage(e.target.value)}
+                    className="bg-black/55 border border-[#3B7EB2]/45 text-xs text-white font-mono font-bold rounded-[3px] px-2 py-0.5 focus:outline-none cursor-pointer hover:border-[#45AFFF] transition-colors"
+                  >
+                    <option value="">{t("current_flight.not_started.package_box.no_package")}</option>
+                    <option value="aerolineas">Aerolíneas Argentinas AR Pack</option>
+                    <option value="latam">LATAM Real Voice Pack v2</option>
+                    <option value="iberia">Iberia Premium Audio</option>
+                    <option value="flybondi">Flybondi Low-Cost set</option>
+                    <option value="default">Default FS Soundset</option>
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => setShowPackageManager(true)}
+                    className="text-[#45AFFF] hover:text-[#43E600] text-[10px] font-mono font-bold hover:underline cursor-pointer border-l border-white/10 pl-2 shrink-0 transition-colors"
+                  >
+                    {t("current_flight.not_started.package_box.manage_btn")}
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -2543,7 +3822,7 @@ export default function VueloActualView({
                       : "text-white/60 hover:text-white hover:bg-white/5"
                   }`}
                 >
-                  {group.label}
+                  {group.label} ({group.count})
                 </button>
               ))}
             </div>
@@ -2585,17 +3864,28 @@ export default function VueloActualView({
                             <label className="block text-[10px] font-mono text-white/70 uppercase tracking-wider">
                               {t("current_flight.not_started.immersion.track_label")}
                             </label>
-                            <select
-                              value={boardingMusicTrack}
-                              onChange={(e) => setBoardingMusicTrack(e.target.value)}
-                              className="w-full max-w-[240px] bg-[#00172e] border border-[#3B7EB2]/50 text-white rounded-[4px] px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-[#45AFFF]"
-                            >
-                              <option value="Vivaldi Concert VIII">Vivaldi Concert VIII</option>
-                              <option value="Jazz Lounge Classics">Jazz Lounge Classics</option>
-                              <option value="Ambient Synth Wave">Ambient Synth Wave</option>
-                              <option value="Copa Airlines Boarding Theme">Copa Airlines Boarding Theme</option>
-                              <option value="Bossa Nova Breeze">Bossa Nova Breeze</option>
-                            </select>
+                            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full max-w-[320px]">
+                              <select
+                                value={boardingMusicTrackId}
+                                onChange={(e) => setBoardingMusicTrackId(e.target.value)}
+                                disabled={musicTracksLoading}
+                                className="w-full max-w-[240px] bg-[#00172e] border border-[#3B7EB2]/50 text-white rounded-[4px] px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-[#45AFFF]"
+                              >
+                                <option value="">{t("music.no_music")}</option>
+                                <option value={RANDOM_MUSIC_ID}>{t("music.random")}</option>
+                                {musicTracksLoading ? (
+                                  <option value="" disabled>{t("music.loading_tracks")}</option>
+                                ) : (
+                                  musicTracks.map((track) => (
+                                    <option key={track.id} value={track.id}>{track.name}</option>
+                                  ))
+                                )}
+                              </select>
+                              <MusicPreview
+                                cleanUrl={selectedMusicTrack?.cleanUrl ?? null}
+                                previewUrl={selectedMusicTrack?.previewUrl ?? null}
+                              />
+                            </div>
                           </div>
                         )}
                       </div>
@@ -2638,38 +3928,110 @@ export default function VueloActualView({
                     </div>
                   );
                 })
+              ) : getFilteredEvents().length === 0 ? (
+                <div className="col-span-full bg-black/25 border border-white/10 rounded-[5px] p-6 text-center">
+                  <p className="text-xs font-mono text-white/50">
+                    {t("current_flight.not_started.event_config.scenario_no_events")}
+                  </p>
+                </div>
               ) : (
                 getFilteredEvents().map((item) => {
-                  const currentValue = eventConfig[item.key] || "IA";
+                  const currentValue = eventConfig[item.eventKey] || "IA";
+                  const isCaptain = item.speakerRole === "captain";
+                  const isDelaySliderEvent = (DELAY_SLIDER_EVENT_KEYS as readonly string[]).includes(item.eventKey);
+                  const isEventEnabled = currentValue !== "OFF";
+                  const delayMinutes = isDelaySliderEvent ? getDelaySliderMinutes(item.eventKey) : DELAY_SLIDER_MIN_MIN;
 
                   return (
                     <div 
-                      key={item.key} 
+                      key={item.eventKey} 
                       className="bg-[#002440]/45 hover:bg-[#002440]/75 border border-[#3B7EB2]/20 hover:border-[#3B7EB2]/40 rounded-[6px] min-h-[120px] flex flex-col justify-between w-full h-full p-4 gap-3 transition-all"
                     >
-                      {/* First Row: Description */}
-                      <span className="text-[11.5px] font-sans font-medium text-white/95 leading-snug w-full">
-                        {item.descKey ? t(item.descKey) : item.desc}
+                      {/* First Row: Título */}
+                      <span className="text-[12.5px] font-sans font-bold text-white/95 leading-snug w-full">
+                        {item.displayName || item.eventKey}
                       </span>
+                      {item.description && (
+                        <span className="text-[11px] font-sans font-medium text-white/60 leading-snug w-full">
+                          {item.description}
+                        </span>
+                      )}
+
+                      {/* Sliders de delay: centro de la tarjeta, antes del narrador y switches */}
+                      {(item.eventKey === GATE_STARTED_DELAY_KEY || isDelaySliderEvent) && (
+                        <div className="space-y-2.5">
+                          {/* Slider de delay entre anuncios de puerta (solo gate_crew_started) */}
+                          {item.eventKey === GATE_STARTED_DELAY_KEY && (
+                            <div className="pt-2 border-t border-white/10">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[10px] font-mono text-white/55 uppercase tracking-wider">
+                                  Demora entre anuncios de puerta
+                                </span>
+                                <span className="text-[11px] font-mono text-[#45AFFF] font-bold">{gateStartedDelaySec} seg</span>
+                              </div>
+                              <input
+                                type="range"
+                                min={GATE_STARTED_DELAY_MIN}
+                                max={GATE_STARTED_DELAY_MAX}
+                                step={1}
+                                value={gateStartedDelaySec}
+                                disabled={!isEventEnabled}
+                                onChange={(e) => handleGateStartedDelayChange(Number(e.target.value))}
+                                className="w-full accent-[#45AFFF] mt-1.5 disabled:opacity-30 cursor-pointer disabled:cursor-not-allowed"
+                              />
+                              <div className="flex justify-between text-[9px] font-mono text-white/35">
+                                <span>Mínimo: {GATE_STARTED_DELAY_MIN}s</span>
+                                <span>Máximo: {GATE_STARTED_DELAY_MAX}s</span>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Slider de umbral de demora (eventos de demora, en minutos) */}
+                          {isDelaySliderEvent && (
+                            <div className="pt-2 border-t border-white/10">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[10px] font-mono text-white/55 uppercase tracking-wider">
+                                  Demora detectada (min)
+                                </span>
+                                <span className="text-[11px] font-mono text-[#45AFFF] font-bold">{delayMinutes} min</span>
+                              </div>
+                              <input
+                                type="range"
+                                min={DELAY_SLIDER_MIN_MIN}
+                                max={DELAY_SLIDER_MAX_MIN}
+                                step={1}
+                                value={delayMinutes}
+                                disabled={!isEventEnabled}
+                                onChange={(e) => handleDelaySliderChange(item.eventKey, Number(e.target.value))}
+                                className="w-full accent-[#45AFFF] mt-1.5 disabled:opacity-30 cursor-pointer disabled:cursor-not-allowed"
+                              />
+                              <div className="flex justify-between text-[9px] font-mono text-white/35">
+                                <span>Mínimo: {DELAY_SLIDER_MIN_MIN} min</span>
+                                <span>Máximo: {DELAY_SLIDER_MAX_MIN} min</span>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
 
                       {/* Second Row: Narrator + Selector */}
-                      <div className="flex flex-row items-center justify-between w-full mt-auto">
+                      <div className="flex flex-row items-center justify-between w-full">
                         {/* Narrator */}
                         <div className="text-xs font-medium text-gray-400 truncate shrink min-w-0 mr-2">
-                          <span className={`w-1.5 h-1.5 rounded-full ${item.narrator === "Capitán" ? "bg-[#e68b00]" : "bg-[#45AFFF]"}`}></span>
-                          <span>{t("current_flight.not_started.events.narrator_label")} <strong className={item.narrator === "Capitán" ? "text-[#ffb340]" : "text-[#45AFFF]"}>{item.narratorKey ? t(item.narratorKey) : t(item.narrator === "Capitán" ? "narrator.captain" : "narrator.crew")}</strong></span>
+                          <span className={`w-1.5 h-1.5 rounded-full ${isCaptain ? "bg-[#e68b00]" : "bg-[#45AFFF]"}`}></span>
+                          <span>{t("current_flight.not_started.events.narrator_label")} <strong className={isCaptain ? "text-[#ffb340]" : "text-[#45AFFF]"}>{getNarratorLabel(item.speakerRole)}</strong></span>
                         </div>
 
                         {/* Selector Mode Pill */}
                         <div className="flex-shrink-0">
                           <div className="flex bg-black/60 border border-white/15 rounded-[4px] overflow-hidden h-fit w-[165px]">
-                        {(["off", "pack", "IA"] as const).map((mode) => {
+                        {(["OFF", "PACK", "IA"] as const).map((mode) => {
                           const isSelected = currentValue === mode;
-                          const isPackModeDisabled = mode === "pack" && !selectedPackage;
+                          const isPackModeDisabled = mode === "PACK" && !selectedPackage;
                           let activeStyle = "text-white/30 border-transparent hover:text-white/60 text-[9px]";
                           if (isSelected) {
-                            if (mode === "off") activeStyle = "bg-red-500/20 text-red-300 border-red-500/35 font-extrabold shadow-sm text-[9px]";
-                            if (mode === "pack") activeStyle = "bg-amber-500/20 text-amber-300 border-amber-500/40 font-extrabold shadow-sm text-[9px]";
+                            if (mode === "OFF") activeStyle = "bg-red-500/20 text-red-300 border-red-500/35 font-extrabold shadow-sm text-[9px]";
+                            if (mode === "PACK") activeStyle = "bg-amber-500/20 text-amber-300 border-amber-500/40 font-extrabold shadow-sm text-[9px]";
                             if (mode === "IA") activeStyle = "bg-sky-500/20 text-sky-400 border-[#45AFFF]/35 font-extrabold shadow-sm text-[9px]";
                           }
                           return (
@@ -2677,13 +4039,13 @@ export default function VueloActualView({
                               key={mode}
                               type="button"
                               disabled={isPackModeDisabled}
-                              onClick={() => handleEventConfigChange(item.key, mode)}
+                              onClick={() => handleEventConfigChange(item.eventKey, mode)}
                               title={isPackModeDisabled ? t("current_flight.not_started.events.tooltip_no_package") : ""}
                               className={`px-1.5 py-1 rounded-[3px] font-mono uppercase tracking-wider border cursor-pointer transition-all flex-1 text-center ${activeStyle} ${
                                 isPackModeDisabled ? "opacity-25 cursor-not-allowed hover:text-white/20" : ""
                               }`}
                             >
-                              {mode === "off" ? t("current_flight.not_started.events.mode_off") : mode === "pack" ? t("current_flight.not_started.events.mode_pack") : t("current_flight.not_started.events.mode_ia")}
+                              {mode === "OFF" ? t("current_flight.not_started.events.mode_off") : mode === "PACK" ? t("current_flight.not_started.events.mode_pack") : t("current_flight.not_started.events.mode_ia")}
                             </button>
                           );
                         })}
@@ -2790,8 +4152,8 @@ export default function VueloActualView({
                             ? "LOCAL TIME:"
                             : t("current_flight.not_started.boarding_display.local_time")}
                         </span>
-                        <strong className="text-sm sm:text-base font-mono tracking-wider text-white">
-                          {departureTimeStr}
+                        <strong className="text-sm sm:text-base font-mono tracking-wider text-white" title={`UTC: ${departureTimeStr} | Local: ${departureTimeLocalStr}`}>
+                          {departureTimeLocalStr || departureTimeStr} <span className="text-[10px] text-white/40 font-normal">(hora local)</span>
                         </strong>
                       </div>
                       <div className="border-l border-white/20 pl-4">
@@ -3047,7 +4409,7 @@ export default function VueloActualView({
                   <span className="font-mono text-[#45AFFF] font-semibold text-[11px] block mb-1">MÚSICA EMBARQUE:</span>
                   <div className="flex justify-between text-[10px] font-mono">
                     <span>SISTEMA: <strong className="text-[#43E600]">ON AIR</strong></span>
-                    <span>TEMA: {boardingMusicTrack}</span>
+                    <span>TEMA: {boardingMusicTrackId === RANDOM_MUSIC_ID ? t("music.random") : selectedMusicTrack?.name || t("music.no_music")}</span>
                   </div>
                 </div>
 
@@ -3504,118 +4866,20 @@ export default function VueloActualView({
           {/* Columna Derecha (1/3 de ancho) */}
           <div className="space-y-5">
             
-            {/* Último Anuncio Inteligente */}
-            <div className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 shadow-lg space-y-3">
-              <div className="flex justify-between items-center border-b border-white/10 pb-2">
-                <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider flex items-center gap-1.5 font-bold">
-                  <Radio className="w-4 h-4 text-[#43E600]" /> Último anuncio
-                </h3>
-              </div>
-              
-              <div className="bg-black/45 p-3.5 rounded-[5px] border border-[#3B7EB2]/30 text-xs font-sans relative overflow-hidden">
-                <div className="absolute top-1 right-2 animate-pulse flex items-center gap-1">
-                  <span className={`w-1.5 h-1.5 rounded-full ${p26Announcement?.reproduciendo ? 'bg-[#43E600]' : 'bg-white/20'}`} />
-                  <span className="text-[8px] font-mono text-white/30">{p26Announcement?.reproduciendo ? 'ON AIR' : 'MUTED'}</span>
-                </div>
-                
-                <p className="text-white/95 italic leading-relaxed pt-1.5 font-medium">
-                  {p26Announcement ? `"${p26Announcement.texto}"` : null}
-                </p>
-                
-                <div className="mt-3 pt-2.5 border-t border-white/15 flex justify-between items-center text-[9.5px] font-mono text-white/50">
-                  {(() => {
-                    if (!p26Announcement) return null;
-                    const isCaptain = ["bienvenida", "turbulencia", "descenso", "aterrizaje"].includes(p26Announcement.tipo);
-                    const name = isCaptain ? (simBriefData.nombrePiloto || "N. Sassano") : "Sofía Martínez";
-                    const role = isCaptain ? "Capitán" : "Tripulación de Cabina";
-                    
-                    return (
-                      <>
-                        <span>NARRACIÓN: <strong className="text-white font-bold">{name}</strong></span>
-                        <span className="text-[#45AFFF] uppercase font-black text-[8px] tracking-wider bg-[#45AFFF]/10 px-1.5 py-0.5 rounded border border-[#45AFFF]/20">{role}</span>
-                      </>
-                    );
-                  })()}
-                </div>
-              </div>
-            </div>
+            {/* Último Anuncio Inteligente (datos reales del último anuncio reproducido) */}
+            <LastAnnouncementBox
+              announcement={currentAnnouncement}
+              isPlaying={isAudioPlaying}
+              isGenerating={isGenerating}
+              getSpeakerName={getSpeakerName}
+            />
 
-            {/* Tripulación al Mando */}
-            <div className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 shadow-lg space-y-4 text-white">
-              <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider border-b border-white/10 pb-2 font-bold">
-                Canales de Voz de Tripulación
-              </h3>
-              
-              <div className="space-y-3">
-                {/* Captain Card */}
-                {(() => {
-                  const isCaptainSpeaking = p26Announcement && p26Announcement.reproduciendo && 
-                    (p26Announcement.tipo === "bienvenida" || p26Announcement.tipo === "turbulencia" || p26Announcement.tipo === "descenso" || p26Announcement.tipo === "aterrizaje");
-                  
-                  return (
-                    <div className={`p-3 rounded-[5px] border transition-all duration-300 flex items-center justify-between ${
-                      isCaptainSpeaking 
-                        ? "bg-[#43E600]/10 border-[#43E600] shadow-[0_0_15px_rgba(67,230,0,0.25)]" 
-                        : "bg-black/25 border-white/5 hover:border-white/15"
-                    }`}>
-                      <div className="flex items-center gap-3">
-                        <div className={`p-2 rounded-full relative transition-colors duration-300 ${isCaptainSpeaking ? 'bg-[#43E600]/25 text-[#43E600]' : 'bg-white/5 text-white/50'}`}>
-                          <Volume2 className={`w-4 h-4 ${isCaptainSpeaking ? 'animate-bounce' : ''}`} />
-                          {isCaptainSpeaking && (
-                            <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-[#43E600] animate-ping" />
-                          )}
-                        </div>
-                        <div>
-                          <span className="text-[10px] font-mono text-white/45 block uppercase font-bold">Comandante</span>
-                          <span className={`text-[12px] font-sans font-black tracking-wide ${isCaptainSpeaking ? 'text-[#43E600]' : 'text-white'}`}>
-                            {simBriefData.nombrePiloto || "N. Sassano"}
-                          </span>
-                        </div>
-                      </div>
-                      <span className={`text-[9px] font-mono px-2 py-0.5 rounded uppercase font-bold tracking-wider ${
-                        isCaptainSpeaking ? "bg-[#43E600] text-black bg-opacity-80" : "bg-black/40 text-white/30"
-                      }`}>
-                        {isCaptainSpeaking ? "Hablando" : "A la escucha"}
-                      </span>
-                    </div>
-                  );
-                })()}
-
-                {/* Cabin Crew Lead Card */}
-                {(() => {
-                  const isCrewSpeaking = p26Announcement && p26Announcement.reproduciendo && 
-                    (p26Announcement.tipo === "seguridad" || p26Announcement.tipo === "desembarque");
-                  
-                  return (
-                    <div className={`p-3 rounded-[5px] border transition-all duration-300 flex items-center justify-between ${
-                      isCrewSpeaking 
-                        ? "bg-[#43E600]/10 border-[#43E600] shadow-[0_0_15px_rgba(67,230,0,0.25)]" 
-                        : "bg-black/25 border-white/5 hover:border-white/15"
-                    }`}>
-                      <div className="flex items-center gap-3">
-                        <div className={`p-2 rounded-full relative transition-colors duration-300 ${isCrewSpeaking ? 'bg-[#43E600]/25 text-[#43E600]' : 'bg-white/5 text-white/50'}`}>
-                          <Volume2 className={`w-4 h-4 ${isCrewSpeaking ? 'animate-bounce' : ''}`} />
-                          {isCrewSpeaking && (
-                            <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-[#43E600] animate-ping" />
-                          )}
-                        </div>
-                        <div>
-                          <span className="text-[10px] font-mono text-white/45 block uppercase font-bold">Jefe de Tripulación</span>
-                          <span className={`text-[12px] font-sans font-black tracking-wide ${isCrewSpeaking ? 'text-[#43E600]' : 'text-white'}`}>
-                            Sofía Martínez
-                          </span>
-                        </div>
-                      </div>
-                      <span className={`text-[9px] font-mono px-2 py-0.5 rounded uppercase font-bold tracking-wider ${
-                        isCrewSpeaking ? "bg-[#43E600] text-black bg-opacity-80" : "bg-black/40 text-white/30"
-                      }`}>
-                        {isCrewSpeaking ? "Hablando" : "A la escucha"}
-                      </span>
-                    </div>
-                  );
-                })()}
-              </div>
-            </div>
+            {/* Canales de Voz de Tripulación (datos reales por speaker_role) */}
+            <VoiceIndicator
+              announcement={currentAnnouncement}
+              isPlaying={isAudioPlaying}
+              getSpeakerName={getSpeakerName}
+            />
 
             {/* Consola de Simulación (solo control de volumen, música eliminada) */}
             <div className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 shadow-lg text-white">
@@ -3757,6 +5021,56 @@ export default function VueloActualView({
           airlineName={getAirlineName(airline)}
         />
       )}
+
+      {/* Monitor de variables (ventana de depuración) */}
+      <DebugMonitor
+        isOpen={isDebugOpen}
+        onClose={() => setIsDebugOpen(false)}
+        flightContext={flightContextRef.current}
+        flightController={flightControllerRef.current}
+        narrativeEngine={(() => {
+          try { return schedulerRef.current?.getNarrativeEngine() ?? null; } catch { return null; }
+        })()}
+        scheduler={schedulerRef.current}
+        ruleEngine={ruleEngineRef.current}
+        lastEventVariables={lastEventVars}
+      />
+
+      {/* Debug cluster — barra superior derecha (Monitor / Descargar / Limpiar logs) */}
+      <div className="fixed top-4 right-4 z-50 flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => setIsDebugOpen(true)}
+          className="bg-[#002440]/90 hover:bg-[#00345C]/90 text-[#45AFFF] border border-[#3B7EB2]/50 px-3 py-2 rounded-[5px] text-[11px] font-mono font-bold flex items-center gap-1.5 shadow-lg shadow-black/30 cursor-pointer transition-colors"
+          title="Abrir monitor de variables"
+        >
+          <Activity className="w-3.5 h-3.5" />
+          Monitor
+        </button>
+        <button
+          type="button"
+          onClick={() => fileLogger.download()}
+          className="bg-[#002440]/90 hover:bg-[#00345C]/90 text-white border border-[#3B7EB2]/50 px-3 py-2 rounded-[5px] text-[11px] font-mono flex items-center gap-1.5 shadow-lg shadow-black/30 cursor-pointer transition-colors"
+          title="Descargar logs de depuración (eventos y fases)"
+        >
+          <Download className="w-3.5 h-3.5" />
+          Descargar Logs
+        </button>
+        <button
+          type="button"
+          onClick={() => { fileLogger.clear(); console.log('[FileLogger] Logs limpiados'); }}
+          className="bg-black/40 hover:bg-black/60 text-white/70 hover:text-white border border-white/10 px-2.5 py-2 rounded-[5px] text-[11px] font-mono cursor-pointer transition-colors"
+          title="Limpiar logs"
+        >
+          Limpiar
+        </button>
+      </div>
+
+      <FlightStartPopup
+        isOpen={showFlightStartPopup}
+        onClose={() => setShowFlightStartPopup(false)}
+        onConfirm={handleConfirmFlightStart}
+      />
       
     </div>
   );

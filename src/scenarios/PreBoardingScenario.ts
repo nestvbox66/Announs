@@ -5,6 +5,7 @@ import { PreBoardingScenarioDefinition } from "./definitions/PreBoardingScenario
 
 export class PreBoardingScenario implements FlightScenario {
   readonly name = "PreBoardingScenario";
+  readonly phases = ["GATE"];
   readonly definition: ScenarioDefinition = new PreBoardingScenarioDefinition();
 
   onEnter(_context: FlightContext): void {

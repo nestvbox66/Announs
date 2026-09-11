@@ -2,6 +2,7 @@ import { AnnouncementInfo } from "../types";
 import { AnnouncementQueue } from "./AnnouncementQueue";
 import { FlightContext } from "./FlightContext";
 import { EventContextBuilder } from "../eventContext/EventContextBuilder";
+import { fileLogger } from "./FileLogger";
 
 export class AnnouncementPlayer {
   private queue: AnnouncementQueue;
@@ -16,7 +17,7 @@ export class AnnouncementPlayer {
     this.flightContext = fc;
   }
 
-  play(eventKey: string): Promise<AnnouncementInfo> {
+  async play(eventKey: string): Promise<AnnouncementInfo> {
     this.playbackIdCounter++;
     const playbackId = this.playbackIdCounter;
 
@@ -29,13 +30,17 @@ export class AnnouncementPlayer {
     console.log("Play");
     console.log(eventKey);
 
+    fileLogger.log('[AnnouncementPlayer] play', { eventKey, playbackId, flightId: this.flightContext?.getFlight().flightId ?? null, language: this.flightContext?.getFlight().captainPrimaryLang ?? null });
+
     const fc = this.flightContext;
     if (!fc) {
       return Promise.reject(new Error("AnnouncementPlayer: FlightContext not set"));
     }
 
-    const context = EventContextBuilder.build(eventKey, fc);
+    const context = await EventContextBuilder.build(eventKey, fc);
     const flight = fc.getFlight();
+
+    console.log(`[AnnouncementPlayer] 🔊 Encargando reproducción para: ${eventKey}`);
 
     return this.queue.enqueue({
       eventKey: context.eventKey,

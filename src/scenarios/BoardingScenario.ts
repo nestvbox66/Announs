@@ -5,6 +5,7 @@ import { BoardingScenarioDefinition } from "./definitions/BoardingScenarioDefini
 
 export class BoardingScenario implements FlightScenario {
   readonly name = "BoardingScenario";
+  readonly phases = ["BOARDING"];
   readonly definition: ScenarioDefinition = new BoardingScenarioDefinition();
 
   onEnter(_context: FlightContext): void {

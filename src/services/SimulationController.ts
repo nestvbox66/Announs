@@ -40,7 +40,7 @@ export class SimulationController {
     const callId = this.simCallId;
 
     const orderedPhases: FlightPhase[] = [
-      FlightPhase.PRE_BOARDING,
+      FlightPhase.GATE,
       FlightPhase.BOARDING,
       FlightPhase.PRE_FLIGHT,
       FlightPhase.TAXI,

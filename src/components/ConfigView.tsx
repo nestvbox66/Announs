@@ -6,9 +6,23 @@
 import React, { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { supabase } from "../lib/supabase";
+import { UserEventDefaultsService } from "../services/UserEventDefaultsService";
+import { ScenarioConfigService } from "../services/ScenarioConfigService";
+import type {
+  ScenarioConfigSnapshot,
+  ScenarioEventConfig,
+  ScenarioOption,
+} from "../services/ScenarioConfigService";
+import {
+  EVENT_CONFIG_DEFAULT_VALUE,
+  EVENT_CONFIG_FLAVOR_KEY,
+  NORMAL_SCENARIO_KEY,
+  EventSwitchValue,
+  isEventSwitchValue,
+  toUiSwitchValue,
+} from "../services/eventConfigConstants";
 import { 
   Sliders, 
-  User, 
   Radio, 
   Volume2, 
   Music, 
@@ -23,7 +37,6 @@ import {
   Info,
   ChevronDown,
   ChevronUp,
-  Users,
   Compass,
   Gauge,
   Activity,
@@ -36,6 +49,10 @@ import {
   Search
 } from "lucide-react";
 import { SimBriefData, ConfigVoces, ConfigAudio } from "../types";
+import { BoardingMusicService, BoardingMusicTrack } from "../services/BoardingMusicService";
+import { RANDOM_MUSIC_ID } from "../services/MusicController";
+import MusicPreview from "./music/MusicPreview";
+import VoicesPage from "../pages/configuration/VoicesPage";
 
 interface ConfigViewProps {
   simBriefData: SimBriefData;
@@ -64,13 +81,7 @@ const FREQUENCIES = ["31Hz", "62Hz", "125Hz", "250Hz", "500Hz", "1kHz", "2kHz", 
 interface EventGroup {
   id: string;
   labelKey: string;
-}
-
-interface EventDefinition {
-  key: string;
-  narratorKey: string;
-  descKey: string;
-  phaseId: string;
+  count: number;
 }
 
 export default function ConfigView({
@@ -135,14 +146,6 @@ export default function ConfigView({
           setEqCrewPreset(data.eq_crew_preset);
         if (data.eq_crew_bands != null)
           setEqCrewBands(data.eq_crew_bands);
-        if (data.custom_pilot_name_set != null)
-          setCustomPilotNameSet(data.custom_pilot_name_set);
-        if (data.custom_pilot_name != null)
-          setCustomPilotName(data.custom_pilot_name);
-        if (data.custom_crew_name_set != null)
-          setCustomCrewNameSet(data.custom_crew_name_set);
-        if (data.custom_crew_name != null)
-          setCustomCrewName(data.custom_crew_name);
         if (data.gforce != null)
           setPfGforce(data.gforce);
         if (data.vertical_speed != null)
@@ -155,6 +158,23 @@ export default function ConfigView({
           setPfAccelerationGroundSpeed(data.acceleration_ground_speed);
         if (data.delay_feedback != null)
           setPfDelayFeedback(data.delay_feedback);
+        // Personal de Vuelo - persistido en setting_general
+        if ((data as any).language_id != null) {
+          setSelectedLanguageId((data as any).language_id);
+          localStorage.setItem("cfg_selected_language_id", (data as any).language_id);
+        }
+        if ((data as any).captain_voice_id != null) {
+          setSelectedCaptainVoiceId((data as any).captain_voice_id);
+          localStorage.setItem("cfg_selected_captain_voice_id", (data as any).captain_voice_id);
+        }
+        if ((data as any).crew_voice_id != null) {
+          setSelectedCrewVoiceId((data as any).crew_voice_id);
+          localStorage.setItem("cfg_selected_crew_voice_id", (data as any).crew_voice_id);
+        }
+        if ((data as any).gate_agent_voice_id != null) {
+          // gate_agent_voice_id también se valida contra voices_stock más abajo.
+          localStorage.setItem("cfg_gate_agent_voice_id", (data as any).gate_agent_voice_id);
+        }
       } else {
         setPassengerBoardingTimeSeconds(90);
         setMuteAnnWhenNotInCabin(false);
@@ -171,10 +191,6 @@ export default function ConfigView({
         setEqCaptainBands([0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         setEqCrewPreset("estandar");
         setEqCrewBands([0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        setCustomPilotNameSet(false);
-        setCustomPilotName("");
-        setCustomCrewNameSet(false);
-        setCustomCrewName("");
         setPfGforce(true);
         setPfVerticalSpeed(true);
         setPfLandingForce(true);
@@ -209,49 +225,124 @@ export default function ConfigView({
           setGateAgentVoiceId(gateVoices[0].id);
         }
       }
-
-      // Load announcements from setting_announcements
-      const { data: annData, error: annError } = await supabase
-        .from("setting_announcements")
-        .select("*")
-        .eq("user_id", user.id)
-        .maybeSingle();
-
-      if (cancelled || annError) return;
-
-      if (annData) {
-        const annPayload: Record<string, "off" | "pack" | "IA"> = {};
-        const dbKeys = [
-          "gate_crew_start_soon", "gate_crew_started", "common_crew_boarding",
-          "preflight_crew_welcome", "preflight_capt_welcome", "preflight_capt_delay",
-          "preflight_capt_basic_info", "preflight_crew_basic_info", "taxi_capt_armdoors",
-          "taxi_crew_safety_brief", "taxi_capt_dimlights", "taxi_crew_dimlights",
-          "takeoff_capt_prepare", "climb_crew_upcoming_service", "cruise_capt_general_info",
-          "cruise_crew_service_info1", "cruise_crew_service_info2", "cruise_crew_shopping_info",
-          "cruise_crew_customs_forms", "cruise_crew_service_info3", "descent_capt_close_desc",
-          "descent_capt_upcoming_actions", "descent_crew_upcoming_actions", "descent_capt_10kfeet",
-          "descent_crew_landing_fewmin", "final_capt_take_seats", "taxitogate_crew_welcome",
-          "taxitogate_crew_ramining_seating", "taxitogate_crew_delay_apologies",
-          "atgate_capt_disarm_doors", "atgate_crew_deboarding", "common_capt_seatbelt",
-          "common_crew_seatbelt"
-        ];
-        for (const key of dbKeys) {
-          if ((annData as any)[key] != null) {
-            annPayload[key] = (annData as any)[key] as "off" | "pack" | "IA";
-          }
-        }
-        if (Object.keys(annPayload).length > 0) {
-          setEventConfig(prev => ({ ...prev, ...annPayload }));
-        }
-        if (annData.announcement_flavor != null) {
-          setAnnouncementFlavor(annData.announcement_flavor);
-        }
-      }
     };
 
     loadSettings();
     return () => { cancelled = true; };
   }, []);
+
+  // Cargar preferencias de Personal de Vuelo al abrir la pestaña Generales (setting_general)
+  useEffect(() => {
+    if (activeTab !== "generales" || !userId) return;
+    let cancelled = false;
+    (async () => {
+      const { data: settings, error } = await supabase
+        .from('setting_general')
+        .select('language_id, captain_voice_id, crew_voice_id, gate_agent_voice_id')
+        .eq('user_id', userId)
+        .maybeSingle();
+      if (cancelled || error || !settings) {
+        if (error) console.warn("[ConfigView] Generales setting_general load error:", error.message);
+        return;
+      }
+      console.log('[ConfigView] Generales - setting_general cargado:', settings);
+      if ((settings as any).language_id) {
+        setSelectedLanguageId((settings as any).language_id);
+        localStorage.setItem("cfg_selected_language_id", (settings as any).language_id);
+      }
+      if ((settings as any).captain_voice_id) {
+        setSelectedCaptainVoiceId((settings as any).captain_voice_id);
+        localStorage.setItem("cfg_selected_captain_voice_id", (settings as any).captain_voice_id);
+      }
+      if ((settings as any).crew_voice_id) {
+        setSelectedCrewVoiceId((settings as any).crew_voice_id);
+        localStorage.setItem("cfg_selected_crew_voice_id", (settings as any).crew_voice_id);
+      }
+      if ((settings as any).gate_agent_voice_id) {
+        setGateAgentVoiceId((settings as any).gate_agent_voice_id);
+        localStorage.setItem("cfg_gate_agent_voice_id", (settings as any).gate_agent_voice_id);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activeTab, userId]);
+
+  // Carga idiomas y voces habilitadas del usuario (misma lógica que la configuración previa al vuelo)
+  useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+
+    (async () => {
+      setStaffLanguagesLoading(true);
+      try {
+        const { data, error } = await supabase.from("languages").select("id, language_name");
+        if (error) throw error;
+        if (cancelled) return;
+        const mapped = (data || []).map((l: any) => ({ id: l.id, name: l.language_name }));
+        if (mapped.length > 0) {
+          setStaffLanguageList(mapped);
+          setSelectedLanguageId((prev) => {
+            const next = prev && mapped.some((l) => l.id === prev) ? prev : mapped[0].id;
+            localStorage.setItem("cfg_selected_language_id", next);
+            return next;
+          });
+        }
+      } catch (e: any) {
+        if (!cancelled) setStaffLanguagesError(e?.message || "Error al cargar idiomas");
+      } finally {
+        if (!cancelled) setStaffLanguagesLoading(false);
+      }
+    })();
+
+    (async () => {
+      setStaffVoicesLoading(true);
+      try {
+        const { data: userVoices, error: voicesError } = await supabase
+          .from("voices")
+          .select("voicestock_id")
+          .eq("user_id", userId)
+          .eq("voice_enabled", true);
+        if (voicesError) throw voicesError;
+        if (cancelled) return;
+
+        const stockIds = (userVoices || []).map((v: any) => v.voicestock_id);
+
+        let mapped: StaffVoiceOption[] = [];
+        if (stockIds.length > 0) {
+          let stockResult: any = await supabase
+            .from("voices_stock")
+            .select("id, voice_name, voice_role, languages")
+            .in("id", stockIds);
+          if (stockResult.error) {
+            // Schema sin columna `languages`: reintentar sin ella.
+            stockResult = await supabase
+              .from("voices_stock")
+              .select("id, voice_name, voice_role")
+              .in("id", stockIds);
+          }
+          if (stockResult.error) throw stockResult.error;
+          if (cancelled) return;
+          mapped = (stockResult.data || []).map((vs: any) => ({
+            id: vs.id,
+            name: vs.voice_name,
+            role: vs.voice_role,
+            languages: Array.isArray(vs.languages)
+              ? vs.languages
+              : vs.languages
+                ? [vs.languages]
+                : [],
+          }));
+        }
+        if (!cancelled) setStaffVoiceList(mapped);
+      } catch (e: any) {
+        if (!cancelled) setStaffVoicesError(e?.message || "Error al cargar voces");
+      } finally {
+        if (!cancelled) setStaffVoicesLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId]);
 
   // NEW PACKAGES TAB STATES
   const [packagesDir, setPackagesDir] = useState<string>(() => {
@@ -435,15 +526,81 @@ export default function ConfigView({
   const [songBoardingMusic, setSongBoardingMusic] = useState<string>(() => {
     return localStorage.getItem("cfg_song_boarding_music") || "";
   });
+  const [musicTracks, setMusicTracks] = useState<BoardingMusicTrack[]>([]);
+  const [musicTracksLoading, setMusicTracksLoading] = useState<boolean>(false);
   const [speedKph, setSpeedKph] = useState<boolean>(() => {
     return localStorage.getItem("cfg_speed_kph") !== "false"; // default true
   });
 
+  // Personal de Vuelo - persistido en setting_general (language_id, captain_voice_id, crew_voice_id, gate_agent_voice_id)
+  const [selectedLanguageId, setSelectedLanguageId] = useState<string>(() => {
+    return localStorage.getItem("cfg_selected_language_id") || "";
+  });
+  const [selectedCaptainVoiceId, setSelectedCaptainVoiceId] = useState<string>(() => {
+    return localStorage.getItem("cfg_selected_captain_voice_id") || "";
+  });
+  const [selectedCrewVoiceId, setSelectedCrewVoiceId] = useState<string>(() => {
+    return localStorage.getItem("cfg_selected_crew_voice_id") || "";
+  });
   // Gate Agent Voice
   const [gateAgentVoiceId, setGateAgentVoiceId] = useState<string>(() => {
     return localStorage.getItem("cfg_gate_agent_voice_id") || "";
   });
   const [gateAgentVoices, setGateAgentVoices] = useState<{ id: string; name: string }[]>([]);
+
+  // Opciones de idiomas y voces (misma fuente que la configuración previa al vuelo)
+  interface StaffVoiceOption {
+    id: string;
+    name: string;
+    role: string;
+    languages: string[];
+  }
+  const [staffLanguageList, setStaffLanguageList] = useState<{ id: string; name: string }[]>([]);
+  const [staffLanguagesLoading, setStaffLanguagesLoading] = useState(false);
+  const [staffLanguagesError, setStaffLanguagesError] = useState<string | null>(null);
+  const [staffVoiceList, setStaffVoiceList] = useState<StaffVoiceOption[]>([]);
+  const [staffVoicesLoading, setStaffVoicesLoading] = useState(false);
+  const [staffVoicesError, setStaffVoicesError] = useState<string | null>(null);
+
+  const staffVoiceMatchesLanguage = (voice: StaffVoiceOption, langId?: string): boolean =>
+    !voice.languages || voice.languages.length === 0 || voice.languages.includes(langId ?? selectedLanguageId);
+
+  const getStaffVoiceOptionsForRole = (role: string, langId?: string): StaffVoiceOption[] =>
+    staffVoiceList.filter((v) => v.role === role && staffVoiceMatchesLanguage(v, langId));
+
+  const staffCaptainVoiceOptions = getStaffVoiceOptionsForRole("captain");
+  const staffCrewVoiceOptions = getStaffVoiceOptionsForRole("crew");
+  const staffGateVoiceOptions = getStaffVoiceOptionsForRole("gate");
+
+  // ── Consistencia idioma ↔ voces (Personal de Vuelo) ──────────────────
+  // Si una voz guardada (preferencia del usuario) NO pertenece al idioma
+  // elegido (o ya no está disponible), se corrige a la primera voz válida de
+  // ese rol para el idioma. Evita persistir/arrancar con voces que no
+  // corresponden al idioma (causa de "audio no encontrado"). No auto-selecciona
+  // voces vacías: si el usuario aún no eligió, se respeta ese estado.
+  const staffFirstVoiceForRole = (role: string, langId: string): string => {
+    const v = getStaffVoiceOptionsForRole(role, langId)[0];
+    return v?.id ?? "";
+  };
+  const staffIsVoiceValidForLanguage = (role: string, voiceId: string, langId: string): boolean => {
+    if (!voiceId) return false;
+    const v = staffVoiceList.find((item) => item.id === voiceId);
+    return !!v && v.role === role && staffVoiceMatchesLanguage(v, langId);
+  };
+  useEffect(() => {
+    if (staffVoicesLoading || staffVoiceList.length === 0) return;
+    const lang = selectedLanguageId;
+    const fix = (role: string, current: string, setter: (id: string) => void): void => {
+      // Voz vacía: el usuario aún no eligió; no auto-seleccionar.
+      if (!current) return;
+      if (staffIsVoiceValidForLanguage(role, current, lang)) return;
+      setter(staffFirstVoiceForRole(role, lang));
+    };
+    fix("captain", selectedCaptainVoiceId, setSelectedCaptainVoiceId);
+    fix("crew", selectedCrewVoiceId, setSelectedCrewVoiceId);
+    fix("gate", gateAgentVoiceId, setGateAgentVoiceId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedLanguageId, selectedCaptainVoiceId, selectedCrewVoiceId, gateAgentVoiceId, staffVoiceList, staffVoicesLoading]);
 
   // Bloque 2: Audio Config
   const [audio3dEnabled, setAudio3dEnabled] = useState<boolean>(() => {
@@ -462,20 +619,6 @@ export default function ConfigView({
   const [eqCrewBands, setEqCrewBands] = useState<number[]>(() => {
     const raw = localStorage.getItem("cfg_eq_crew_bands");
     return raw ? JSON.parse(raw) : [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-  });
-
-  // Bloque 3: Staff Config
-  const [customPilotNameSet, setCustomPilotNameSet] = useState<boolean>(() => {
-    return localStorage.getItem("cfg_custom_pilot_name_set") === "true";
-  });
-  const [customPilotName, setCustomPilotName] = useState<string>(() => {
-    return localStorage.getItem("cfg_custom_pilot_name") || "";
-  });
-  const [customCrewNameSet, setCustomCrewNameSet] = useState<boolean>(() => {
-    return localStorage.getItem("cfg_custom_crew_name_set") === "true";
-  });
-  const [customCrewName, setCustomCrewName] = useState<string>(() => {
-    return localStorage.getItem("cfg_custom_crew_name") || "";
   });
 
   // Bloque 4: Experiencia del Pasajero Trigger Switches
@@ -506,9 +649,22 @@ export default function ConfigView({
   const [announcementFlavor, setAnnouncementFlavor] = useState<"operative" | "cultural" | "scenic" | "casual">(() => {
     return (localStorage.getItem("cfg_announcement_flavor") as any) || "operative";
   });
-  const [eventConfig, setEventConfig] = useState<Record<string, "off" | "pack" | "IA">>(() => {
+  const [eventConfig, setEventConfig] = useState<Record<string, EventSwitchValue>>(() => {
     const raw = localStorage.getItem("cfg_event_config");
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        const normalized: Record<string, EventSwitchValue> = {};
+        for (const [key, value] of Object.entries(parsed)) {
+          if (typeof value === "string") {
+            normalized[key] = toUiSwitchValue(value);
+          }
+        }
+        return normalized;
+      } catch {
+        // localStorage corrupto → valores por defecto.
+      }
+    }
     return {
       gate_crew_start_soon: "IA",
       gate_crew_started: "IA",
@@ -546,6 +702,98 @@ export default function ConfigView({
     };
   });
 
+  // Escenarios para el selector de la pestaña "Eventos".
+  const [scenarios, setScenarios] = useState<ScenarioOption[]>([]);
+  const [selectedScenarioKey, setSelectedScenarioKey] = useState<string>(NORMAL_SCENARIO_KEY);
+  const [scenarioSnapshot, setScenarioSnapshot] = useState<ScenarioConfigSnapshot | null>(null);
+  const [scenarioLoading, setScenarioLoading] = useState<boolean>(false);
+
+  // Carga la lista de escenarios activos.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const result = await ScenarioConfigService.listActiveScenarios();
+      if (cancelled || !result.success) return;
+      const list = result.data ?? [];
+      setScenarios(list);
+      if (list.length > 0 && !list.some((entry) => entry.key === selectedScenarioKey)) {
+        setSelectedScenarioKey(list[0].key);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Carga las pistas de música ambiental activas desde `boarding_music`.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setMusicTracksLoading(true);
+      const result = await BoardingMusicService.listActiveTracks();
+      if (cancelled) return;
+      if (result.success && result.data) {
+        setMusicTracks(result.data);
+        // Migración retrocompatible: si el valor guardado es un nombre de pista
+        // (esquema anterior) en lugar de un id, se convierte al id actual.
+        setSongBoardingMusic((prev) => {
+          if (!prev || prev === RANDOM_MUSIC_ID) return prev;
+          if (result.data!.some((track) => track.id === prev)) return prev;
+          const byName = result.data!.find((track) => track.name === prev);
+          return byName ? byName.id : "";
+        });
+      } else {
+        console.warn("[ConfigView] No se pudieron cargar las pistas de música:", result.error);
+      }
+      if (!cancelled) setMusicTracksLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Carga el snapshot del escenario seleccionado + la configuración guardada.
+  useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+    (async () => {
+      setScenarioLoading(true);
+      const [snapshotResult, configResult] = await Promise.all([
+        ScenarioConfigService.loadPublishedSnapshot(selectedScenarioKey),
+        UserEventDefaultsService.loadEffectiveUserConfig(userId, selectedScenarioKey),
+      ]);
+      if (cancelled) return;
+
+      if (snapshotResult.success && snapshotResult.data) {
+        setScenarioSnapshot(snapshotResult.data);
+        setActiveGroupTab("immersion");
+      } else {
+        console.warn("[ConfigView] No se pudo cargar el escenario:", snapshotResult.error);
+        setScenarioSnapshot(null);
+        setActiveGroupTab("immersion");
+      }
+
+      if (configResult.success) {
+        const loaded = configResult.data ?? {};
+        const switchMap: Record<string, EventSwitchValue> = {};
+        for (const [key, value] of Object.entries(loaded)) {
+          if (isEventSwitchValue(value)) {
+            switchMap[key] = value;
+          }
+        }
+        if (Object.keys(switchMap).length > 0) {
+          setEventConfig(switchMap);
+        }
+
+        const flavor = loaded[EVENT_CONFIG_FLAVOR_KEY];
+        if (flavor != null) {
+          setAnnouncementFlavor(flavor as any);
+        }
+      }
+
+      setScenarioLoading(false);
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, selectedScenarioKey]);
+
   // Guardar todas las configuraciones
   const handleSaveAll = () => {
     // Bloque 1
@@ -569,6 +817,10 @@ export default function ConfigView({
     localStorage.setItem("cfg_song_boarding_music", songBoardingMusic);
     localStorage.setItem("cfg_speed_kph", String(speedKph));
     localStorage.setItem("cfg_gate_agent_voice_id", gateAgentVoiceId);
+    // Personal de Vuelo - persistido en setting_general
+    localStorage.setItem("cfg_selected_language_id", selectedLanguageId);
+    localStorage.setItem("cfg_selected_captain_voice_id", selectedCaptainVoiceId);
+    localStorage.setItem("cfg_selected_crew_voice_id", selectedCrewVoiceId);
 
     // Bloque 2
     localStorage.setItem("cfg_audio_3d_enabled", String(audio3dEnabled));
@@ -576,12 +828,6 @@ export default function ConfigView({
     localStorage.setItem("cfg_eq_captain_bands", JSON.stringify(eqCaptainBands));
     localStorage.setItem("cfg_eq_crew_preset", eqCrewPreset);
     localStorage.setItem("cfg_eq_crew_bands", JSON.stringify(eqCrewBands));
-
-    // Bloque 3
-    localStorage.setItem("cfg_custom_pilot_name_set", String(customPilotNameSet));
-    localStorage.setItem("cfg_custom_pilot_name", customPilotName);
-    localStorage.setItem("cfg_custom_crew_name_set", String(customCrewNameSet));
-    localStorage.setItem("cfg_custom_crew_name", customCrewName);
 
     // Bloque 4
     localStorage.setItem("cfg_gforce", String(pfGforce));
@@ -638,10 +884,6 @@ export default function ConfigView({
             eq_captain_bands: eqCaptainBands,
             eq_crew_preset: eqCrewPreset,
             eq_crew_bands: eqCrewBands,
-            custom_pilot_name_set: customPilotNameSet,
-            custom_pilot_name: customPilotName,
-            custom_crew_name_set: customCrewNameSet,
-            custom_crew_name: customCrewName,
             gforce: pfGforce,
             vertical_speed: pfVerticalSpeed,
             landing_force: pfLandingForce,
@@ -656,54 +898,22 @@ export default function ConfigView({
             play_boarding_music: playBoardingMusic,
             song_boarding_music: songBoardingMusic,
             speed_kph: speedKph,
-            gate_agent_voice_id: gateAgentVoiceId,
-          };
-
-          const upsertAnnouncementsPayload: Record<string, any> = {
-            user_id: userId,
-            gate_crew_start_soon: eventConfig.gate_crew_start_soon,
-            gate_crew_started: eventConfig.gate_crew_started,
-            common_crew_boarding: eventConfig.common_crew_boarding,
-            preflight_crew_welcome: eventConfig.preflight_crew_welcome,
-            preflight_capt_welcome: eventConfig.preflight_capt_welcome,
-            preflight_capt_delay: eventConfig.preflight_capt_delay,
-            preflight_capt_basic_info: eventConfig.preflight_capt_basic_info,
-            preflight_crew_basic_info: eventConfig.preflight_crew_basic_info,
-            taxi_capt_armdoors: eventConfig.taxi_capt_armdoors,
-            taxi_crew_safety_brief: eventConfig.taxi_crew_safety_brief,
-            taxi_capt_dimlights: eventConfig.taxi_capt_dimlights,
-            taxi_crew_dimlights: eventConfig.taxi_crew_dimlights,
-            takeoff_capt_prepare: eventConfig.takeoff_capt_prepare,
-            climb_crew_upcoming_service: eventConfig.climb_crew_upcoming_service,
-            cruise_capt_general_info: eventConfig.cruise_capt_general_info,
-            cruise_crew_service_info1: eventConfig.cruise_crew_service_info1,
-            cruise_crew_service_info2: eventConfig.cruise_crew_service_info2,
-            cruise_crew_shopping_info: eventConfig.cruise_crew_shopping_info,
-            cruise_crew_customs_forms: eventConfig.cruise_crew_customs_forms,
-            cruise_crew_service_info3: eventConfig.cruise_crew_service_info3,
-            descent_capt_close_desc: eventConfig.descent_capt_close_desc,
-            descent_capt_upcoming_actions: eventConfig.descent_capt_upcoming_actions,
-            descent_crew_upcoming_actions: eventConfig.descent_crew_upcoming_actions,
-            descent_capt_10kfeet: eventConfig.descent_capt_10kfeet,
-            descent_crew_landing_fewmin: eventConfig.descent_crew_landing_fewmin,
-            final_capt_take_seats: eventConfig.final_capt_take_seats,
-            taxitogate_crew_welcome: eventConfig.taxitogate_crew_welcome,
-            taxitogate_crew_ramining_seating: eventConfig.taxitogate_crew_ramining_seating,
-            taxitogate_crew_delay_apologies: eventConfig.taxitogate_crew_delay_apologies,
-            atgate_capt_disarm_doors: eventConfig.atgate_capt_disarm_doors,
-            atgate_crew_deboarding: eventConfig.atgate_crew_deboarding,
-            common_capt_seatbelt: eventConfig.common_capt_seatbelt,
-            common_crew_seatbelt: eventConfig.common_crew_seatbelt,
-            announcement_flavor: announcementFlavor,
+            gate_agent_voice_id: gateAgentVoiceId || null,
+            language_id: selectedLanguageId || null,
+            captain_voice_id: selectedCaptainVoiceId || null,
+            crew_voice_id: selectedCrewVoiceId || null,
           };
 
           const [genResult, annResult] = await Promise.all([
             supabase.from("setting_general").upsert(upsertPayload, { onConflict: "user_id" }),
-            supabase.from("setting_announcements").upsert(upsertAnnouncementsPayload, { onConflict: "user_id" })
+            UserEventDefaultsService.saveForUser(userId, eventConfig, {
+              scenarioKey: selectedScenarioKey,
+              flavor: announcementFlavor,
+            }),
           ]);
 
           if (genResult.error) throw genResult.error;
-          if (annResult.error) throw annResult.error;
+          if (!annResult.success) throw new Error(annResult.error ?? "Error al guardar la configuración de eventos");
         } catch (err) {
           console.error("Supabase save error:", err);
           setToastNotification("⚠️ Error al guardar en la nube. Los cambios locales están seguros.");
@@ -743,22 +953,7 @@ export default function ConfigView({
     setEqCrewPreset("custom");
   };
 
-  // ==================== DEFINICIÓN DE EVENTOS (PREESTABLECIDAS) ====================
-  const getGroupCount = (id: string): number => {
-    if (id === "immersion") return immersionOptions.length;
-    return eventDefinitionList.filter(e => e.phaseId === id).length;
-  };
-
-  const eventGroups: EventGroup[] = [
-    { id: "immersion", labelKey: "config.events.groups.immersion" },
-    { id: "fase1", labelKey: "config.events.groups.fase1" },
-    { id: "fase3", labelKey: "config.events.groups.fase3" },
-    { id: "fase4", labelKey: "config.events.groups.fase4" },
-    { id: "fase5", labelKey: "config.events.groups.fase5" },
-    { id: "fase6", labelKey: "config.events.groups.fase6" },
-    { id: "transversal", labelKey: "config.events.groups.transversal" }
-  ];
-
+  // ==================== DEFINICIÓN DE EVENTOS (desde el escenario) ====================
   const immersionOptions = [
     {
       key: "play_chime_sound_before_ann",
@@ -811,57 +1006,38 @@ export default function ConfigView({
     }
   ];
 
-  const eventDefinitionList: EventDefinition[] = [
-    { key: "gate_crew_start_soon", narratorKey: "config.events.narrator_gate", descKey: "config.events.desc.gate_crew_start_soon", phaseId: "fase1" },
-    { key: "gate_crew_started", narratorKey: "config.events.narrator_gate", descKey: "config.events.desc.gate_crew_started", phaseId: "fase1" },
-    { key: "common_crew_boarding", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.common_crew_boarding", phaseId: "fase1" },
-    { key: "preflight_crew_welcome", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.preflight_crew_welcome", phaseId: "fase1" },
-    { key: "preflight_capt_welcome", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.preflight_capt_welcome", phaseId: "fase1" },
-    { key: "preflight_capt_delay", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.preflight_capt_delay", phaseId: "fase1" },
-    { key: "preflight_capt_basic_info", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.preflight_capt_basic_info", phaseId: "fase1" },
-    { key: "preflight_crew_basic_info", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.preflight_crew_basic_info", phaseId: "fase1" },
-    
-    { key: "taxi_capt_armdoors", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.taxi_capt_armdoors", phaseId: "fase3" },
-    { key: "taxi_crew_safety_brief", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.taxi_crew_safety_brief", phaseId: "fase3" },
-    { key: "taxi_capt_dimlights", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.taxi_capt_dimlights", phaseId: "fase3" },
-    { key: "taxi_crew_dimlights", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.taxi_crew_dimlights", phaseId: "fase3" },
-    { key: "takeoff_capt_prepare", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.takeoff_capt_prepare", phaseId: "fase3" },
-    
-    { key: "climb_crew_upcoming_service", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.climb_crew_upcoming_service", phaseId: "fase4" },
-    { key: "cruise_capt_general_info", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.cruise_capt_general_info", phaseId: "fase4" },
-    { key: "cruise_crew_service_info1", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.cruise_crew_service_info1", phaseId: "fase4" },
-    { key: "cruise_crew_service_info2", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.cruise_crew_service_info2", phaseId: "fase4" },
-    { key: "cruise_crew_shopping_info", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.cruise_crew_shopping_info", phaseId: "fase4" },
-    { key: "cruise_crew_customs_forms", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.cruise_crew_customs_forms", phaseId: "fase4" },
-    { key: "cruise_crew_service_info3", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.cruise_crew_service_info3", phaseId: "fase4" },
-    
-    { key: "descent_capt_close_desc", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.descent_capt_close_desc", phaseId: "fase5" },
-    { key: "descent_capt_upcoming_actions", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.descent_capt_upcoming_actions", phaseId: "fase5" },
-    { key: "descent_crew_upcoming_actions", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.descent_crew_upcoming_actions", phaseId: "fase5" },
-    { key: "descent_capt_10kfeet", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.descent_capt_10kfeet", phaseId: "fase5" },
-    { key: "descent_crew_landing_fewmin", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.descent_crew_landing_fewmin", phaseId: "fase5" },
-    { key: "final_capt_take_seats", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.final_capt_take_seats", phaseId: "fase5" },
-    
-    { key: "taxitogate_crew_welcome", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.taxitogate_crew_welcome", phaseId: "fase6" },
-    { key: "taxitogate_crew_ramining_seating", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.taxitogate_crew_ramining_seating", phaseId: "fase6" },
-    { key: "taxitogate_crew_delay_apologies", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.taxitogate_crew_delay_apologies", phaseId: "fase6" },
-    { key: "atgate_capt_disarm_doors", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.atgate_capt_disarm_doors", phaseId: "fase6" },
-    { key: "atgate_crew_deboarding", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.atgate_crew_deboarding", phaseId: "fase6" },
-    
-    { key: "common_capt_seatbelt", narratorKey: "config.events.narrator_captain", descKey: "config.events.desc.common_capt_seatbelt", phaseId: "transversal" },
-    { key: "common_crew_seatbelt", narratorKey: "config.events.narrator_crew", descKey: "config.events.desc.common_crew_seatbelt", phaseId: "transversal" }
+  // Grupos de la pestaña de eventos: "Fase 0" (inmersión) + fases del escenario.
+  const eventGroups: EventGroup[] = [
+    { id: "immersion", labelKey: "config.events.groups.immersion", count: immersionOptions.length },
+    ...(scenarioSnapshot?.phases ?? []).map((phase) => ({
+      id: phase.key,
+      labelKey: phase.name,
+      count: phase.events.length,
+    })),
   ];
 
-  const getFilteredEvents = (): EventDefinition[] => {
-    return eventDefinitionList.filter(item => item.phaseId === activeGroupTab);
+  const getFilteredEvents = (): ScenarioEventConfig[] => {
+    if (!scenarioSnapshot) return [];
+    const phase = scenarioSnapshot.phases.find((entry) => entry.key === activeGroupTab);
+    return phase?.events ?? [];
   };
 
-  const handleEventConfigChange = (key: string, value: "off" | "pack" | "IA") => {
+  const getNarratorLabel = (role: string | null | undefined): string => {
+    if (role === "captain") return t("config.events.narrator_captain");
+    if (role === "crew") return t("config.events.narrator_crew");
+    if (role === "gate") return t("config.events.narrator_gate") || "Agente de Puerta";
+    return "—";
+  };
+
+  const handleEventConfigChange = (key: string, value: EventSwitchValue) => {
     setEventConfig(prev => ({
       ...prev,
       [key]: value
     }));
   };
+
+  // Pista de música seleccionada actualmente (para el preview de audio).
+  const selectedMusicTrack = musicTracks.find((track) => track.id === songBoardingMusic) ?? null;
 
   return (
     <div id="config-view-container" className="space-y-6">
@@ -1105,61 +1281,122 @@ export default function ConfigView({
 
               </div>
 
-              {/* STAFF & TRIPULACIÓN */}
+              {/* IDIOMA Y PERSONAL DE VUELO */}
               <div id="cfg-bloque-staff" className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 shadow-md flex flex-col gap-3">
                 <div className="border-b border-white/10 pb-2">
                   <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider flex items-center gap-2 font-black">
-                    <User className="w-4.5 h-4.5 text-[#43E600]" /> {t("config.staff_title")}
+                    <Globe className="w-4.5 h-4.5 text-[#43E600]" /> {t("config.staff_title")}
                   </h3>
+                  <p className="text-[10px] text-white/50 font-mono mt-1">{t("config.staff_desc")}</p>
                 </div>
 
                 <div className="space-y-4">
-                  {/* Pilot Customization */}
+                  {/* Idioma */}
                   <div className="bg-black/25 p-3.5 border border-white/5 rounded-[4px] space-y-2 flex flex-col">
-                    <label className="flex items-center gap-2 font-mono text-[11px] font-bold text-white uppercase tracking-wider cursor-pointer">
-                      <input 
-                        type="checkbox"
-                        className="accent-[#43E600]"
-                        checked={customPilotNameSet}
-                        onChange={(e) => setCustomPilotNameSet(e.target.checked)}
-                      />
-                      <span>{t("config.staff_pilot_label")}</span>
+                    <label className="font-mono text-[11px] font-bold text-white uppercase tracking-wider block">
+                      {t("current_flight.not_started.crew.language")}
                     </label>
-                    <div className="relative">
-                      <User className="absolute left-3 top-2.5 h-3.5 w-3.5 text-[#45AFFF]/50" />
-                      <input 
-                        type="text"
-                        disabled={!customPilotNameSet}
-                        className="w-full bg-[#00345C]/75 border border-[#3B7EB2]/60 rounded p-2 text-xs text-white pl-9 font-mono disabled:opacity-40 focus:outline-none"
-                        placeholder={t("config.staff_pilot_placeholder")}
-                        value={customPilotName}
-                        onChange={(e) => setCustomPilotName(e.target.value)}
-                      />
-                    </div>
+                    <select
+                      value={selectedLanguageId}
+                      onChange={(e) => {
+                        setSelectedLanguageId(e.target.value);
+                        setSelectedCaptainVoiceId("");
+                        setSelectedCrewVoiceId("");
+                        setGateAgentVoiceId("");
+                      }}
+                      className="w-full bg-[#00345C]/75 border border-[#3B7EB2]/60 rounded p-2 text-xs text-white font-mono focus:outline-none focus:border-[#45AFFF]"
+                    >
+                      {staffLanguagesLoading ? (
+                        <option value="" disabled>Cargando...</option>
+                      ) : staffLanguageList.length === 0 ? (
+                        <option value="" disabled>{staffLanguagesError || "Sin idiomas disponibles"}</option>
+                      ) : (
+                        staffLanguageList.map((lang) => (
+                          <option key={lang.id} value={lang.id}>{lang.name}</option>
+                        ))
+                      )}
+                    </select>
                   </div>
 
-                  {/* Cabin Crew Customization */}
+                  {/* Voz del Agente de Puerta */}
                   <div className="bg-black/25 p-3.5 border border-white/5 rounded-[4px] space-y-2 flex flex-col">
-                    <label className="flex items-center gap-2 font-mono text-[11px] font-bold text-white uppercase tracking-wider cursor-pointer">
-                      <input 
-                        type="checkbox"
-                        className="accent-[#43E600]"
-                        checked={customCrewNameSet}
-                        onChange={(e) => setCustomCrewNameSet(e.target.checked)}
-                      />
-                      <span>{t("config.staff_crew_label")}</span>
+                    <label className="font-mono text-[11px] font-bold text-white uppercase tracking-wider block">
+                      {t("current_flight.not_started.crew.gate_voice")}
                     </label>
-                    <div className="relative">
-                      <Users className="absolute left-3 top-2.5 h-3.5 w-3.5 text-[#45AFFF]/50" />
-                      <input 
-                        type="text"
-                        disabled={!customCrewNameSet}
-                        className="w-full bg-[#00345C]/75 border border-[#3B7EB2]/60 rounded p-2 text-xs text-white pl-9 font-mono disabled:opacity-40 focus:outline-none"
-                        placeholder={t("config.staff_crew_placeholder")}
-                        value={customCrewName}
-                        onChange={(e) => setCustomCrewName(e.target.value)}
-                      />
-                    </div>
+                    <select
+                      value={gateAgentVoiceId}
+                      onChange={(e) => setGateAgentVoiceId(e.target.value)}
+                      className="w-full bg-[#00345C]/75 border border-[#3B7EB2]/60 rounded p-2 text-xs text-white font-mono focus:outline-none focus:border-[#45AFFF]"
+                    >
+                      {staffVoicesLoading ? (
+                        <option value="" disabled>Cargando...</option>
+                      ) : staffGateVoiceOptions.length === 0 ? (
+                        <option value="" disabled>{staffVoicesError || "Sin voces de agente de puerta para este idioma"}</option>
+                      ) : (
+                        <>
+                          <option value="" disabled>{t("current_flight.not_started.crew.select_voice")}</option>
+                          {staffGateVoiceOptions.map((v) => (
+                            <option key={v.id} value={v.id}>{v.name}</option>
+                          ))}
+                        </>
+                      )}
+                    </select>
+                  </div>
+
+                  {/* Voz del Capitán */}
+                  <div className="bg-black/25 p-3.5 border border-white/5 rounded-[4px] space-y-2 flex flex-col">
+                    <label className="font-mono text-[11px] font-bold text-white uppercase tracking-wider block">
+                      {t("current_flight.not_started.crew.captain_voice")}
+                    </label>
+                    <select
+                      value={selectedCaptainVoiceId}
+                      onChange={(e) => setSelectedCaptainVoiceId(e.target.value)}
+                      className="w-full bg-[#00345C]/75 border border-[#3B7EB2]/60 rounded p-2 text-xs text-white font-mono focus:outline-none focus:border-[#45AFFF]"
+                    >
+                      {staffVoicesLoading ? (
+                        <option value="" disabled>Cargando...</option>
+                      ) : staffCaptainVoiceOptions.length === 0 ? (
+                        <option value="" disabled>{staffVoicesError || "Sin voces de capitán para este idioma"}</option>
+                      ) : (
+                        <>
+                          <option value="" disabled>{t("current_flight.not_started.crew.select_voice")}</option>
+                          {staffCaptainVoiceOptions.map((v) => (
+                            <option key={v.id} value={v.id}>{v.name}</option>
+                          ))}
+                        </>
+                      )}
+                    </select>
+                  </div>
+
+                  {/* Voz de la Tripulación */}
+                  <div className="bg-black/25 p-3.5 border border-white/5 rounded-[4px] space-y-2 flex flex-col">
+                    <label className="font-mono text-[11px] font-bold text-white uppercase tracking-wider block">
+                      {t("current_flight.not_started.crew.cabin_voice")}
+                    </label>
+                    <select
+                      value={selectedCrewVoiceId}
+                      onChange={(e) => setSelectedCrewVoiceId(e.target.value)}
+                      className="w-full bg-[#00345C]/75 border border-[#3B7EB2]/60 rounded p-2 text-xs text-white font-mono focus:outline-none focus:border-[#45AFFF]"
+                    >
+                      {staffVoicesLoading ? (
+                        <option value="" disabled>Cargando...</option>
+                      ) : staffCrewVoiceOptions.length === 0 ? (
+                        <option value="" disabled>{staffVoicesError || "Sin voces de tripulación para este idioma"}</option>
+                      ) : (
+                        <>
+                          <option value="" disabled>{t("current_flight.not_started.crew.select_voice")}</option>
+                          {staffCrewVoiceOptions.map((v) => (
+                            <option key={v.id} value={v.id}>{v.name}</option>
+                          ))}
+                        </>
+                      )}
+                    </select>
+                  </div>
+
+                  {/* Hint */}
+                  <div className="bg-[#45AFFF]/5 border border-[#45AFFF]/30 rounded-[5px] p-3 text-[10px] font-sans text-white/70 leading-relaxed">
+                    <Info className="w-3.5 h-3.5 inline mr-1 text-[#45AFFF]" />
+                    {t("current_flight.not_started.crew.voices_hint")}
                   </div>
                 </div>
               </div>
@@ -1402,6 +1639,33 @@ export default function ConfigView({
               {t("config.eventos_desc")}
             </p>
 
+            {/* Scenario selector: la config de eventos está vinculada a un escenario */}
+            <div className="flex flex-wrap items-center gap-3 bg-black/30 border border-white/10 rounded-[5px] px-3 py-2">
+              <div className="flex items-center gap-2">
+                <Radio className="w-4 h-4 text-[#45AFFF]" />
+                <label className="text-[9px] font-mono font-bold text-white/55 uppercase tracking-wider whitespace-nowrap">
+                  {t("config.scenario_label")}
+                </label>
+              </div>
+              <select
+                value={selectedScenarioKey}
+                onChange={(e) => setSelectedScenarioKey(e.target.value)}
+                className="bg-black/55 border border-[#3B7EB2]/45 text-xs text-white font-mono font-bold rounded-[3px] px-2 py-1 focus:outline-none cursor-pointer hover:border-[#45AFFF] transition-colors"
+              >
+                {scenarios.length === 0 && (
+                  <option value={selectedScenarioKey}>{selectedScenarioKey}</option>
+                )}
+                {scenarios.map((scenario) => (
+                  <option key={scenario.key} value={scenario.key}>{scenario.name}</option>
+                ))}
+              </select>
+              {scenarioLoading && (
+                <span className="text-[10px] font-mono text-[#45AFFF] animate-pulse">
+                  {t("config.scenario_loading")}
+                </span>
+              )}
+            </div>
+
             {/* Event Category Tabs matching flight screen */}
             <div className="flex flex-wrap gap-1 bg-black/35 p-1 rounded-[5px] border border-white/5 w-full">
               {eventGroups.map((group) => (
@@ -1415,7 +1679,7 @@ export default function ConfigView({
                       : "text-white/60 hover:text-white hover:bg-white/5"
                   }`}
                 >
-                  {t(group.labelKey)} ({getGroupCount(group.id)})
+                  {t(group.labelKey)} ({group.count})
                 </button>
               ))}
             </div>
@@ -1477,17 +1741,28 @@ export default function ConfigView({
                           <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">
                             {t("config.immersion_music_label")}
                           </span>
-                          <select 
-                            className="bg-[#00172e] border border-[#3B7EB2]/50 text-white rounded-[4px] px-2.5 py-1 text-xs font-mono focus:outline-none w-full sm:w-auto min-w-[200px]"
-                            value={songBoardingMusic}
-                            onChange={(e) => setSongBoardingMusic(e.target.value)}
-                          >
-                            <option value="Vivaldi Concert VIII">Vivaldi Concert VIII</option>
-                            <option value="Jazz Lounge Classics">Jazz Lounge Classics</option>
-                            <option value="Ambient Synth Wave">Ambient Synth Wave</option>
-                            <option value="Copa Airlines Boarding Theme">Copa Airlines Boarding Theme</option>
-                            <option value="Bossa Nova Breeze">Bossa Nova Breeze</option>
-                          </select>
+                          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
+                            <select 
+                              className="bg-[#00172e] border border-[#3B7EB2]/50 text-white rounded-[4px] px-2.5 py-1 text-xs font-mono focus:outline-none w-full sm:w-auto min-w-[220px]"
+                              value={songBoardingMusic}
+                              onChange={(e) => setSongBoardingMusic(e.target.value)}
+                              disabled={musicTracksLoading}
+                            >
+                              <option value="">{t("music.no_music")}</option>
+                              <option value={RANDOM_MUSIC_ID}>{t("music.random")}</option>
+                              {musicTracksLoading ? (
+                                <option value="" disabled>{t("music.loading_tracks")}</option>
+                              ) : (
+                                musicTracks.map((track) => (
+                                  <option key={track.id} value={track.id}>{track.name}</option>
+                                ))
+                              )}
+                            </select>
+                            <MusicPreview
+                              cleanUrl={selectedMusicTrack?.cleanUrl ?? null}
+                              previewUrl={selectedMusicTrack?.previewUrl ?? null}
+                            />
+                          </div>
                         </div>
                       )}
                     </div>
@@ -1527,36 +1802,46 @@ export default function ConfigView({
                   </div>
                 </div>
                 </>
+              ) : getFilteredEvents().length === 0 ? (
+                <div className="col-span-full bg-black/25 border border-white/10 rounded-[5px] p-6 text-center">
+                  <p className="text-xs font-mono text-white/50">{t("config.scenario_no_events")}</p>
+                </div>
               ) : (
-                /* REGULAR TRIGGER EVENTS GROUPS (FLIGHT EVENTS) */
+                /* EVENTOS DEL ESCENARIO (desde el snapshot publicado) */
                 getFilteredEvents().map((item) => {
-                  const currentValue = eventConfig[item.key] || "IA";
+                  const currentValue = eventConfig[item.eventKey] || "IA";
+                  const isCaptain = item.speakerRole === "captain";
 
                   return (
                     <div 
-                      key={item.key} 
+                      key={item.eventKey} 
                       className="bg-[#002440]/45 hover:bg-[#002440]/75 border border-[#3B7EB2]/20 hover:border-[#3B7EB2]/40 p-4 rounded-[6px] flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-all font-mono"
                     >
                       <div className="space-y-1 my-1 flex-1 min-w-0 pr-1">
                           <span className="text-[12.5px] font-sans font-medium text-white/95 leading-normal block">
-                            {t(item.descKey)}
+                            {item.displayName || item.eventKey}
                           </span>
+                          {item.description && (
+                            <span className="text-[10px] text-white/55 leading-relaxed block mt-1">
+                              {item.description}
+                            </span>
+                          )}
                           {/* Narrator Display below description */}
                           <div className="flex items-center gap-1.5 text-[9px] uppercase font-mono tracking-wider text-white/50 mt-1.5">
-                            <span className={`w-1.5 h-1.5 rounded-full ${item.narratorKey === "config.events.narrator_captain" ? "bg-[#e68b00]" : "bg-[#45AFFF]"}`}></span>
-                            <span>{t("config.events.narrator_label")} <strong className={item.narratorKey === "config.events.narrator_captain" ? "text-[#ffb340]" : "text-[#45AFFF]"}>{t(item.narratorKey)}</strong></span>
+                            <span className={`w-1.5 h-1.5 rounded-full ${isCaptain ? "bg-[#e68b00]" : "bg-[#45AFFF]"}`}></span>
+                            <span>{t("config.events.narrator_label")} <strong className={isCaptain ? "text-[#ffb340]" : "text-[#45AFFF]"}>{getNarratorLabel(item.speakerRole)}</strong></span>
                           </div>
                       </div>
 
                       {/* Selector Mode Pill */}
                       <div className="flex bg-black/60 border border-white/15 rounded-[4px] overflow-hidden shrink-0 h-fit w-[165px]">
-                        {(["off", "pack", "IA"] as const).map((mode) => {
+                        {(["OFF", "PACK", "IA"] as const).map((mode) => {
                           const isSelected = currentValue === mode;
-                          const isPackModeDisabled = mode === "pack" && !selectedPackage;
+                          const isPackModeDisabled = mode === "PACK" && !selectedPackage;
                           let activeStyle = "text-white/30 border-transparent hover:text-white/60 text-[9px] font-semibold";
                           if (isSelected) {
-                            if (mode === "off") activeStyle = "bg-red-500/20 text-red-300 border-red-500/35 font-black shadow-sm text-[9px]";
-                            if (mode === "pack") activeStyle = "bg-amber-500/20 text-amber-300 border-amber-500/40 font-black shadow-sm text-[9px]";
+                            if (mode === "OFF") activeStyle = "bg-red-500/20 text-red-300 border-red-500/35 font-black shadow-sm text-[9px]";
+                            if (mode === "PACK") activeStyle = "bg-amber-500/20 text-amber-300 border-amber-500/40 font-black shadow-sm text-[9px]";
                             if (mode === "IA") activeStyle = "bg-sky-500/20 text-sky-400 border-[#45AFFF]/35 font-black shadow-sm text-[9px]";
                           }
                           return (
@@ -1564,13 +1849,13 @@ export default function ConfigView({
                               key={mode}
                               type="button"
                               disabled={isPackModeDisabled}
-                              onClick={() => handleEventConfigChange(item.key, mode)}
+                              onClick={() => handleEventConfigChange(item.eventKey, mode)}
                               title={isPackModeDisabled ? t("config.events.tooltip_no_package") : ""}
                               className={`px-1.5 py-1 rounded-[3px] font-mono uppercase tracking-wider border cursor-pointer transition-all flex-1 text-center ${activeStyle} ${
                                 isPackModeDisabled ? "opacity-25 cursor-not-allowed hover:text-white/20" : ""
                               }`}
                             >
-                              {mode === "off" ? t("config.events.mode_off_label") : mode === "pack" ? t("config.events.mode_pack_label") : t("config.events.mode_ia_label")}
+                              {mode === "OFF" ? t("config.events.mode_off_label") : mode === "PACK" ? t("config.events.mode_pack_label") : t("config.events.mode_ia_label")}
                             </button>
                           );
                         })}
@@ -1713,139 +1998,9 @@ export default function ConfigView({
         )}
 
         {/* ==================== TAB 4: VOCES ==================== */}
-        {activeTab === "voces" && (
-          <div className="bg-[#2C6591]/20 border border-white/20 rounded-[5px] p-5 shadow-lg space-y-6 w-full animate-fadeIn">
-            <div className="border-b border-white/10 pb-3">
-              <h3 className="text-base font-display font-black text-[#45AFFF] uppercase tracking-wider flex items-center gap-2">
-                🗣️ Control y Registro de Voces Naturales
-              </h3>
-              <p className="text-xs text-white/60 font-mono mt-1">
-                Configure los perfiles sintéticos de cabina o registre grabaciones de voz de tripulantes reales.
-              </p>
-            </div>
+        {activeTab === "voces" && <VoicesPage />}
 
-            {/* Grilla de cartas de voz */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {voicesList.map((voice: any) => {
-                const isPlaying = playingVoiceId === voice.id;
-                return (
-                  <div
-                    key={voice.id}
-                    className={`p-4 rounded-[6px] border transition-all flex flex-col justify-between min-h-[180px] ${
-                      voice.enabled
-                        ? "bg-[#002440]/65 border-[#3B7EB2]/55 shadow-md"
-                        : "bg-black/25 border-white/10 opacity-60 hover:opacity-85"
-                    }`}
-                  >
-                    <div>
-                      <div className="flex justify-between items-start gap-4">
-                        {/* Nombre de la voz (solo el nombre, sin etiqueta) */}
-                        <span className="font-sans font-bold text-sm text-white block">
-                          {voice.name}
-                        </span>
-                        
-                        {/* Toggle switch */}
-                        <label className="relative inline-flex items-center cursor-pointer select-none">
-                          <input
-                            type="checkbox"
-                            checked={voice.enabled}
-                            onChange={(e) => {
-                              const updated = voicesList.map((v: any) =>
-                                v.id === voice.id ? { ...v, enabled: e.target.checked } : v
-                              );
-                              setVoicesList(updated);
-                            }}
-                            className="sr-only peer"
-                          />
-                          <div className="w-8 h-4.5 bg-white/15 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-500 after:border after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:bg-[#43E600]"></div>
-                        </label>
-                      </div>
-
-                      {/* Descripción */}
-                      <p className="text-[11px] text-white/65 font-mono mt-2 leading-relaxed">
-                        {voice.description || "Perfil de voz registrado para locuciones generales de aeronaves."}
-                      </p>
-
-                      {/* Tipo de voz (Estándar o Usuario) */}
-                      <div className="mt-3.5 flex items-center gap-1.5">
-                        <span className={`px-2 py-0.5 rounded text-[9px] font-mono tracking-wider uppercase font-black ${
-                          voice.type === "Estándar" 
-                            ? "bg-[#45AFFF]/20 text-[#45AFFF]" 
-                            : "bg-[#43E600]/25 text-[#43E600] border border-[#43E600]/25"
-                        }`}>
-                          {voice.type}
-                        </span>
-                        <span className="text-[10px] text-white/35 font-mono capitalize">
-                          {voice.gender || "femenino"}
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Botón de acción */}
-                    <div className="mt-4 border-t border-white/5 pt-3">
-                      {voice.type === "Estándar" ? (
-                        <button
-                          type="button"
-                          onClick={() => playSyntheticVoicePreview(voice.name, voice.id)}
-                          className={`w-full font-mono text-xs font-bold py-1.5 px-3 rounded-[3px] border cursor-pointer transition-all flex items-center justify-center gap-1.5 ${
-                            isPlaying
-                              ? "bg-red-500/25 text-red-300 border-red-500/40 font-black animate-pulse"
-                              : "bg-black/35 hover:bg-black/60 border-white/20 hover:border-white/40 text-white"
-                          }`}
-                        >
-                          <Volume2 className={`w-3.5 h-3.5 ${isPlaying ? "animate-bounce" : ""}`} />
-                          {isPlaying ? "REPRODUCIENDO..." : "Reproducir"}
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setEditingVoiceId(voice.id);
-                            setNewVoiceName(voice.name);
-                            setNewVoiceDescription(voice.description || "");
-                            setNewVoiceGender(voice.gender || "femenino");
-                            setNewVoiceIsPublic(voice.isPublic || false);
-                            setShowNewVoiceModal(true);
-                          }}
-                          className="w-full bg-black/35 hover:bg-black/60 border border-white/20 hover:border-white/40 font-mono text-xs font-bold text-white py-1.5 px-3 rounded-[3px] flex items-center justify-center gap-1.5 cursor-pointer transition-all"
-                        >
-                          <SlidersHorizontal className="w-3.5 h-3.5 text-[#43E600]" />
-                          Editar
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-
-              {/* Botón Agregar Card: que solo tenga símbolo "+" y el texto agregar */}
-              <button
-                type="button"
-                onClick={() => {
-                  setEditingVoiceId(null);
-                  setNewVoiceName("");
-                  setNewVoiceDescription("");
-                  setNewVoiceGender("femenino");
-                  setNewVoiceIsPublic(false);
-                  setIsRecording(false);
-                  setRecordTimer(0);
-                  setShowNewVoiceModal(true);
-                }}
-                className="p-6 rounded-[6px] border border-dashed border-white/25 hover:border-[#45AFFF] bg-black/15 hover:bg-black/30 transition-all flex flex-col items-center justify-center gap-2 cursor-pointer group min-h-[180px] text-center"
-              >
-                <div className="w-9 h-9 rounded-full border border-dashed border-white/35 group-hover:border-[#45AFFF] group-hover:scale-105 flex items-center justify-center transition-all bg-black/20 text-white/50 group-hover:text-[#45AFFF] text-xl font-bold">
-                  +
-                </div>
-                <span className="font-sans font-bold text-sm text-white/75 group-hover:text-white uppercase tracking-wider">
-                  agregar
-                </span>
-                <span className="text-[10px] font-mono text-white/40">Grabar voz de usuario</span>
-              </button>
-            </div>
-          </div>
-        )}
-
-      </div>
+       </div>
 
       {/* ==================== POPUP MODAL: CONFIGURAR NUEVA VOZ ==================== */}
       {showNewVoiceModal && (

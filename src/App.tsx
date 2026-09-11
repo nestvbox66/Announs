@@ -35,6 +35,15 @@ export default function App() {
   const [currentView, setCurrentView] = useState<string>("hub"); // Default is Hub View ("Hub del Usuario") to showcase the custom mock login first
   const [currentState, setCurrentState] = useState<FlightState>(FlightState.NoIniciado); // Default is No Iniciado for the refined flow
   const [isLoggedIn, setIsLoggedIn] = useState<boolean>(false); // Start prototype in Disconnected Mode (Estado Desconectado) as requested
+  // Sidebar colapsada por defecto al entrar a "Vuelo Actual" (más espacio al vuelo).
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
+  const isVueloView = currentView === "vuelo";
+
+  useEffect(() => {
+    if (currentView === "vuelo") {
+      setSidebarCollapsed(true);
+    }
+  }, [currentView]);
   
   // Storage states
   const [vuelos, setVuelos] = useState<VueloReciente[]>(initialVuelos);
@@ -182,18 +191,8 @@ export default function App() {
     if (realData) {
       setSimBrief(realData);
     } else {
-      setSimBrief({
-        username: "capitán_msfs2024",
-        nombrePiloto: "N. Sassano",
-        vueloCodigo: "AR1842",
-        origen: "SABE",
-        destino: "SACO",
-        aerolinea: "Aerolíneas Argentinas",
-        avion: "Boeing 737-800 NG",
-        cruisingAltitude: "FL320 (32,000 pies)",
-        blockTime: "75 minutos",
-        pasajerosCount: 142
-      });
+      // Sin plan real: volver al estado vacío (no hay vuelo de demo).
+      setSimBrief(defaultSimBrief);
     }
     // Trigger achievement "Primer Oficial de SimBrief"
     setLogros(prev => prev.map(l => l.id === "l-4" ? { ...l, unlocked: true, fechaDesbloqueo: "05 Jun 2026" } : l));
@@ -223,6 +222,8 @@ export default function App() {
         activeFlightCode={simBrief.vueloCodigo}
         copilotVolume={copilotVolume}
         isLoggedIn={isLoggedIn}
+        collapsed={isVueloView ? sidebarCollapsed : false}
+        onToggleCollapsed={isVueloView ? () => setSidebarCollapsed(v => !v) : undefined}
       />
 
       {/* 2. RIGHT MAIN CONTENT FRAMEWORK WITH OVERFLOW AND SMOOTH PADDING */}

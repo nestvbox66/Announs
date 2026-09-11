@@ -3,6 +3,7 @@ import { FlightContext } from "../../services/FlightContext";
 import { AnnouncementQueue } from "../../services/AnnouncementQueue";
 import { EventContextBuilder } from "../../eventContext/EventContextBuilder";
 import { EventHandler } from "./EventHandler";
+import { fileLogger } from "../../services/FileLogger";
 
 export class AnnouncementEventHandler implements EventHandler {
   private queue: AnnouncementQueue;
@@ -12,7 +13,7 @@ export class AnnouncementEventHandler implements EventHandler {
     this.queue = queue;
   }
 
-  handle(event: EventDefinition, context: FlightContext): Promise<void> {
+  async handle(event: EventDefinition, context: FlightContext): Promise<void> {
     this.handlerCallId++;
     const callId = this.handlerCallId;
 
@@ -24,16 +25,25 @@ export class AnnouncementEventHandler implements EventHandler {
     console.log("AnnouncementEventHandler");
     console.log("Event: " + event.eventKey);
 
-    const built = EventContextBuilder.build(event.eventKey, context);
+    const built = await EventContextBuilder.build(event.eventKey, context);
     const flight = context.getFlight();
 
+    const params = {
+      eventKey: built.eventKey,
+      flightId: flight.flightId,
+      languageId: flight.captainPrimaryLang,
+      eventData: built.eventData,
+    };
+    console.log("[AnnouncementEventHandler] Encargando a la cola (payload):", params);
+    fileLogger.log('[AnnouncementEventHandler] enqueue', {
+      eventKey: params.eventKey,
+      flightId: params.flightId,
+      languageId: params.languageId,
+      eventDataKeys: params.eventData ? Object.keys(params.eventData) : [],
+    });
+
     return this.queue
-      .enqueue({
-        eventKey: built.eventKey,
-        flightId: flight.flightId,
-        languageId: flight.captainPrimaryLang,
-        eventData: built.eventData,
-      })
+      .enqueue(params)
       .then(() => undefined);
   }
 }

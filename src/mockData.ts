@@ -341,17 +341,19 @@ export const pasajerosMock: Pasajero[] = [
   }
 ];
 
+// Sin vuelo por defecto: el usuario debe importar un plan de SimBrief (o cargar
+// un vuelo guardado) antes de poder iniciar un vuelo. No hay "vuelo de demo".
 export const defaultSimBrief: SimBriefData = {
-  username: "capitán_msfs2024",
-  nombrePiloto: "N. Sassano",
-  vueloCodigo: "AR1842",
-  origen: "SABE",
-  destino: "SACO",
-  aerolinea: "Aerolíneas Argentinas",
-  avion: "Boeing 737-800",
-  cruisingAltitude: "FL320 (32,000 pies)",
-  blockTime: "75 minutos",
-  pasajerosCount: 142
+  username: "",
+  nombrePiloto: "",
+  vueloCodigo: "",
+  origen: "",
+  destino: "",
+  aerolinea: "",
+  avion: "",
+  cruisingAltitude: "",
+  blockTime: "",
+  pasajerosCount: 0
 };
 
 export const defaultVocesConfig: ConfigVoces = {

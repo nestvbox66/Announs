@@ -1,8 +1,26 @@
+# Dependencies
 node_modules/
-build/
+src-tauri/target/
+
+# Build outputs
 dist/
+build/
 coverage/
-.DS_Store
-*.log
+
+# Environment
+.env
+.env.local
+.env.*.local
 .env*
 !.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

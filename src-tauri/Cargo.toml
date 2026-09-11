@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.1.0"
+version = "0.6.0-alpha"
 description = "A Tauri App"
 authors = ["you"]
 license = ""
@@ -17,9 +17,20 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2.6.2", features = [] }
 
+[features]
+# La feature `simconnect` compila el puente real a MSFS. Requiere:
+#   1. MSFS SDK instalado (SimConnect.h / SimConnect.lib)
+#   2. LLVM/libclang (bindgen) — setear LIBCLANG_PATH al directorio de libclang.dll
+# Por defecto se usa el stub sintético para que el proyecto compile sin esos requisitos.
+default = []
+simconnect = ["dep:simconnect-sdk"]
+
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-log = "2"
+# Fase 3 — SimConnect. `simconnect-sdk` (opcional) se habilita con la feature `simconnect`.
+# Build real: `cargo build --features simconnect` (Windows + MSFS SDK + libclang).
+simconnect-sdk = { version = "0.2", optional = true, features = ["derive"] }
