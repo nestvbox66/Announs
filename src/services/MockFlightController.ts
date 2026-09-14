@@ -491,6 +491,13 @@ export class MockFlightController implements FlightController {
   }
 
   private buildSnapshot(): TelemetrySnapshot {
+    // Mock de RADIO HEIGHT: solo válida < ~2500 ft AGL (0 = fuera de rango)
+    const radioHeight = this.state.altitude > 0 && this.state.altitude <= 2500 ? this.state.altitude : 0;
+    const gearDown =
+      this.state.phase === FlightPhase.APPROACH ||
+      this.state.phase === FlightPhase.LANDING ||
+      this.state.phase === FlightPhase.TAXI_IN ||
+      this.state.phase === FlightPhase.AT_GATE;
     return {
       altitude: this.state.altitude,
       groundspeed: this.state.groundspeed,
@@ -515,6 +522,8 @@ export class MockFlightController implements FlightController {
       windSpeed: 25,
       windDirection: 270,
       nextWaypoint: this.state.phase === FlightPhase.CRUISE ? "GBE" : undefined,
+      radioHeight,
+      gearDown,
     };
   }
 

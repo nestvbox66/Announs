@@ -67,6 +67,10 @@ pub struct TelemetrySnapshot {
     pub wind_direction: Option<f64>,
     #[serde(rename = "nextWaypoint")]
     pub next_waypoint: Option<String>,
+    #[serde(rename = "radioHeight")]
+    pub radio_height: Option<f64>,
+    #[serde(rename = "gearDown")]
+    pub gear_down: Option<bool>,
 }
 
 // ── Implementación real (feature "simconnect") ──────────────────────────
@@ -88,6 +92,10 @@ mod sim {
     #[allow(dead_code)]
     struct TelemetryData {
         // ── CAMPOS BÁSICOS (siempre activos) ──
+        // NOTA altitud: PLANE ALTITUDE = altitud verdadera MSL. El panel del sim
+        // muestra INDICATED (baro): diferencias de cientos de pies con QNH ≠ STD
+        // o atmósfera no ISA son normales. No cambiar de SimVar (ver RuleEngine
+        // getCruiseTransitionDetail); la tolerancia ±500 ft lo absorbe.
         #[simconnect(name = "PLANE ALTITUDE", unit = "feet")]
         altitude: f64,
         #[simconnect(name = "GROUND VELOCITY", unit = "knots")]
@@ -113,6 +121,13 @@ mod sim {
         parking_brake: f64,
         #[simconnect(name = "CABIN SEATBELTS ALERT SWITCH")]
         seatbelt_switch: f64,
+        // NOTA seatbelt (diagnóstico inversión reportada): según el SDK de MSFS
+        // (Aircraft System Variables), `CABIN SEATBELTS ALERT SWITCH` es
+        // "True if the Seatbelts switch is on" (Bool). Por eso el mapeo es
+        // `seatbelt_on = (raw != 0.0)` SIN negar. Si algún avión muestra el
+        // valor invertido, es comportamiento específico de ese avión (p. ej.
+        // lógicas custom AUTO/OFF por LVAR) y debe confirmarse con el log
+        // `seatbelt_raw` de to_snapshot antes de tocar el mapeo.
         #[simconnect(name = "ATC ON PARKING SPOT")]
         atc_on_parking_spot: f64,
         #[simconnect(name = "ATC CLEARED TAKEOFF")]
@@ -125,10 +140,25 @@ mod sim {
         zulu_time: f64,
         #[simconnect(name = "PLANE IN PARKING STATE")]
         plane_in_parking_state: f64,
+        // ── FASE DESCENT: radio altura (válida solo < ~2500 ft AGL) y tren ──
+        #[simconnect(name = "RADIO HEIGHT", unit = "feet")]
+        radio_height: f64,
+        #[simconnect(name = "GEAR HANDLE POSITION")]
+        gear_handle_position: f64,
+        // ── Descenso / noche / restante (reactivados: sin VERTICAL SPEED el
+        // descenso nunca se detecta; sin LOCAL TIME siempre es "de noche") ──
+        #[simconnect(name = "VERTICAL SPEED", unit = "feet per minute")]
+        vertical_speed: f64,
+        #[simconnect(name = "LOCAL TIME", unit = "seconds")]
+        local_time: f64,
+        // "ESTIMATED CRUISE TIME REMAINING" NO es un SimVar válido (provoca
+        // SimConnectException(7) NAME_UNRECOGNIZED y mata TODA la suscripción:
+        // objects=0, emits=0). El tiempo restante se calcula con SimBrief, no
+        // con SimConnect. NO reactivar sin validar el nombre en el SDK.
+        // #[simconnect(name = "ESTIMATED CRUISE TIME REMAINING", unit = "seconds")]
+        // remaining_time: f64,
 
         // ── TODOS LOS DEMÁS COMENTADOS ──
-        // #[simconnect(name = "VERTICAL SPEED", unit = "feet per minute")]
-        // vertical_speed: f64,
         // #[simconnect(name = "AIRSPEED INDICATED", unit = "knots")]
         // indicated_airspeed: f64,
         // #[simconnect(name = "AIRSPEED TRUE", unit = "knots")]
@@ -151,10 +181,6 @@ mod sim {
         // sim_phase: f64,
         // #[simconnect(name = "ZULU TIME", unit = "seconds")]
         // zulu_time: f64,
-        // #[simconnect(name = "LOCAL TIME", unit = "seconds")]
-        // local_time: f64,
-        // #[simconnect(name = "ESTIMATED CRUISE TIME REMAINING", unit = "seconds")]
-        // remaining_time: f64,
         // #[simconnect(name = "AMBIENT TEMPERATURE", unit = "celsius")]
         // temperature: f64,
         // #[simconnect(name = "AMBIENT WIND VELOCITY", unit = "knots")]
@@ -168,14 +194,16 @@ mod sim {
     impl TelemetryData {
         fn to_snapshot(&self) -> TelemetrySnapshot {
             // Log para verificar que las nuevas variables llegan correctamente (criterio de aceptación)
+            // Incluye seatbelt_raw para diagnosticar inversiones reportadas
+            // (SDK: 1 = cinturones ON; ver nota en `seatbelt_switch`).
             println!(
-                "[simconnect] zulu_time: {}, parking: {}, on_ground: {}",
-                self.zulu_time, self.plane_in_parking_state, self.sim_on_ground
+                "[simconnect] zulu_time: {}, parking: {}, on_ground: {}, seatbelt_raw: {}, vspeed_fpm: {}, local_time: {}",
+                self.zulu_time, self.plane_in_parking_state, self.sim_on_ground, self.seatbelt_switch, self.vertical_speed, self.local_time
             );
             TelemetrySnapshot {
                 altitude: self.altitude,
                 groundspeed: self.groundspeed,
-                vertical_speed: 0.0,
+                vertical_speed: self.vertical_speed,
                 heading: self.heading,
                 latitude: self.latitude,
                 longitude: self.longitude,
@@ -199,12 +227,15 @@ mod sim {
                 pushback_active: None,
                 sim_phase: None,
                 zulu_time: Some(self.zulu_time),
-                local_time: None,
+                local_time: Some(self.local_time),
+                // Sin SimVar válido (ver arriba): se mantiene None a propósito.
                 remaining_time: None,
                 temperature: None,
                 wind_speed: None,
                 wind_direction: None,
                 next_waypoint: None,
+                radio_height: Some(self.radio_height),
+                gear_down: Some(self.gear_handle_position == 1.0),
             }
         }
     }
@@ -327,9 +358,11 @@ mod sim {
         let mut last_emit = Instant::now();
         let mut object_count: u64 = 0;
         let mut emit_count: u64 = 0;
+        let mut consec_errors: u64 = 0;
         while running.load(Ordering::SeqCst) {
             match client.get_next_dispatch() {
                 Ok(Some(Notification::Object(data))) => {
+                    consec_errors = 0;
                     object_count += 1;
                     match TelemetryData::try_from(&data) {
                         Ok(td) => {
@@ -373,11 +406,17 @@ mod sim {
                 Ok(Some(Notification::Quit)) => break,
                 Ok(_) => {}
                 Err(e) => {
-                    // Un Err acá rompe el bucle y detiene la emisión en silencio
-                    // (el status sigue "Conectado a MSFS"). Log para detectarlo.
-                    println!("[simconnect] ❌ error dispatch: {e:?}");
-                    log::error!("[simconnect] error dispatch: {:?}", e);
-                    break;
+                    // Un Err (p. ej. SimConnectException por un SimVar inválido)
+                    // NO rompe el bucle: se sigue intentando para no detener la
+                    // emisión en silencio con status "Conectado". El hilo solo
+                    // termina por Quit o por disconnect() (running=false).
+                    // Log con throttle para no inundar (cada ~5s).
+                    consec_errors += 1;
+                    if consec_errors == 1 || consec_errors % 300 == 0 {
+                        println!("[simconnect] ❌ error dispatch (x{consec_errors}): {e:?}");
+                        log::error!("[simconnect] error dispatch (x{}): {:?}", consec_errors, e);
+                    }
+                    continue;
                 }
             }
             thread::sleep(Duration::from_millis(16));
@@ -482,6 +521,9 @@ mod sim {
             wind_speed: Some(25.0),
             wind_direction: Some(270.0),
             next_waypoint: Some("GBE".to_string()),
+            // DESCENT: en crucero (35000 ft) el radioaltímetro no da lectura válida (>2500 ft AGL)
+            radio_height: Some(0.0),
+            gear_down: Some(false),
         }
     }
 

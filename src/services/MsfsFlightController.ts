@@ -88,7 +88,9 @@ export const SIMVAR_LIST = [
   // Tiempo
   "ZULU_TIME",
   "LOCAL_TIME",
-  "ESTIMATED_CRUISE_TIME_REMAINING",
+  // "ESTIMATED CRUISE TIME REMAINING" NO es un SimVar válido: suscribirlo en
+  // el backend provoca NAME_UNRECOGNIZED(7) y corta TODA la telemetría.
+  // "ESTIMATED_CRUISE_TIME_REMAINING",
 
   // Clima
   "AMBIENT_TEMPERATURE",
@@ -97,11 +99,40 @@ export const SIMVAR_LIST = [
 
   // Ruta (opcional)
   "FLIGHT_PLAN_WAYPOINT_NAME",
+
+  // Descenso / aproximación (fase DESCENT)
+  "RADIO HEIGHT",
+  "GEAR HANDLE POSITION",
+  // Compat: también con guiones bajos
+  "RADIO_HEIGHT",
+  "GEAR_HANDLE_POSITION",
 ] as const;
 
 // ── 2. Mapeo a TelemetrySnapshot ────────────────────────────────────────
 
 export function mapSimVarsToTelemetry(simVars: Record<string, any>): TelemetrySnapshot {
+  // Diagnóstico seatbelt (inversión reportada): el SimVar canónico es
+  // `CABIN SEATBELTS ALERT SWITCH` (SDK MSFS: True = cinturones ON, Bool).
+  // Este mapeo legacy usa `SEATBELT_SWITCH === 1` con la misma polaridad.
+  // NO negar sin evidencia: confirmar con estos logs + `seatbelt_raw` del
+  // backend Rust (path vivo: snapshot Rust → evento Tauri `telemetry`).
+  // NOTA: esta función hoy no es el path vivo (solo definición; el backend
+  // emite TelemetrySnapshot directo). Se mantiene por compatibilidad/tests.
+  console.log('[MsfsFlightController] seatbelt raw value:', {
+    simVarName: 'SEATBELT_SWITCH',
+    rawValue: simVars['SEATBELT_SWITCH'],
+    mappedTo: simVars['SEATBELT_SWITCH'] === 1,
+  });
+  // Diagnóstico altitud (discrepancia reportada app 23.100 vs sim 23.600 ft):
+  // la app usa PLANE ALTITUDE (verdadera MSL); el panel muestra INDICATED
+  // (baro). Con QNH ≠ STD o atmósfera no ISA difieren cientos de pies: normal.
+  // Conclusión: NO cambiar de SimVar; la tolerancia ±500 ft lo absorbe.
+  console.log('[MsfsFlightController] Altitude vars:', {
+    PLANE_ALTITUDE: simVars['PLANE ALTITUDE'] ?? simVars['PLANE_ALTITUDE'],
+    INDICATED_ALTITUDE: simVars['INDICATED ALTITUDE'] ?? simVars['INDICATED_ALTITUDE'],
+    PRESSURE_ALTITUDE: simVars['PRESSURE ALTITUDE'] ?? simVars['PRESSURE_ALTITUDE'],
+    PLANE_ALT_ABOVE_GROUND: simVars['PLANE ALT ABOVE GROUND'] ?? simVars['PLANE_ALT_ABOVE_GROUND'],
+  });
   return {
     // Básicos
     altitude: simVars["PLANE_ALTITUDE"] ?? 0,
@@ -152,6 +183,10 @@ export function mapSimVarsToTelemetry(simVars: Record<string, any>): TelemetrySn
 
     // Ruta
     nextWaypoint: simVars["FLIGHT_PLAN_WAYPOINT_NAME"] ?? undefined,
+
+    // Descenso / aproximación (RADIO HEIGHT solo válida < ~2500 ft AGL)
+    radioHeight: simVars["RADIO HEIGHT"] ?? simVars["RADIO_HEIGHT"] ?? 0,
+    gearDown: (simVars["GEAR HANDLE POSITION"] ?? simVars["GEAR_HANDLE_POSITION"]) === 1,
   };
 }
 

@@ -98,6 +98,10 @@ export class NarrativeOrchestrator {
 
     queue.on("completed", this.handleAnnouncementCompleted);
     queue.on("error", this.handleAnnouncementError);
+
+    // El paso WAIT_CONDITION debe esperar indefinidamente hasta que se cumpla
+    // la condición o el usuario intervenga manualmente. No hay timeout automático.
+    console.log('[NarrativeOrchestrator] ✅ Timeout de transición revertido. Los pasos WAIT_CONDITION esperan indefinidamente.');
   }
 
   on(event: string, callback: (payload: any) => void): () => void {
@@ -170,14 +174,26 @@ export class NarrativeOrchestrator {
     // AFTER_COMPLETION avanza al completarse el audio. WAIT_CONDITION (ej.
     // preflight_capt_delay_parked opcional) también debe avanzar tras el audio,
     // de lo contrario BOARDING queda bloqueada y "Cerrar Puertas" nunca se habilita.
+    // IMMEDIATE (P1, p. ej. climb_crew_upcoming_service en CRUISE) también avanza
+    // al completarse el audio; antes se ignoraba y la narrativa quedaba
+    // bloqueada en modo normal.
     // En modo pruebas (`waitingForAudio`) cualquier transición avanza al completar el audio.
     if (
       step.transition === NarrativeTransition.AFTER_COMPLETION ||
       step.transition === NarrativeTransition.AFTER_DELAY ||
       step.transition === NarrativeTransition.WAIT_CONDITION ||
+      step.transition === NarrativeTransition.IMMEDIATE ||
       this.waitingForAudio
     ) {
       console.log(`[NarrativeOrchestrator] ✅ Audio completado para: ${step.eventKey}`);
+      // P1: confirmación de avance (nextStep capturado ANTES de avanzar).
+      try {
+        console.log('[NarrativeOrchestrator] ✅ Avanzando narrativa para transición:', {
+          eventKey: step.eventKey,
+          transition: NarrativeTransition[step.transition],
+          nextStep: this.narrativeEngine.getNextStep()?.eventKey ?? null,
+        });
+      } catch {}
       // Log de auditoría WAIT_CONDITION
       if (step.transition === NarrativeTransition.WAIT_CONDITION) {
         console.log('[NarrativeEngine] Estado del paso:', {
@@ -194,34 +210,50 @@ export class NarrativeOrchestrator {
 
   // Si el audio falla mientras se espera el avance manual (generación o
   // reproducción), se avanza igualmente con una advertencia para no bloquear
-  // la narrativa. En modo normal `waitingForAudio` es false y se ignora.
+  // la narrativa. En modo normal `waitingForAudio` es false y se ignora,
+  // SALVO para pasos WAIT_CONDITION opcionales (P0-3): un opcional sin audio
+  // disponible (p. ej. evento nuevo sin audio_raw ni prompt IA publicado, o
+  // captain_special_event sin configurar) NO debe bloquear la fase.
   private handleAnnouncementError = (msg?: string): void => {
     const step = this.narrativeEngine.currentStep();
     const isDelayOptionalStep = !!step && this.isDelayDetectionWaitStep(step) && step.optional;
+    // P0-3: generalización — cualquier WAIT_CONDITION opcional (delay,
+    // phase_transition, cruise_progress u otros) avanza ante error de audio.
+    // `isDelayOptionalStep` se conserva para el motivo de avance específico.
+    const isOptionalWaitStep =
+      !!step &&
+      (step as any).transition === NarrativeTransition.WAIT_CONDITION &&
+      step.optional === true;
 
-    if (!this.waitingForAudio && !isDelayOptionalStep) return;
+    if (!this.waitingForAudio && !isOptionalWaitStep) return;
     if (!msg) return;
 
     console.warn(
-      `[NarrativeOrchestrator] Error de audio durante ${this.waitingForAudio ? "avance manual" : "paso de demora opcional"}: ${msg}`
+      `[NarrativeOrchestrator] Error de audio durante ${this.waitingForAudio ? "avance manual" : "paso opcional en espera"}: ${msg}`
     );
     fileLogger.warn('[NarrativeOrchestrator] Error de audio', {
       msg,
       waitingForAudio: this.waitingForAudio,
       step: step?.eventKey ?? null,
       isDelayOptionalStep,
+      isOptionalWaitStep,
     });
-    // Si el paso de demora opcional no tiene audio disponible (p. ej. evento
-    // nuevo sin audio_raw ni prompt IA publicado), NO bloquear la fase: se
+    // Si el paso opcional no tiene audio disponible, NO bloquear la fase: se
     // omite y la narrativa continúa (mismo criterio que cerrar puertas con
     // delay opcional pendiente).
-    if (isDelayOptionalStep) {
+    if (isOptionalWaitStep) {
       this.emit("step:skipped", {
         step,
         index: this.narrativeEngine.currentIndex(),
       } as StepSkippedEvent);
     }
-    this.advanceNarrative(isDelayOptionalStep ? "delay-step-no-audio" : "announcement-error");
+    this.advanceNarrative(
+      isDelayOptionalStep
+        ? "delay-step-no-audio"
+        : isOptionalWaitStep
+          ? "optional-wait-step-no-audio"
+          : "announcement-error"
+    );
   };
 
   executeCurrentStep(reason?: string, force = false): void {
@@ -376,6 +408,13 @@ export class NarrativeOrchestrator {
       this.recordAnchor(step, 'evaluando', gateOrigin, true, shouldExecute);
       if (!shouldExecute) {
         this.recordAnchor(step, 'bloqueado', gateOrigin, true, false);
+        // Adelantamiento: un transversal opcional no cumplido (p. ej.
+        // common_crew_seatbelt) no debe retener un ancla posterior ya cumplida
+        // (p. ej. transition_to_cruise). Solo salta pasos opcionales.
+        if (step.optional && this.maybeOvertakeToAnchor()) {
+          this.executeCurrentStep("overtake-to-anchor");
+          return;
+        }
         this.scheduleWaitConditionPoll(step);
         return;
       }
@@ -427,6 +466,27 @@ export class NarrativeOrchestrator {
       console.log("reason: step-disabled");
 
       this.advanceNarrative("step-disabled");
+      return;
+    }
+
+    // P0-2: skip explícito del evento especial no configurado por el usuario.
+    // Va ANTES de handleStepActivation para que ningún subtipo WAIT lo
+    // dispatchee (un dispatch sin texto fallaría en audio-get y bloquearía la
+    // fase). `force` (avance manual explícito) sí lo permite.
+    if (!force && this.shouldSkipUnconfiguredSpecialEvent(step)) {
+      const flight: any = this.flightContext?.getFlight?.() ?? {};
+      console.log(`[NarrativeOrchestrator] ⏩ Omitiendo ${step.eventKey}: evento especial no configurado por el usuario (specialEventEnabled=${String(flight?.specialEventEnabled ?? false)}, texto=${flight?.specialEvent ? "presente" : "vacío"})`);
+      fileLogger.log('[NarrativeOrchestrator] Evento especial no configurado, paso omitido', {
+        eventKey: step.eventKey,
+        optional: step.optional,
+        specialEventEnabled: flight?.specialEventEnabled ?? false,
+        hasText: typeof flight?.specialEvent === "string" && flight.specialEvent.trim() !== "",
+      });
+      this.emit("step:skipped", {
+        step,
+        index: this.narrativeEngine.currentIndex(),
+      } as StepSkippedEvent);
+      this.advanceNarrative("special-event-not-configured");
       return;
     }
 
@@ -794,6 +854,14 @@ export class NarrativeOrchestrator {
       try {
         const ctx: any = this.flightContext;
         const tel: any = ctx?.getTelemetry?.() ?? {};
+        console.log('[NarrativeOrchestrator] Evaluando fase:', {
+          phase: this.getCurrentPhase(),
+          currentStep: step.eventKey,
+          transition: NarrativeTransition[step.transition],
+          blocking: (step as any).blocking,
+          optional: step.optional,
+          isCompleted: this.narrativeEngine.isStepCompleted(step.eventKey),
+        });
         console.log(`[NarrativeOrchestrator] WAIT_CONDITION phase_transition evaluado ${step.eventKey}: ${shouldExecute ? "TRUE" : "FALSE"}`, {
           eventKey: step.eventKey,
           optional: step.optional,
@@ -807,6 +875,54 @@ export class NarrativeOrchestrator {
       } catch {}
       if (!shouldExecute) {
         this.recordAnchor(step, 'bloqueado', 'handleStepActivation', true, false);
+        // Adelantamiento: un transversal opcional no cumplido (p. ej.
+        // common_crew_seatbelt) no debe retener un ancla posterior ya cumplida
+        // (p. ej. transition_to_cruise). Solo salta pasos opcionales.
+        if (step.optional && this.maybeOvertakeToAnchor()) {
+          this.executeCurrentStep("overtake-to-anchor");
+          return;
+        }
+        this.scheduleWaitConditionPoll(step, eventDefinition);
+        return;
+      }
+      this.executeStep(step, eventDefinition, "auto");
+      return;
+    }
+
+    // P0-1: WAIT_CONDITION genérico (p. ej. cruise_progress). Las vías de
+    // delay_detection y phase_transition ya retornaron arriba y NO se tocan:
+    // aquí solo llegan los demás tipos, que antes se dispatcheaban sin
+    // evaluar precondiciones (caída a polling → dispatch inmediato).
+    if (step.transition === NarrativeTransition.WAIT_CONDITION) {
+      const shouldExecute = this.evaluateGenericWaitCondition(step);
+      this.logWaitConditionEvaluation(step, shouldExecute);
+      console.log(`[NarrativeOrchestrator] WAIT_CONDITION genérico evaluado ${step.eventKey}: ${shouldExecute ? "TRUE" : "FALSE"}`, {
+        eventKey: step.eventKey,
+        optional: step.optional,
+        preconditions: (step as any).preconditions ?? null,
+        restrictions: (step as any).restrictions ?? null,
+        scheduler_rule: (step as any).scheduler_rule ?? null,
+      });
+      if (!shouldExecute) {
+        // Causa definitiva o restricción activa (p. ej. flota/duración que no
+        // cambiará, o exclude_if_night de noche): omitir el opcional en vez
+        // de esperar. El progreso cruise SÍ puede cambiar → polling.
+        // (Un diurno excluido de noche se omite: esperar el alba bloquearía
+        // la fase en vuelos cortos; en vuelos largos diurnos se ejecuta.)
+        if (step.optional && (this.isDefinitivelyInapplicable(step) || this.isRestrictedOut(step))) {
+          console.log(`[NarrativeOrchestrator] ⏩ Omitiendo ${step.eventKey}: opcional no aplicable/excluido en este vuelo`);
+          fileLogger.log('[NarrativeOrchestrator] Paso opcional no aplicable omitido', { eventKey: step.eventKey });
+          this.emit("step:skipped", {
+            step,
+            index: this.narrativeEngine.currentIndex(),
+          } as StepSkippedEvent);
+          this.advanceNarrative("optional-not-applicable");
+          return;
+        }
+        if (step.optional && this.maybeOvertakeToAnchor()) {
+          this.executeCurrentStep("overtake-to-anchor");
+          return;
+        }
         this.scheduleWaitConditionPoll(step, eventDefinition);
         return;
       }
@@ -833,7 +949,7 @@ export class NarrativeOrchestrator {
         this.listenForEvent(step, eventDefinition);
         break;
       case "callback":
-        this.registerCallback(step, eventDefinition);
+        this.registerCallback(step, eventDefinition, "callback");
         break;
       case "manual":
         this.registerManualStep(step);
@@ -905,6 +1021,13 @@ export class NarrativeOrchestrator {
     const delayOk: boolean | null = isDelayStep ? this.evaluateWaitCondition(step) : null;
     const isPhaseStep = !isDelayStep && this.isPhaseTransitionWaitStep(step);
     const phaseOk: boolean | null = isPhaseStep ? this.evaluatePhaseTransitionStep(step) : null;
+    // P0-1: WAIT genérico (ni delay ni phase). Se evalúa una sola vez para el
+    // log y el guard definitivo de abajo.
+    const isGenericWaitStep =
+      !isDelayStep &&
+      !isPhaseStep &&
+      (step as any).transition === NarrativeTransition.WAIT_CONDITION;
+    const genericOk: boolean | null = isGenericWaitStep ? this.evaluateGenericWaitCondition(step) : null;
 
     // ── LOG de rastreo en CADA llamada a executeStep (muestra el caller) ──
     try {
@@ -917,6 +1040,8 @@ export class NarrativeOrchestrator {
         eventKey: step.eventKey,
         isDelayDetectionWaitStep: isDelayStep,
         isDelayed: delayOk === null ? "N/A" : delayOk,
+        isGenericWaitStep,
+        genericWaitOk: genericOk === null ? "N/A" : genericOk,
         mode: this.isTestMode ? "manual" : "auto",
         phase: this.getCurrentPhase(),
         zuluTime: tel.zuluTime ?? null,
@@ -953,6 +1078,53 @@ export class NarrativeOrchestrator {
         return;
       }
       console.log(`[NarrativeOrchestrator] ✅ WAIT_CONDITION phase_transition ${step.eventKey}: condición cumplida, procede el dispatch`);
+    }
+
+    // ── GUARD P0-2 (defensa): nunca dispatchear el evento especial sin
+    // configuración de usuario, ni siquiera por llamadas directas a
+    // executeStep (p. ej. Scheduler.triggerSpecialEvent). El avance manual
+    // explícito (mode "manual") sí se permite.
+    if (isGenericWaitStep && mode !== "manual" && this.shouldSkipUnconfiguredSpecialEvent(step)) {
+      const cur = this.narrativeEngine.currentStep();
+      if (cur && cur.eventKey === step.eventKey) {
+        console.log(`[NarrativeOrchestrator] ⏩ Omitiendo ${step.eventKey} en executeStep: evento especial no configurado`);
+        fileLogger.log('[NarrativeOrchestrator] Evento especial no configurado (executeStep), paso omitido', { eventKey: step.eventKey });
+        this.emit("step:skipped", {
+          step,
+          index: this.narrativeEngine.currentIndex(),
+        } as StepSkippedEvent);
+        this.advanceNarrative("special-event-not-configured");
+      } else {
+        console.warn(`[NarrativeOrchestrator] ⛔ Ignorando dispatch directo de ${step.eventKey}: no configurado y no es el paso actual`);
+      }
+      return;
+    }
+
+    // ── GUARD P0-1 (definitivo) para WAIT_CONDITION genérico: sin
+    // precondiciones cumplidas no hay dispatch (misma filosofía que los
+    // guards de delay_detection y phase_transition). Solo modo normal y no
+    // manual; en pruebas se permite el avance paso a paso.
+    if (isGenericWaitStep && !this.isTestMode && mode !== "manual") {
+      if (genericOk !== true) {
+        const cur = this.narrativeEngine.currentStep();
+        const isCurrent = !!cur && cur.eventKey === step.eventKey;
+        if (step.optional && (this.isDefinitivelyInapplicable(step) || this.isRestrictedOut(step)) && isCurrent) {
+          console.log(`[NarrativeOrchestrator] ⏩ Omitiendo ${step.eventKey} en executeStep: opcional definitivamente no aplicable`);
+          fileLogger.log('[NarrativeOrchestrator] Paso opcional no aplicable omitido (executeStep)', { eventKey: step.eventKey });
+          this.emit("step:skipped", {
+            step,
+            index: this.narrativeEngine.currentIndex(),
+          } as StepSkippedEvent);
+          this.advanceNarrative("optional-not-applicable");
+          return;
+        }
+        console.warn(`[NarrativeOrchestrator] ⛔ Bloqueando dispatch de ${step.eventKey} (WAIT_CONDITION genérico=false). Solo se ejecuta al cumplirse las precondiciones.`);
+        // Programar re-evaluación solo si es el paso actual (las llamadas
+        // directas fuera de secuencia no deben programar polls).
+        if (isCurrent) this.scheduleWaitConditionPoll(step, eventDefinition);
+        return;
+      }
+      console.log(`[NarrativeOrchestrator] ✅ WAIT_CONDITION genérico ${step.eventKey}: condición cumplida, procede el dispatch`);
     }
 
     console.log("[NARRATIVE]");
@@ -1011,10 +1183,49 @@ export class NarrativeOrchestrator {
 
   // detection_strategy === "event_listener" / "callback": espera un evento externo.
   private listenForEvent(step: NarrativeStep, eventDefinition: EventDefinition): void {
-    this.registerCallback(step, eventDefinition);
+    this.registerCallback(step, eventDefinition, "event_listener");
   }
 
-  private registerCallback(step: NarrativeStep, eventDefinition: EventDefinition): void {
+  /**
+   * Indica si existe un emisor capaz de resolver el paso (timer programado
+   * con ese evento, p. ej. el timer del evento especial). Sin emisor, un paso
+   * opcional con event_listener/callback esperaría indefinidamente porque nada
+   * llamará a notifyExternalEvent.
+   */
+  private hasRegisteredEmitter(stepKey: string): boolean {
+    try {
+      const tm: any = (this as any).timerManager;
+      if (typeof tm?.getPendingTimers !== "function") return false;
+      const pending: Array<{ event?: string }> = tm.getPendingTimers() ?? [];
+      return pending.some((t) => t?.event === stepKey);
+    } catch {
+      return false;
+    }
+  }
+
+  private registerCallback(step: NarrativeStep, eventDefinition: EventDefinition, strategy = "event_listener"): void {
+    const hasEmitter = this.hasRegisteredEmitter(step.eventKey);
+    const action = hasEmitter ? 'esperando' : (step.optional && !this.isTestMode ? 'saltando' : 'esperando');
+    console.log('[NarrativeOrchestrator] Evento event_listener:', {
+      eventKey: step.eventKey,
+      strategy,
+      optional: step.optional,
+      hasEmitter,
+      action,
+    });
+    // Opcional sin emisor: saltar para no bloquear la secuencia (p. ej.
+    // captain_special_event sin texto configurado, cuyo timer nunca se
+    // programa). En modo pruebas se espera (avance manual disponible).
+    if (!hasEmitter && step.optional && !this.isTestMode) {
+      console.log(`[NarrativeOrchestrator] ⏩ Omitiendo ${step.eventKey}: opcional con ${strategy} sin emisor registrado`);
+      fileLogger.log('[NarrativeOrchestrator] Paso opcional sin emisor omitido', { eventKey: step.eventKey, strategy });
+      this.emit("step:skipped", {
+        step,
+        index: this.narrativeEngine.currentIndex(),
+      } as StepSkippedEvent);
+      this.advanceNarrative("no-emitter-skipped");
+      return;
+    }
     this.pendingExternalSteps.add(step.eventKey);
     console.log("[NarrativeOrchestrator] Esperando evento externo para el paso: " + step.eventKey);
   }
@@ -1232,6 +1443,105 @@ export class NarrativeOrchestrator {
     }
     console.log("[NarrativeOrchestrator] Evento externo recibido para el paso: " + stepKey);
     this.executeCurrentStep("external-event", true);
+  }
+
+  // ── P0: evento especial en cabina / WAIT genérico ────────────────────
+
+  /** Paso narrativo del evento especial en cabina (CRUISE, opcional). */
+  private static readonly SPECIAL_EVENT_KEY = "captain_special_event";
+
+  /**
+   * ¿Configuró el usuario el evento especial? Requiere flag activo Y texto
+   * no vacío. Vive en `flight` (no en `settings.eventConfig`), por eso
+   * `isStepEnabled()` no lo cubre y se evalúa aquí de forma explícita.
+   */
+  private isSpecialEventConfigured(): boolean {
+    try {
+      const flight: any = this.flightContext?.getFlight?.() ?? {};
+      return (
+        flight?.specialEventEnabled === true &&
+        typeof flight?.specialEvent === "string" &&
+        flight.specialEvent.trim() !== ""
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /** ¿Debe omitirse el paso por falta de configuración del usuario? */
+  private shouldSkipUnconfiguredSpecialEvent(step: NarrativeStep): boolean {
+    if (step.eventKey !== NarrativeOrchestrator.SPECIAL_EVENT_KEY) return false;
+    return !this.isSpecialEventConfigured();
+  }
+
+  /**
+   * Evalúa un WAIT_CONDITION genérico (cualquier `preconditions.type` que NO
+   * sea `delay_detection` ni `phase_transition`, cuyas vías están intactas)
+   * delegando en `RuleEngine.evaluateStep` (progreso cruise, restricciones…).
+   * Sin RuleEngine → `true` (fail-open: conserva el comportamiento previo).
+   */
+  private evaluateGenericWaitCondition(step: NarrativeStep): boolean {
+    try {
+      const engine: any = this.ruleEngine;
+      if (engine && typeof engine.evaluateStep === "function") {
+        return engine.evaluateStep(step, this.flightContext) === true;
+      }
+    } catch (e) {
+      console.warn(`[NarrativeOrchestrator] evaluateGenericWaitCondition error for ${step.eventKey}`, e);
+    }
+    return true;
+  }
+
+  /**
+   * ¿El paso opcional es definitivamente inaplicable en este vuelo?
+   * Solo causas que NO cambiarán a mitad de vuelo (evento sin configurar,
+   * widebody, duración mínima, internacional). El progreso cruise o la noche
+   * SÍ pueden cambiar → esos van por polling, nunca por skip.
+   */
+  private isDefinitivelyInapplicable(step: NarrativeStep): boolean {
+    if (this.shouldSkipUnconfiguredSpecialEvent(step)) return true;
+    try {
+      const engine: any = this.ruleEngine;
+      const r: any = (step as any).restrictions ?? {};
+      if (
+        r.aircraft_is_widebody === true &&
+        typeof engine?.isWidebodyAircraft === "function" &&
+        !engine.isWidebodyAircraft(this.flightContext)
+      ) {
+        return true;
+      }
+      if (
+        r.flight_duration_minutes != null &&
+        typeof engine?.getFlightDurationMinutes === "function" &&
+        engine.getFlightDurationMinutes(this.flightContext) < Number(r.flight_duration_minutes)
+      ) {
+        return true;
+      }
+      if (
+        r.requires_international_flight === true &&
+        typeof engine?.isInternationalFlight === "function" &&
+        !engine.isInternationalFlight(this.flightContext)
+      ) {
+        return true;
+      }
+    } catch {}
+    return false;
+  }
+
+  /**
+   * ¿El paso está excluido por restricciones ahora mismo? (noche, flota,
+   * duración, internacional). Sin RuleEngine o sin método → false (polling,
+   * comportamiento previo). Solo se usa para omitir pasos OPCIONALES; los
+   * no-opcionales siguen esperando.
+   */
+  private isRestrictedOut(step: NarrativeStep): boolean {
+    try {
+      const engine: any = this.ruleEngine;
+      if (engine && typeof engine.isRestrictedOut === "function") {
+        return engine.isRestrictedOut(step, this.flightContext) === true;
+      }
+    } catch {}
+    return false;
   }
 
   // Stage 19B: a step is ENABLED unless its enabledSwitch config value is "OFF".

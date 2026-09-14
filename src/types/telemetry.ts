@@ -98,6 +98,11 @@ export interface TelemetrySnapshot {
   // --- Compatibilidad con extensiones previas ---
   /** Altura sobre el terreno en pies (AGL). */
   agl?: number;
+  /**
+   * Radio altura en pies (RADIO HEIGHT).
+   * Solo válida por debajo de ~2,500 pies AGL; 0 = fuera de rango del radioaltímetro.
+   */
+  radioHeight?: number;
   /** true si está en tierra. */
   onGround?: boolean;
   /** Posición de flaps. */

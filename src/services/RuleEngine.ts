@@ -29,6 +29,10 @@ export class RuleEngine {
   // One-shot: max_once_per_flight — evita re-disparo dentro del mismo vuelo
   private executedEvents = new Set<string>();
 
+  // Ventanas sostenidas por evento para descent_condition (eventKey → zulu de
+  // inicio). Se resetean con resetOneShot (vuelo/fase nueva).
+  private descentConditionState = new Map<string, { startedAt: number | null }>();
+
   // Estado independiente por evento de demora (one-shot + última evaluación)
   private delayEventState: Map<string, { triggered: boolean; lastEvaluation: number; thresholdMs: number }> = new Map();
 
@@ -68,6 +72,8 @@ export class RuleEngine {
   resetOneShot(): void {
     this.executedEvents.clear();
     this.delayEventState.clear();
+    this.descentConditionState.clear();
+    this.stoppedSince = null;
   }
 
   /** Consulta si un evento ya se ejecutó (one-shot). */
@@ -227,7 +233,9 @@ export class RuleEngine {
   /**
    * Devuelve el progreso del crucero de 0.0 a 1.0.
    * elapsed = telemetry.zuluTime - flight.cruiseEntryTime (ambos en segundos
-   * UTC); se divide por flight.cruiseTimeSeconds (SimBrief `times.cruise_time`).
+   * UTC); se divide por flight.cruiseTimeSeconds (derivado de SimBrief vía
+   * resolveCruiseTimeSeconds: `times.cruise_time` no existe en el JSON, se usa
+   * Σ time_leg del navlog con stage CRZ).
    * Fuera de CRUISE o sin datos devuelve 0.
    */
   public getCruiseProgress(context?: FlightContext): number {
@@ -235,29 +243,65 @@ export class RuleEngine {
     if (!ctx) return 0;
     const flight: any = ctx.getFlight?.() ?? {};
     const telemetry: any = ctx.getTelemetry?.() ?? {};
+    let currentPhase: unknown = null;
+    try {
+      const fsm: any = ctx.getFSM?.() ?? {};
+      currentPhase = fsm?.currentState ?? fsm?.getCurrentState?.() ?? null;
+    } catch {}
 
-    if (!flight.cruiseTimeSeconds || !flight.cruiseEntryTime) return 0;
+    console.log('[RuleEngine] getCruiseProgress - estado:', {
+      cruiseTimeSeconds: flight.cruiseTimeSeconds,
+      cruiseEntryTime: flight.cruiseEntryTime,
+      currentZuluTime: telemetry.zuluTime ?? telemetry.zulu_time,
+      currentPhase,
+      schedulerPhase: this.currentFlightPhase(),
+    });
+
+    const totalNum = Number(flight.cruiseTimeSeconds);
+    const entryNum = Number(flight.cruiseEntryTime);
+    if (
+      flight.cruiseTimeSeconds == null || flight.cruiseEntryTime == null ||
+      Number.isNaN(totalNum) || Number.isNaN(entryNum) || totalNum <= 0
+    ) {
+      console.warn('[RuleEngine] getCruiseProgress: faltan datos', {
+        cruiseTimeSeconds: flight.cruiseTimeSeconds,
+        cruiseEntryTime: flight.cruiseEntryTime,
+      });
+      return 0;
+    }
 
     // La fase de vuelo la provee el Scheduler (inyectado vía setPhaseProvider).
     // Fallback: FlightContext.getFSM().currentState (estado UI "A".."D" o fase).
     const phase = this.currentFlightPhase();
     if (phase !== null) {
-      if (phase !== "CRUISE") return 0;
+      if (phase !== "CRUISE") {
+        console.warn('[RuleEngine] getCruiseProgress: no estamos en CRUISE', { phase });
+        return 0;
+      }
     } else {
       try {
         const fsm: any = ctx.getFSM?.() ?? {};
         const current = fsm?.currentState ?? fsm?.getCurrentState?.() ?? null;
-        if (current !== null && current !== "CRUISE") return 0;
+        if (current !== null && current !== "CRUISE") {
+          console.warn('[RuleEngine] getCruiseProgress: no estamos en CRUISE', { current });
+          return 0;
+        }
       } catch {}
     }
 
     const zuluTime = Number(telemetry.zuluTime ?? telemetry.zulu_time);
-    const entry = Number(flight.cruiseEntryTime);
-    const total = Number(flight.cruiseTimeSeconds);
-    if (Number.isNaN(zuluTime) || Number.isNaN(entry) || Number.isNaN(total) || total <= 0) return 0;
+    const entry = entryNum;
+    const total = totalNum;
+    if (Number.isNaN(zuluTime) || total <= 0) return 0;
 
     const elapsed = zuluTime - entry;
     const progress = elapsed / total;
+
+    console.log('[RuleEngine] getCruiseProgress cálculo:', {
+      elapsed,
+      cruiseTimeSeconds: flight.cruiseTimeSeconds,
+      progress,
+    });
 
     return Math.min(Math.max(progress, 0), 1);
   }
@@ -289,6 +333,530 @@ export class RuleEngine {
     if (!ctx) return false;
     const flight: any = ctx.getFlight?.() ?? {};
     return flight.isInternational === true;
+  }
+
+  // ============================================================
+  // RESTRICCIONES AVANZADAS CRUISE
+  // ============================================================
+
+  /**
+   * Noche según la hora LOCAL actual del simulador (23:00–06:00).
+   * Distinto de `isNightFlight()` (que estima noche por la hora programada
+   * de salida y se usa para `preferred_condition`): este mide el "ahora"
+   * para `exclude_if_night`.
+   */
+  public isNightNow(context?: FlightContext): boolean {
+    const ctx: FlightContext | undefined = context ?? this.flightContext;
+    const telemetry: any = ctx?.getTelemetry?.() ?? {};
+    const localTime = Number(telemetry.localTime ?? 0);
+    if (Number.isNaN(localTime)) return false;
+    const localHour = Math.floor((localTime % 86400) / 3600);
+    return localHour >= 23 || localHour < 6;
+  }
+
+  /** Si la aeronave es widebody (resuelto al importar SimBrief). */
+  public isWidebodyAircraft(context?: FlightContext): boolean {
+    const ctx: FlightContext | undefined = context ?? this.flightContext;
+    if (!ctx) return false;
+    const flight: any = ctx.getFlight?.() ?? {};
+    return flight.aircraftIsWidebody === true;
+  }
+
+  /** Duración estimada del vuelo en minutos (de SimBrief). */
+  public getFlightDurationMinutes(context?: FlightContext): number {
+    const ctx: FlightContext | undefined = context ?? this.flightContext;
+    if (!ctx) return 0;
+    const flight: any = ctx.getFlight?.() ?? {};
+    const v = Number(flight.durationMinutes ?? 0);
+    return Number.isNaN(v) ? 0 : v;
+  }
+
+  // ============================================================
+  // FUNCIONES CALCULADAS DESCENT
+  // ============================================================
+
+  /**
+   * Tiempo restante de vuelo en minutos.
+   * elapsed = telemetry.zuluTime - flight.scheduledTakeoffTime (segundos);
+   * restante = durationMinutes - elapsed/60 (nunca negativo).
+   * Sin datos devuelve 0.
+   */
+  public getRemainingTime(context?: FlightContext): number {
+    const ctx: FlightContext | undefined = context ?? this.flightContext;
+    if (!ctx) return 0;
+    const flight: any = ctx.getFlight?.() ?? {};
+    const telemetry: any = ctx.getTelemetry?.() ?? {};
+
+    if (!flight.durationMinutes || !flight.scheduledTakeoffTime) return 0;
+
+    const zulu = Number(telemetry.zuluTime ?? telemetry.zulu_time);
+    const sched = Number(flight.scheduledTakeoffTime ?? flight.scheduled_takeoff_time);
+    if (Number.isNaN(zulu) || Number.isNaN(sched)) return 0;
+
+    const elapsedMinutes = (zulu - sched) / 60;
+    return Math.max(0, Number(flight.durationMinutes) - elapsedMinutes);
+  }
+
+  /**
+   * Distancia al destino en NM (fórmula de Haversine).
+   * Usa telemetry.latitude/longitude vs flight.destLatitude/destLongitude.
+   * Sin coordenadas devuelve 0.
+   */
+  public getDistanceToDestination(context?: FlightContext): number {
+    const ctx: FlightContext | undefined = context ?? this.flightContext;
+    if (!ctx) return 0;
+    const telemetry: any = ctx.getTelemetry?.() ?? {};
+    const flight: any = ctx.getFlight?.() ?? {};
+
+    const lat1d = Number(telemetry.latitude);
+    const lon1d = Number(telemetry.longitude);
+    const lat2d = Number(flight.destLatitude ?? flight.dest_latitude);
+    const lon2d = Number(flight.destLongitude ?? flight.dest_longitude);
+    if ([lat1d, lon1d, lat2d, lon2d].some((v) => Number.isNaN(v))) return 0;
+    if (!lat1d && !lon1d) return 0;
+    if (!lat2d && !lon2d) return 0;
+
+    const R = 3440.065; // Radio de la Tierra en NM
+    const lat1 = lat1d * Math.PI / 180;
+    const lat2 = lat2d * Math.PI / 180;
+    const dLat = (lat2d - lat1d) * Math.PI / 180;
+    const dLon = (lon2d - lon1d) * Math.PI / 180;
+
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+    return R * c;
+  }
+
+  /**
+   * Verifica si el avión está por debajo de una altitud AGL usando RADIO HEIGHT.
+   * RADIO HEIGHT solo da lectura válida por debajo de ~2,500 pies AGL:
+   * si es 0 (fuera de rango) devuelve false para no disparar en crucero.
+   */
+  public isBelowAgl(thresholdFeet: number, context?: FlightContext): boolean {
+    const ctx: FlightContext | undefined = context ?? this.flightContext;
+    if (!ctx) return false;
+    const telemetry: any = ctx.getTelemetry?.() ?? {};
+    const radioHeight = Number(telemetry.radioHeight ?? telemetry.radio_height ?? 0);
+
+    // Si radioHeight es 0, puede que estemos por encima del rango del radioaltímetro
+    if (!radioHeight || Number.isNaN(radioHeight)) return false;
+
+    return radioHeight <= thresholdFeet;
+  }
+
+  // ============================================================
+  // TIEMPO DETENIDO (TAXI_TO_GATE)
+  // ============================================================
+
+  /** Zulu (s) en que el avión se detuvo; null si está en movimiento o sin datos. */
+  private stoppedSince: number | null = null;
+
+  /**
+   * Devuelve el tiempo (en segundos) que el avión lleva detenido.
+   * Menos de 1 nudo se considera detenido. Se resetea cuando el avión
+   * vuelve a moverse. Con estado interno (stoppedSince) acumulativo entre
+   * llamadas: llamar periódicamente (bucle de evaluación / monitor 1s).
+   */
+  public getTimeStopped(context?: FlightContext): number {
+    const ctx: any = context ?? this.flightContext;
+    if (!ctx) return 0;
+    const telemetry: any = ctx?.getTelemetry?.() ?? {};
+    const zuluTime = Number(telemetry.zuluTime ?? telemetry.zulu_time ?? 0) || 0;
+    const groundspeed = Number(telemetry.groundspeed ?? telemetry.ground_speed ?? 0) || 0;
+
+    // Umbral: menos de 1 nudo se considera detenido
+    if (groundspeed < 1) {
+      if (this.stoppedSince === null) {
+        this.stoppedSince = zuluTime;
+        console.log('[RuleEngine] Avión detenido, iniciando contador:', zuluTime);
+      }
+      let elapsed = zuluTime - this.stoppedSince;
+      if (elapsed < 0) {
+        // Salto hacia atrás del reloj del sim (p. ej. wrap de medianoche):
+        // reiniciar el contador en vez de quedarse clavado en 0.
+        this.stoppedSince = zuluTime;
+        elapsed = 0;
+      }
+      return elapsed;
+    } else {
+      if (this.stoppedSince !== null) {
+        console.log('[RuleEngine] Avión en movimiento, reseteando contador');
+        this.stoppedSince = null;
+      }
+      return 0;
+    }
+  }
+
+  /**
+   * Lectura del tiempo detenido sin efectos secundarios (para el monitor).
+   * No inicia ni resetea el contador; si aún no hay referencia devuelve 0.
+   */
+  public peekTimeStopped(context?: FlightContext): number {
+    const ctx: any = context ?? this.flightContext;
+    if (!ctx) return 0;
+    const telemetry: any = ctx?.getTelemetry?.() ?? {};
+    const groundspeed = Number(telemetry.groundspeed ?? telemetry.ground_speed ?? 0) || 0;
+    if (!(groundspeed < 1)) return 0;
+    if (this.stoppedSince === null) return 0;
+    const zuluTime = Number(telemetry.zuluTime ?? telemetry.zulu_time ?? NaN);
+    if (Number.isNaN(zuluTime)) return 0;
+    return Math.max(0, zuluTime - this.stoppedSince);
+  }
+
+  /**
+   * Evalúa la precondición `time_stopped` (p. ej. `taxitogate_crew_delay_apologies`):
+   * dispara cuando el avión lleva detenido más de `time_stopped_gt` segundos.
+   * Acepta `fsm` opcional para restringir a una fase (TAXI_TO_GATE).
+   */
+  private evaluateTimeStopped(conditions: any, step?: NarrativeStep, context?: FlightContext): boolean {
+    const ctx: any = context ?? this.flightContext;
+    const threshold = Number(conditions?.time_stopped_gt ?? conditions?.timeStoppedGt ?? 0);
+    const timeStopped = this.getTimeStopped(ctx as FlightContext);
+    let tel: any = {};
+    try {
+      tel = ctx?.getTelemetry?.() ?? {};
+    } catch {
+      tel = {};
+    }
+    let fsmOk = true;
+    let currentState: unknown = null;
+    if (conditions?.fsm) {
+      try {
+        const fsmInfo: any = ctx?.getFSM?.() ?? {};
+        currentState = fsmInfo?.currentState ?? fsmInfo?.getCurrentState?.() ?? null;
+        const flightPhase = this.currentFlightPhase();
+        const expected = String(conditions.fsm);
+        fsmOk = String(currentState) === expected || (flightPhase !== null && flightPhase === expected);
+      } catch {
+        fsmOk = false;
+      }
+    }
+    const ok = fsmOk && timeStopped > threshold;
+    console.log('[RuleEngine] Evaluando time_stopped:', {
+      eventKey: step?.eventKey ?? 'time_stopped',
+      groundspeed: tel.groundspeed ?? tel.ground_speed,
+      timeStopped,
+      threshold,
+      fsm: conditions?.fsm ?? null,
+      currentState,
+      fsmOk,
+      result: ok,
+    });
+    return ok;
+  }
+
+  // ============================================================
+  // MOTORES APAGADOS (AT_GATE)
+  // ============================================================
+
+  /**
+   * Devuelve true si todos los motores están apagados.
+   * Usa numberOfEngines para saber cuántos motores verificar (misma
+   * semántica y aliases que allEnginesRunning: el motor 1 se resuelve
+   * vía engineCombustion1/engCombustion1/engineRunning, imprescindible
+   * porque el path MSFS/Rust reporta el motor 1 solo como engineRunning).
+   * Sin dato de N exige motor 1 explícitamente apagado; con N=0 o sin
+   * ningún dato devuelve false (no se puede determinar).
+   */
+  public areAllEnginesOff(context?: FlightContext): boolean {
+    const ctx: any = context ?? this.flightContext;
+    if (!ctx) return false;
+    const telemetry: any = ctx?.getTelemetry?.() ?? {};
+    const numEnginesRaw =
+      telemetry.numberOfEngines ?? telemetry.numEngines ?? telemetry.number_of_engines;
+
+    const isEngineOn = (index: number): boolean => {
+      if (index === 1) {
+        return (
+          telemetry.engineCombustion1 ?? telemetry.engCombustion1 ?? telemetry.engineRunning
+        ) === true;
+      }
+      return (
+        telemetry[`engineCombustion${index}`] ?? telemetry[`engCombustion${index}`]
+      ) === true;
+    };
+
+    if (numEnginesRaw === 0) return false; // No se puede determinar
+
+    if (
+      typeof numEnginesRaw !== 'number' ||
+      !Number.isFinite(numEnginesRaw) ||
+      numEnginesRaw <= 0
+    ) {
+      // Sin dato de N: fallback al motor 1, exigiendo apagado explícito
+      // (undefined no basta: sin datos no se puede determinar).
+      const motor1 =
+        telemetry.engineCombustion1 ?? telemetry.engCombustion1 ?? telemetry.engineRunning;
+      return motor1 === false;
+    }
+
+    for (let i = 1; i <= numEnginesRaw; i++) {
+      if (isEngineOn(i)) return false; // Al menos uno está encendido
+    }
+
+    return true;
+  }
+
+  /**
+   * Evalúa la precondición `all_engines_off` (p. ej. `atgate_capt_disarm_doors`).
+   * Acepta `fsm` opcional para restringir a una fase (AT_GATE).
+   */
+  private evaluateAllEnginesOff(conditions: any, step?: NarrativeStep, context?: FlightContext): boolean {
+    const ctx: any = context ?? this.flightContext;
+    const expected = conditions?.all_engines_off ?? conditions?.allEnginesOff;
+    const allOff = this.areAllEnginesOff(ctx as FlightContext);
+    const ok = allOff === (expected !== false);
+    let tel: any = {};
+    try {
+      tel = ctx?.getTelemetry?.() ?? {};
+    } catch {
+      tel = {};
+    }
+    console.log('[RuleEngine] Evaluando all_engines_off:', {
+      eventKey: step?.eventKey ?? 'all_engines_off',
+      expected,
+      numberOfEngines: tel.numberOfEngines ?? tel.numEngines,
+      engineCombustion1: tel.engineCombustion1 ?? tel.engCombustion1 ?? tel.engineRunning,
+      engineCombustion2: tel.engCombustion2,
+      engineCombustion3: tel.engCombustion3,
+      engineCombustion4: tel.engCombustion4,
+      allOff,
+      result: ok,
+    });
+    return ok;
+  }
+
+  /** Precondición `cruise_progress`: exige un progreso mínimo (0.0–1.0). */
+  private evaluateCruiseProgress(conditions: any, context?: FlightContext): boolean {
+    const minProgress = conditions?.min_progress;
+    if (minProgress === undefined) return true;
+
+    return this.getCruiseProgress(context ?? this.flightContext) >= Number(minProgress);
+  }
+
+  /**
+   * Reloj para ventanas sostenidas: zuluTime de telemetría si es válido (> 0),
+   * si no reloj de pared. Sin ninguna referencia temporal no se puede medir
+   * una duración (ver evaluateDescentCondition).
+   */
+  private sustainedClockS(context?: FlightContext): number | null {
+    try {
+      const tel: any = (context ?? this.flightContext)?.getTelemetry?.() ?? {};
+      const z = Number(tel.zuluTime ?? tel.zulu_time);
+      if (!Number.isNaN(z) && z > 0) return z;
+      const w = Date.now() / 1000;
+      return Number.isNaN(w) ? null : w;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Precondición `descent_condition`: exige vertical_speed_lt sostenido
+   * durante duration_above_threshold_sec (jitter-proof). Sin duración
+   * requerida se evalúa directo. Si conditions.fsm está presente, también
+   * exige la fase (Scheduler o letras FSM). Sin reloj disponible y con
+   * duración requerida → false (no se puede medir; nunca true a ciegas).
+   */
+  private evaluateDescentCondition(step: NarrativeStep, conditions: any, context?: FlightContext): boolean {
+    const ctx = context ?? this.flightContext;
+    const eventKey = step.eventKey;
+    const tel: any = (ctx as FlightContext)?.getTelemetry?.() ?? {};
+    const currentVs = Number(tel.verticalSpeed ?? tel.vertical_speed ?? 0) || 0;
+    const threshold = Number(conditions?.vertical_speed_lt ?? -1000);
+    const durationRequired = Number(conditions?.duration_above_threshold_sec ?? 0) || 0;
+
+    // Puerta de fase (si el escenario la declara): igual criterio que delay.
+    if (conditions?.fsm) {
+      const fsmInfo: any = (ctx as FlightContext)?.getFSM?.() ?? {};
+      const currentState: string | undefined = fsmInfo?.currentState ?? fsmInfo?.getCurrentState?.() ?? undefined;
+      const flightPhase = this.currentFlightPhase();
+      const expected = String(conditions.fsm);
+      const ok = String(currentState) === expected || (flightPhase !== null && flightPhase === expected);
+      if (!ok) return false;
+    }
+
+    // Sin duración requerida: evaluación directa.
+    if (!(durationRequired > 0)) {
+      return currentVs < threshold;
+    }
+
+    if (!this.descentConditionState.has(eventKey)) {
+      this.descentConditionState.set(eventKey, { startedAt: null });
+    }
+    const state = this.descentConditionState.get(eventKey)!;
+
+    // Condición violada → resetear ventana.
+    if (!(currentVs < threshold)) {
+      if (state.startedAt !== null) {
+        console.log('[RuleEngine] descent_condition reseteado:', { eventKey, currentVs, threshold });
+      }
+      state.startedAt = null;
+      return false;
+    }
+
+    const now = this.sustainedClockS(ctx as FlightContext);
+    if (now === null) return false;
+
+    // Condición cumplida por primera vez → abrir ventana (aún no basta).
+    if (state.startedAt === null) {
+      state.startedAt = now;
+      console.log('[RuleEngine] descent_condition iniciado:', { eventKey, currentVs, threshold, startedAt: now });
+      return false;
+    }
+
+    const elapsed = now - state.startedAt;
+    const met = elapsed >= durationRequired;
+    console.log('[RuleEngine] descent_condition evaluando:', {
+      eventKey, currentVs, threshold, elapsed, durationRequired, met,
+    });
+    return met;
+  }
+
+  /**
+   * Lectura PURA (sin efectos) del estado sostenido para el monitor: no abre
+   * ni resetea ventanas. elapsed null = ventana aún no abierta.
+   */
+  public peekDescentCondition(
+    step: NarrativeStep,
+    conditions: any,
+    context?: FlightContext
+  ): { vs: number; threshold: number; required: number; elapsed: number | null; met: boolean } {
+    const ctx = context ?? this.flightContext;
+    const tel: any = (ctx as FlightContext)?.getTelemetry?.() ?? {};
+    const vs = Number(tel.verticalSpeed ?? tel.vertical_speed ?? 0) || 0;
+    const threshold = Number(conditions?.vertical_speed_lt ?? -1000);
+    const required = Number(conditions?.duration_above_threshold_sec ?? 0) || 0;
+    if (!(required > 0)) return { vs, threshold, required, elapsed: null, met: vs < threshold };
+    const startedAt = this.descentConditionState.get(step.eventKey)?.startedAt ?? null;
+    if (startedAt === null || !(vs < threshold)) {
+      return { vs, threshold, required, elapsed: null, met: false };
+    }
+    const now = this.sustainedClockS(ctx as FlightContext);
+    if (now === null) return { vs, threshold, required, elapsed: null, met: false };
+    const elapsed = now - startedAt;
+    return { vs, threshold, required, elapsed, met: elapsed >= required };
+  }
+
+  /** Restricción `exclude_if_night`: excluye el paso en horario nocturno. */
+  private evaluateExcludeIfNight(restrictions: any, context?: FlightContext): boolean {
+    if (restrictions?.exclude_if_night !== true) return true;
+    return !this.isNightNow(context ?? this.flightContext);
+  }
+
+  /** Restricción `aircraft_is_widebody`: solo fuselaje ancho. */
+  private evaluateAircraftIsWidebody(restrictions: any, context?: FlightContext): boolean {
+    if (restrictions?.aircraft_is_widebody !== true) return true;
+    return this.isWidebodyAircraft(context ?? this.flightContext);
+  }
+
+  /** Restricción `flight_duration_minutes`: duración mínima en minutos. */
+  private evaluateFlightDuration(restrictions: any, context?: FlightContext): boolean {
+    const minDuration = restrictions?.flight_duration_minutes;
+    if (!minDuration) return true;
+
+    return this.getFlightDurationMinutes(context ?? this.flightContext) >= Number(minDuration);
+  }
+
+  /** Restricción `requires_international_flight`: solo vuelos internacionales. */
+  private evaluateRequiresInternational(restrictions: any, context?: FlightContext): boolean {
+    if (restrictions?.requires_international_flight !== true) return true;
+    return this.isInternationalFlight(context ?? this.flightContext);
+  }
+
+  // ============================================================
+  // TRANSICIÓN A DESCENSO
+  // ============================================================
+
+  /**
+   * El evento `transition_to_descent` se activa cuando el avión abandona la
+   * altitud de crucero y comienza a descender:
+   *   (PLANE_ALTITUDE - FLIGHT_LEVEL) <= -1000
+   *   AND CRUISE_PROGRESS >= 0.95
+   *   AND VERTICAL_SPEED < -500
+   */
+  private evaluateTransitionToDescent(context?: FlightContext): boolean {
+    const ctx: FlightContext | undefined = context ?? this.flightContext;
+    const telemetry: any = ctx?.getTelemetry?.() ?? {};
+    const flight: any = ctx?.getFlight?.() ?? {};
+
+    const currentAltitude = Number(telemetry.altitude ?? 0) || 0;
+    const flightLevel = Number(flight.cruiseAltitude ?? 0) || 0;
+    const verticalSpeed = Number(telemetry.verticalSpeed ?? 0) || 0;
+    const cruiseProgress = this.getCruiseProgress(ctx);
+
+    const altitudeDrop = currentAltitude - flightLevel;
+
+    const result =
+      altitudeDrop <= -1000 &&
+      cruiseProgress >= 0.95 &&
+      verticalSpeed < -500;
+
+    console.log('[RuleEngine] Evaluando transición a descenso:', {
+      currentAltitude,
+      flightLevel,
+      altitudeDrop,
+      cruiseProgress,
+      verticalSpeed,
+      result
+    });
+
+    return result;
+  }
+
+  // ============================================================
+  // TRANSICIÓN A CRUCERO
+  // ============================================================
+
+  /**
+   * Detalle puro (sin logs) de la transición CLIMB → CRUISE para el monitor.
+   * Regla de Backoffice: ABS(PLANE_ALTITUDE - FLIGHT_LEVEL) <= 500, donde
+   * FLIGHT_LEVEL = flight.cruiseAltitude (pies, de SimBrief route_altitude).
+   *
+   * NOTA altitud (discrepancia reportada 23.100 vs 23.600 ft): `altitude` viene
+   * de `PLANE ALTITUDE` (altitud verdadera MSL). El panel del sim muestra
+   * INDICATED (corregida por reglaje barométrico): con QNH distinto de STD
+   * bajo la transición, o atmósfera no ISA en altura, difieren en cientos de
+   * pies de forma normal. La tolerancia de 500 ft absorbe esa diferencia; no
+   * cambiar de SimVar sin evidencia (ver grupo Transición a CRUISE).
+   */
+  public getCruiseTransitionDetail(context?: FlightContext): {
+    currentAltitude: number | null;
+    flightLevel: number | null;
+    diff: number | null;
+    threshold: number;
+    met: boolean;
+  } {
+    const ctx: any = context ?? this.flightContext;
+    const tel: any = ctx?.getTelemetry?.() ?? {};
+    const fl: any = ctx?.getFlight?.() ?? {};
+    const altRaw = Number(tel.altitude ?? tel.plane_altitude ?? NaN);
+    const flRaw = Number(fl.cruiseAltitude ?? NaN);
+    const currentAltitude = Number.isNaN(altRaw) ? null : altRaw;
+    const flightLevel = Number.isNaN(flRaw) ? null : flRaw;
+    const threshold = 500;
+    const diff =
+      currentAltitude !== null && flightLevel !== null
+        ? Math.abs(currentAltitude - flightLevel)
+        : null;
+    return { currentAltitude, flightLevel, diff, threshold, met: diff !== null && diff <= threshold };
+  }
+
+  /**
+   * Evalúa la transición a crucero con log de depuración
+   * (misma regla que el scheduler_rule de Backoffice).
+   */
+  public evaluateTransitionToCruise(context?: FlightContext): boolean {
+    const d = this.getCruiseTransitionDetail(context);
+    console.log('[RuleEngine] Evaluando transition_to_cruise:', {
+      currentAltitude: d.currentAltitude,
+      flightLevel: d.flightLevel,
+      diff: d.diff,
+      threshold: d.threshold,
+      result: d.met,
+    });
+    return d.met;
   }
 
   enterPhase(
@@ -372,6 +940,19 @@ export class RuleEngine {
       return false;
     }
 
+    // Si es el paso de transición a descenso, usar lógica específica
+    // (altitud + progreso de crucero + velocidad vertical).
+    if (step.eventKey === 'transition_to_descent') {
+      return this.evaluateTransitionToDescent(context);
+    }
+
+    // Transición a crucero: ABS(PLANE_ALTITUDE - FLIGHT_LEVEL) <= 500
+    // (misma regla que el scheduler_rule de Backoffice; el parser también la
+    // soporta vía ABS() y FLIGHT_LEVEL, este atajo garantiza el disparo).
+    if (step.eventKey === 'transition_to_cruise') {
+      return this.evaluateTransitionToCruise(context);
+    }
+
     // Si tiene preconditions tipo delay_detection, evaluarlas (WAIT_CONDITION logic)
     const preconditions: any = (step as any).preconditions;
     if (preconditions) {
@@ -391,16 +972,74 @@ export class RuleEngine {
       if (!preResult) return false;
     }
 
+    // 2. Evaluar restricciones avanzadas CRUISE. Solo las claves presentes
+    //    filtran (ausencia = true), por lo que los pasos sin restrictions
+    //    mantienen el comportamiento anterior.
+    const restrictions: any = (step as any).restrictions ?? {};
+    if (!this.evaluateExcludeIfNight(restrictions, context)) {
+      console.log(`[RuleEngine] ${step.eventKey}: bloqueado por exclude_if_night (vuelo nocturno)`);
+      return false;
+    }
+    if (!this.evaluateAircraftIsWidebody(restrictions, context)) {
+      console.log(`[RuleEngine] ${step.eventKey}: bloqueado por aircraft_is_widebody`);
+      return false;
+    }
+    if (!this.evaluateFlightDuration(restrictions, context)) {
+      console.log(`[RuleEngine] ${step.eventKey}: bloqueado por flight_duration_minutes`);
+      return false;
+    }
+    if (!this.evaluateRequiresInternational(restrictions, context)) {
+      console.log(`[RuleEngine] ${step.eventKey}: bloqueado por requires_international_flight`);
+      return false;
+    }
+    try {
+      console.log('[RuleEngine] Evaluando paso:', {
+        eventKey: step.eventKey,
+        cruiseProgress: this.getCruiseProgress(context),
+        isNightFlight: this.isNightNow(context),
+        isWidebody: this.isWidebodyAircraft(context),
+        flightDuration: this.getFlightDurationMinutes(context),
+        isInternational: this.isInternationalFlight(context),
+        restrictions,
+      });
+    } catch {}
+
     const rule = step.scheduler_rule;
 
     if (!rule) {
-      // Fallback al comportamiento hardcodeado: evaluación por trigger del evento.
+      // Paso narrativo autosuficiente: preconditions + restricciones ya se
+      // evaluaron con éxito arriba → TRUE sin consultar los trigger
+      // evaluators (los stubs phase_enter/condition/timer retornan false
+      // siempre y bloquearían el paso en polling infinito).
+      if (preconditions) return true;
+      // Sin preconditions ni regla: fallback al comportamiento hardcodeado
+      // (evaluación por trigger del evento). Sin cambios respecto a antes.
       const event = EventCatalogService.get(step.eventKey);
       if (!event) return false;
       return TriggerEvaluatorFactory.get(event.triggerType).evaluate(event, context);
     }
 
     return this.evaluateSchedulerRule(rule, context, step.eventKey);
+  }
+
+  /**
+   * ¿El paso está excluido por restricciones en este contexto?
+   * Solo restricciones (noche, flota, duración, internacional). NO evalúa
+   * preconditions, scheduler_rule ni one-shot: el llamador decide qué hacer
+   * (p. ej. omitir un opcional excluido de noche en vez de esperar el alba).
+   */
+  isRestrictedOut(step: NarrativeStep, context?: FlightContext): boolean {
+    try {
+      const ctx = context ?? this.flightContext;
+      const restrictions: any = (step as any).restrictions ?? {};
+      if (!this.evaluateExcludeIfNight(restrictions, ctx as FlightContext)) return true;
+      if (!this.evaluateAircraftIsWidebody(restrictions, ctx as FlightContext)) return true;
+      if (!this.evaluateFlightDuration(restrictions, ctx as FlightContext)) return true;
+      if (!this.evaluateRequiresInternational(restrictions, ctx as FlightContext)) return true;
+      return false;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -573,9 +1212,17 @@ export class RuleEngine {
    */
   private evaluatePhaseTransition(conditions: any, step?: NarrativeStep, context?: FlightContext): boolean {
     const detail = this.getPhaseTransitionDetail(conditions, context);
+    const ctxTel: any = (context ?? this.flightContext as any)?.getTelemetry?.() ?? {};
     console.log('[RuleEngine] Evaluando phase_transition:', {
       eventKey: step?.eventKey ?? 'transition_to_taxi',
       targetPhase: detail.targetPhase,
+      // Campos de telemetría relevantes (incluye taxi_in: abandono de pista,
+      // y at_gate: estacionado con freno y en parking)
+      simOnGround: ctxTel.simOnGround ?? ctxTel.sim_on_ground,
+      onAnyRunway: ctxTel.onAnyRunway,
+      groundspeed: ctxTel.groundspeed ?? ctxTel.ground_speed,
+      parkingBrake: ctxTel.parkingBrake ?? ctxTel.parking_brake,
+      atcOnParkingSpot: ctxTel.atcOnParkingSpot ?? ctxTel.atc_on_parking_spot,
       conditions: detail.items.length > 0
         ? Object.fromEntries(detail.items.map((it) => [it.key, { ok: it.ok, value: it.value }]))
         : {
@@ -620,8 +1267,12 @@ export class RuleEngine {
     const conds: any = conditions ?? {};
     const ctx: any = context ?? this.flightContext;
     const tel: any = ctx?.getTelemetry?.() ?? {};
-    const groundspeedThreshold =
-      Number(conds.groundspeed_gt ?? conds.ground_velocity_gt ?? conds.groundspeedGt ?? 5) || 5;
+    // Umbral de velocidad: preservar 0 como valor válido (groundspeed_gt: 0
+    // significa "cualquier movimiento"). Solo usar 5 por defecto si no hay
+    // valor configurado o no es numérico. (`Number(0) || 5` daría 5: bug.)
+    const rawThreshold = conds.groundspeed_gt ?? conds.ground_velocity_gt ?? conds.groundspeedGt ?? 5;
+    const parsedThreshold = Number(rawThreshold);
+    const groundspeedThreshold = Number.isNaN(parsedThreshold) ? 5 : parsedThreshold;
     const targetPhase: string = String(conds.target_phase ?? conds.targetPhase ?? 'TAXI');
 
     const simOnGround = tel.simOnGround ?? tel.sim_on_ground;
@@ -682,6 +1333,15 @@ export class RuleEngine {
     if (has('groundspeed_gt') || has('ground_velocity_gt') || has('groundspeedGt')) {
       items.push({ key: 'groundspeed_gt', label: `GROUND SPEED > ${groundspeedThreshold}`, ok: isMoving, value: fmtGs(groundspeed) });
     }
+    if (has('groundspeed_lt') || has('ground_velocity_lt') || has('groundspeedLt')) {
+      // Límite superior de velocidad (p. ej. transition_to_at_gate con
+      // groundspeed_lt: 0.5). NaN-safe y preserva 0 como valor válido.
+      const rawLt = conds.groundspeed_lt ?? conds.ground_velocity_lt ?? conds.groundspeedLt;
+      const parsedLt = Number(rawLt);
+      const ltThreshold = Number.isNaN(parsedLt) ? 0 : parsedLt;
+      const belowLt = (Number(groundspeed) || 0) < ltThreshold;
+      items.push({ key: 'groundspeed_lt', label: `GROUND SPEED < ${ltThreshold}`, ok: belowLt, value: fmtGs(groundspeed) });
+    }
     if (has('parking_brake') || has('parkingBrake') || has('parking_brake_off') || has('parkingBrakeOff')) {
       const expected = conds.parking_brake ?? conds.parkingBrake ?? !(conds.parking_brake_off ?? conds.parkingBrakeOff ?? true);
       const off = parkingBrake === false;
@@ -697,7 +1357,7 @@ export class RuleEngine {
     }
     if (has('on_any_runway') || has('onAnyRunway')) {
       const expected = (conds.on_any_runway ?? conds.onAnyRunway) !== false;
-      items.push({ key: 'on_any_runway', label: 'ON ANY RUNWAY', ok: (onAnyRunway === true) === expected, value: String(onAnyRunway ?? '—') });
+      items.push({ key: 'on_any_runway', label: expected === false ? 'NOT ON ANY RUNWAY' : 'ON ANY RUNWAY', ok: (onAnyRunway === true) === expected, value: String(onAnyRunway ?? '—') });
     }
     if (has('atc_cleared_takeoff') || has('atcClearedTakeoff')) {
       const expected = (conds.atc_cleared_takeoff ?? conds.atcClearedTakeoff) !== false;
@@ -836,6 +1496,102 @@ export class RuleEngine {
       if (c.fsm) rows.push({ label: `FSM = ${String(c.fsm)}`, ok: true, value: 'ver sección Demora' });
       return this.withNightRow(step, context, { met, kind, rows, summary: met === true ? 'Condiciones cumplidas' : met === false ? 'Condiciones NO cumplidas' : 'Sin datos suficientes' });
     }
+    if (pre.type === 'cruise_progress') {
+      const c: any = pre.conditions ?? {};
+      const rows: { label: string; ok: boolean; value: string }[] = [];
+      let met: boolean | null = null;
+      try {
+        const prog = this.getCruiseProgress((context ?? this.flightContext) as FlightContext);
+        const min = c.min_progress;
+        const ok = min === undefined ? true : prog >= Number(min);
+        rows.push({ label: 'EN CRUCERO (fase)', ok: prog > 0, value: `${(prog * 100).toFixed(0)}%` });
+        rows.push({ label: `PROGRESO >= ${min ?? '—'}`, ok, value: prog.toFixed(2) });
+        met = ok;
+      } catch {
+        met = null;
+      }
+      return this.withNightRow(step, context, { met, kind, rows, summary: met === true ? 'Condiciones cumplidas' : met === false ? 'Condiciones NO cumplidas' : 'Sin datos suficientes' });
+    }
+    if (pre.type === 'time_stopped' || pre.type === 'timeStopped') {
+      const c: any = pre.conditions ?? pre;
+      const threshold = Number(c.time_stopped_gt ?? c.timeStoppedGt ?? 0);
+      const rows: { label: string; ok: boolean; value: string }[] = [];
+      let met: boolean | null = null;
+      try {
+        // Solo lectura (sin iniciar/resetear el contador de getTimeStopped).
+        const stopped = this.peekTimeStopped((context ?? this.flightContext) as FlightContext);
+        const ok = stopped > threshold;
+        rows.push({ label: `TIME_STOPPED > ${threshold}s`, ok, value: `${stopped.toFixed(0)} s` });
+        if (c.fsm) rows.push({ label: `FSM = ${String(c.fsm)}`, ok: true, value: 'ver evaluación' });
+        met = ok;
+      } catch {
+        met = null;
+      }
+      return this.withNightRow(step, context, { met, kind, rows, summary: met === true ? 'Condiciones cumplidas' : met === false ? 'Condiciones NO cumplidas' : 'Sin datos suficientes' });
+    }
+    if (pre.type === 'all_engines_off' || pre.type === 'allEnginesOff') {
+      const c: any = pre.conditions ?? pre;
+      const expected = c.all_engines_off ?? c.allEnginesOff;
+      const rows: { label: string; ok: boolean; value: string }[] = [];
+      let met: boolean | null = null;
+      try {
+        const ctx: any = context ?? this.flightContext;
+        const tel: any = ctx?.getTelemetry?.() ?? {};
+        const allOff = this.areAllEnginesOff((context ?? this.flightContext) as FlightContext);
+        const ok = allOff === (expected !== false);
+        const eng = (i: number): string => {
+          const v = i === 1
+            ? (tel.engineCombustion1 ?? tel.engCombustion1 ?? tel.engineRunning)
+            : (tel[`engineCombustion${i}`] ?? tel[`engCombustion${i}`]);
+          return String(v ?? '—');
+        };
+        rows.push({ label: 'ALL ENGINES OFF', ok, value: String(allOff) });
+        for (let i = 1; i <= 4; i++) {
+          rows.push({ label: `ENG COMBUSTION ${i}`, ok: eng(i) === 'false', value: eng(i) });
+        }
+        if (c.fsm) rows.push({ label: `FSM = ${String(c.fsm)}`, ok: true, value: 'ver evaluación' });
+        met = ok;
+      } catch {
+        met = null;
+      }
+      return this.withNightRow(step, context, { met, kind, rows, summary: met === true ? 'Condiciones cumplidas' : met === false ? 'Condiciones NO cumplidas' : 'Sin datos suficientes' });
+    }
+    // Otros tipos de precondiciones (descent_condition, landing_condition,
+    // preconditions sin `type`, etc.): si el paso trae scheduler_rule de
+    // telemetría, desglosarla para el monitor en vez de "sin desglose".
+    // Los handlers específicos de arriba (delay, cruise, ...) se conservan.
+    const maybeRule = (step as any).scheduler_rule as string | null | undefined;
+    if (typeof maybeRule === "string" && maybeRule.trim() !== "" && this.isTelemetryExpression(maybeRule)) {
+      const d = this.getSchedulerRuleDetail(maybeRule, context);
+      return this.withNightRow(step, context, {
+        met: d.met,
+        kind: 'scheduler_rule',
+        rows: d.rows,
+        summary: d.met === true ? 'Condiciones cumplidas (scheduler_rule)' : d.met === false ? 'Condiciones NO cumplidas (scheduler_rule)' : 'Sin datos suficientes (scheduler_rule)',
+      });
+    }
+    // descent_condition sin regla: mostrar ventana sostenida (lectura pura).
+    if (pre?.type === 'descent_condition') {
+      const c: any = pre.conditions ?? {};
+      const peek = this.peekDescentCondition(step, c, context);
+      const rows: { label: string; ok: boolean; value: string }[] = [
+        { label: 'VERTICAL_SPEED', ok: peek.vs < peek.threshold, value: `${Number.isInteger(peek.vs) ? peek.vs : peek.vs.toFixed(1)} fpm` },
+        { label: `VS < ${peek.threshold}`, ok: peek.vs < peek.threshold, value: peek.vs < peek.threshold ? 'sí' : 'no' },
+      ];
+      if (peek.required > 0) {
+        rows.push({
+          label: `SOSTENIDO >= ${peek.required}s`,
+          ok: peek.met,
+          value: peek.elapsed === null ? 'ventana no abierta' : `${peek.elapsed.toFixed(0)}s / ${peek.required}s`,
+        });
+      }
+      return this.withNightRow(step, context, {
+        met: peek.met,
+        kind: 'descent_condition',
+        rows,
+        summary: peek.met ? 'Condiciones cumplidas (descent_condition)' : 'Condiciones NO cumplidas (descent_condition)',
+      });
+    }
     return this.withNightRow(step, context, { met: null, kind, rows: [], summary: `Tipo '${kind}' sin desglose` });
   }
 
@@ -851,6 +1607,18 @@ export class RuleEngine {
     if (preconditions.type === 'phase_transition') {
       const conditions = preconditions.conditions ?? preconditions;
       return this.evaluatePhaseTransition(conditions, step, context);
+    }
+
+    if (preconditions.type === 'cruise_progress') {
+      const conditions = preconditions.conditions ?? preconditions;
+      const ok = this.evaluateCruiseProgress(conditions, context);
+      console.log(`[RuleEngine] Evaluando cruise_progress para ${step.eventKey}:`, {
+        eventKey: step.eventKey,
+        minProgress: conditions?.min_progress ?? null,
+        cruiseProgress: this.getCruiseProgress(context ?? this.flightContext),
+        decision: ok ? "✅ EJECUTAR" : "❌ OMITIR (progreso insuficiente)",
+      });
+      return ok;
     }
 
     if (preconditions.type === "delay_detection") {
@@ -957,6 +1725,35 @@ export class RuleEngine {
       return ejecutar;
     }
 
+    if (preconditions.type === 'time_stopped' || preconditions.type === 'timeStopped') {
+      const conditions = preconditions.conditions ?? preconditions;
+      return this.evaluateTimeStopped(conditions, step, context);
+    }
+
+    if (preconditions.type === 'all_engines_off' || preconditions.type === 'allEnginesOff') {
+      const conditions = preconditions.conditions ?? preconditions;
+      return this.evaluateAllEnginesOff(conditions, step, context);
+    }
+
+    if (preconditions.type === 'descent_condition') {
+      const conditions = preconditions.conditions ?? preconditions;
+      return this.evaluateDescentCondition(step, conditions, context);
+    }
+
+    // time_stopped_gt / all_engines_off también pueden acompañar a otros tipos
+    // de precondición (condiciones adicionales, no exclusivas de su type).
+    const genericConds: any = preconditions.conditions ?? preconditions;
+    const hasStoppedKey =
+      genericConds?.time_stopped_gt !== undefined || genericConds?.timeStoppedGt !== undefined;
+    const hasEnginesOffKey =
+      genericConds?.all_engines_off !== undefined || genericConds?.allEnginesOff !== undefined;
+    if (hasStoppedKey || hasEnginesOffKey) {
+      let ok = true;
+      if (hasStoppedKey) ok = this.evaluateTimeStopped(genericConds, step, context) && ok;
+      if (hasEnginesOffKey) ok = this.evaluateAllEnginesOff(genericConds, step, context) && ok;
+      return ok;
+    }
+
     // Otros tipos de precondiciones: por defecto pasar (extensible)
     return true;
   }
@@ -973,6 +1770,16 @@ export class RuleEngine {
     "ON_ANY_RUNWAY",
     "PLANE_ALTITUDE",
     "ALTITUDE",
+    "VERTICAL_SPEED",
+    "RADIO_HEIGHT",
+    "GEAR_DOWN",
+    "SEATBELT_SWITCH",
+    "FLIGHT_LEVEL",
+    // Calculadas/proveídas (sin ellas isTelemetryExpression devolvía false y
+    // reglas como "FSM == 'DESCENT'" o "REMAINING_TIME <= 5" ni se intentaban).
+    "CRUISE_PROGRESS",
+    "FSM",
+    "REMAINING_TIME",
   ];
 
   private isTelemetryExpression(rule: string): boolean {
@@ -991,7 +1798,18 @@ export class RuleEngine {
     ON_ANY_RUNWAY: boolean;
     PLANE_ALTITUDE: number;
     ALTITUDE: number;
-    _raw: { simOnGround: unknown; groundspeed: unknown; parkingBrake: unknown; atcOnParkingSpot: unknown; atcClearedTakeoff: unknown; onAnyRunway: unknown; altitude: unknown };
+    VERTICAL_SPEED: number;
+    RADIO_HEIGHT: number;
+    GEAR_DOWN: number;
+    SEATBELT_SWITCH: number;
+    FLIGHT_LEVEL: number;
+    /** Progreso de crucero 0..1 (calculado; sin él el parser lanzaba "Variable desconocida"). */
+    CRUISE_PROGRESS: number;
+    /** Fase de vuelo (Scheduler) o estado FSM ('UNKNOWN' si no hay dato). */
+    FSM: string;
+    /** Minutos restantes (SimBrief). NaN sin datos: así `<= 5` es falso y un OR degrada al otro brazo. */
+    REMAINING_TIME: number;
+    _raw: { simOnGround: unknown; groundspeed: unknown; parkingBrake: unknown; atcOnParkingSpot: unknown; atcClearedTakeoff: unknown; onAnyRunway: unknown; altitude: unknown; verticalSpeed: unknown; radioHeight: unknown; gearDown: unknown; seatbeltOn: unknown };
   } {
     const ctx: any = context ?? this.flightContext;
     const tel: any = ctx?.getTelemetry?.() ?? {};
@@ -1002,11 +1820,61 @@ export class RuleEngine {
     const atcClearedTakeoff = tel.atcClearedTakeoff;
     const onAnyRunway = tel.onAnyRunway;
     const altitude = Number(tel.altitude ?? tel.plane_altitude ?? tel['PLANE ALTITUDE'] ?? 0) || 0;
+    const verticalSpeed = Number(tel.verticalSpeed ?? tel.vertical_speed ?? 0) || 0;
+    const radioHeight = Number(tel.radioHeight ?? tel.radio_height ?? 0) || 0;
+    const gearDown = tel.gearDown ?? tel.gear_down;
+    // Cinturones: 1 = ON (SDK MSFS: CABIN SEATBELTS ALERT SWITCH es True si el
+    // interruptor está ON; el backend ya mapea `!= 0.0` sin negar).
+    const seatbeltOn = tel.seatbeltOn ?? tel.seatbelt_on;
+    // Nivel de vuelo planificado (pies, de SimBrief route_altitude vía
+    // flight.cruiseAltitude). Para reglas tipo ABS(PLANE_ALTITUDE - FLIGHT_LEVEL).
+    let flightLevel = 0;
+    try {
+      const fl: any = ctx?.getFlight?.() ?? {};
+      flightLevel = Number(fl.cruiseAltitude ?? 0) || 0;
+    } catch {
+      flightLevel = 0;
+    }
     let allEnginesRunning = false;
     try {
       allEnginesRunning = this.getPhaseTransitionDetail(undefined, ctx as FlightContext).allEnginesRunning;
     } catch {
       allEnginesRunning = false;
+    }
+    // Fase para átomos tipo FSM == 'DESCENT': proveedor del Scheduler, si no
+    // estado FSM crudo, si no 'UNKNOWN' (nunca undefined: el parser lanzaría).
+    let fsm = "UNKNOWN";
+    try {
+      const provided = this.currentFlightPhase();
+      if (provided) {
+        fsm = provided;
+      } else {
+        const f: any = ctx?.getFSM?.() ?? {};
+        const raw = f?.currentState ?? f?.getCurrentState?.() ?? null;
+        if (raw !== undefined && raw !== null && String(raw) !== "") fsm = String(raw);
+      }
+    } catch {
+      fsm = "UNKNOWN";
+    }
+    // Minutos restantes para átomos tipo REMAINING_TIME <= 5. Sin SimBrief
+    // (o sin zulu) → NaN, NO 0: NaN hace falsa la comparación y un OR con
+    // otro brazo (p. ej. RADIO_HEIGHT) sigue funcionando.
+    let remainingTime = NaN;
+    try {
+      const fl: any = ctx?.getFlight?.() ?? {};
+      const tel3: any = ctx?.getTelemetry?.() ?? {};
+      const schedRaw = fl.scheduledTakeoffTime ?? fl.scheduled_takeoff_time;
+      const z = Number(tel3.zuluTime ?? tel3.zulu_time);
+      const s = Number(schedRaw);
+      const d = Number(fl.durationMinutes);
+      if (
+        fl.durationMinutes != null && schedRaw != null &&
+        !Number.isNaN(z) && !Number.isNaN(s) && !Number.isNaN(d) && d > 0
+      ) {
+        remainingTime = Math.max(0, d - (z - s) / 60);
+      }
+    } catch {
+      remainingTime = NaN;
     }
     return {
       SIM_ON_GROUND: simOnGround === true,
@@ -1019,7 +1887,54 @@ export class RuleEngine {
       ON_ANY_RUNWAY: onAnyRunway === true,
       PLANE_ALTITUDE: altitude,
       ALTITUDE: altitude,
-      _raw: { simOnGround, groundspeed: tel.groundspeed ?? tel.ground_speed, parkingBrake, atcOnParkingSpot, atcClearedTakeoff, onAnyRunway, altitude: tel.altitude },
+      VERTICAL_SPEED: verticalSpeed,
+      RADIO_HEIGHT: radioHeight,
+      GEAR_DOWN: gearDown ? 1 : 0,
+      SEATBELT_SWITCH: seatbeltOn ? 1 : 0,
+      FLIGHT_LEVEL: flightLevel,
+      // Progreso de crucero para reglas tipo "CRUISE_PROGRESS >= 0.95"
+      // (transition_to_descent). Antes ausente: el parser lanzaba
+      // "Variable desconocida" y la regla era falsa siempre.
+      CRUISE_PROGRESS: this.getCruiseProgress(ctx as FlightContext),
+      FSM: fsm,
+      REMAINING_TIME: remainingTime,
+      _raw: { simOnGround, groundspeed: tel.groundspeed ?? tel.ground_speed, parkingBrake, atcOnParkingSpot, atcClearedTakeoff, onAnyRunway, altitude: tel.altitude, verticalSpeed: tel.verticalSpeed, radioHeight: tel.radioHeight, gearDown, seatbeltOn },
+    };
+  }
+
+  /**
+   * Contexto de regla para depuración y compatibilidad (incluye telemetría
+   * + FSM + calculadas). La evaluación usa `getTelemetryExpressionContext`
+   * como fuente única; este método expone la misma foto más contexto.
+   */
+  public getRuleContext(context?: FlightContext): Record<string, any> {
+    const ctx: any = context ?? this.flightContext;
+    const tel: any = ctx?.getTelemetry?.() ?? {};
+    const c = this.getTelemetryExpressionContext(ctx as FlightContext);
+    let fsmState: unknown = null;
+    try {
+      const fsm: any = ctx?.getFSM?.() ?? null;
+      fsmState = fsm?.currentState ?? fsm?.getCurrentState?.() ?? null;
+    } catch {
+      fsmState = null;
+    }
+    return {
+      // Telemetría
+      SIM_ON_GROUND: c.SIM_ON_GROUND,
+      GROUND_VELOCITY: c.GROUND_VELOCITY,
+      PARKING_BRAKE: c.PARKING_BRAKE,
+      ATC_ON_PARKING_SPOT: c.ATC_ON_PARKING_SPOT,
+      ALTITUDE: c.ALTITUDE,
+      VERTICAL_SPEED: tel.verticalSpeed ?? c.VERTICAL_SPEED,
+      RADIO_HEIGHT: tel.radioHeight ?? c.RADIO_HEIGHT,
+      ON_ANY_RUNWAY: c.ON_ANY_RUNWAY,
+      GEAR_DOWN: tel.gearDown ? 1 : 0,
+      SEATBELT_SWITCH: tel.seatbeltOn ? 1 : 0,
+      FLIGHT_LEVEL: c.FLIGHT_LEVEL,
+      // Contexto
+      FSM: fsmState,
+      CRUISE_PROGRESS: this.getCruiseProgress(ctx as FlightContext),
+      REMAINING_TIME: this.getRemainingTime(ctx as FlightContext),
     };
   }
 
@@ -1046,6 +1961,14 @@ export class RuleEngine {
           ATC_CLEARED_TAKEOFF: ctx.ATC_CLEARED_TAKEOFF,
           ON_ANY_RUNWAY: ctx.ON_ANY_RUNWAY,
           PLANE_ALTITUDE: ctx.PLANE_ALTITUDE,
+          VERTICAL_SPEED: ctx.VERTICAL_SPEED,
+          RADIO_HEIGHT: ctx.RADIO_HEIGHT,
+          GEAR_DOWN: ctx.GEAR_DOWN,
+          SEATBELT_SWITCH: ctx.SEATBELT_SWITCH,
+          FLIGHT_LEVEL: ctx.FLIGHT_LEVEL,
+          CRUISE_PROGRESS: ctx.CRUISE_PROGRESS,
+          FSM: ctx.FSM,
+          REMAINING_TIME: ctx.REMAINING_TIME,
         },
         result,
       });
@@ -1071,7 +1994,7 @@ export class RuleEngine {
   } {
     if (!this.isTelemetryExpression(rule)) return { isExpression: false, met: null, rows: [] };
     const ctx = this.getTelemetryExpressionContext(context);
-    const vars = ctx as unknown as Record<string, boolean | number>;
+    const vars = ctx as unknown as Record<string, boolean | number | string>;
     let met: boolean | null = null;
     try {
       met = new TelemetryExprParser(this.tokenizeTelemetryExpression(rule), vars).parse();
@@ -1088,7 +2011,7 @@ export class RuleEngine {
    */
   private describeTelemetryExpression(
     rule: string,
-    vars: Record<string, boolean | number>
+    vars: Record<string, boolean | number | string>
   ): { label: string; ok: boolean; value: string }[] {
     const tokens = this.tokenizeTelemetryExpression(rule);
     const parts: { text: string; tokens: string[]; op: string | null }[] = [];
@@ -1133,14 +2056,18 @@ export class RuleEngine {
   }
 
   /** Valor vivo de la primera variable del átomo (para mostrar junto al resultado). */
-  private atomLiveValue(tokens: string[], vars: Record<string, boolean | number>): string {
+  private atomLiveValue(tokens: string[], vars: Record<string, boolean | number | string>): string {
     for (const t of tokens) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(t)) continue;
       const u = t.toUpperCase();
       if (u === "AND" || u === "OR" || u === "NOT" || u === "TRUE" || u === "FALSE") continue;
       const v = vars[u] ?? (vars as any)[t];
-      if (typeof v === "number") return Number.isInteger(v) ? String(v) : v.toFixed(2);
+      if (typeof v === "number") {
+        if (Number.isNaN(v)) return "—";
+        return Number.isInteger(v) ? String(v) : v.toFixed(2);
+      }
       if (typeof v === "boolean") return String(v);
+      if (typeof v === "string") return v === "" ? "—" : v;
       return String(v ?? "—");
     }
     return "—";
@@ -1148,7 +2075,11 @@ export class RuleEngine {
 
   private tokenizeTelemetryExpression(rule: string): string[] {
     const out: string[] = [];
-    const re = /\s*(==|!=|>=|<=|>|<|\(|\)|[A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?)\s*/g;
+    // NOTA: incluye `+`/`-` para aritmética (p. ej. PLANE_ALTITUDE - FLIGHT_LEVEL)
+    // y literales entrecomillados '...' / "..." (p. ej. FSM == 'DESCENT').
+    // Sin las alternativas de comillas, el `'` se salteaba en silencio y el
+    // contenido se trataba como variable → "Variable desconocida".
+    const re = /\s*(==|!=|>=|<=|>|<|\+|-|\(|\)|'[^']*'|"[^"]*"|[A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?)\s*/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(rule)) !== null) out.push(m[1]);
     return out;
@@ -1172,6 +2103,11 @@ export class RuleEngine {
           ATC_CLEARED_TAKEOFF: c.ATC_CLEARED_TAKEOFF,
           ON_ANY_RUNWAY: c.ON_ANY_RUNWAY,
           PLANE_ALTITUDE: c.PLANE_ALTITUDE,
+          VERTICAL_SPEED: c.VERTICAL_SPEED,
+          RADIO_HEIGHT: c.RADIO_HEIGHT,
+          GEAR_DOWN: c.GEAR_DOWN,
+          SEATBELT_SWITCH: c.SEATBELT_SWITCH,
+          FLIGHT_LEVEL: c.FLIGHT_LEVEL,
         };
       } catch {}
       console.log("[RuleEngine] 🔍 Evaluando scheduler_rule para:", {
@@ -1233,13 +2169,17 @@ function evaluatorName(triggerType: string): string {
   }
 }
 
-/** Parser recursivo para expresiones de scheduler_rule (AND/OR/NOT, comparaciones, paréntesis). */
+/** Parser recursivo para expresiones de scheduler_rule (AND/OR/NOT, comparaciones,
+ *  aritmética +/-, paréntesis y función ABS()). Sin eval(): parser propio.
+ *  Los niveles booleanos (OR/AND/NOT) conservan números sin forzar booleano en
+ *  intermedios, para que la aritmética (p. ej. ABS(A - B) <= 500) se evalúe bien.
+ */
 class TelemetryExprParser {
   private pos = 0;
 
   constructor(
     private readonly tokens: string[],
-    private readonly vars: Record<string, boolean | number>
+    private readonly vars: Record<string, boolean | number | string>
   ) {}
 
   parse(): boolean {
@@ -1247,43 +2187,51 @@ class TelemetryExprParser {
     if (this.pos < this.tokens.length) {
       throw new Error(`Token inesperado: ${this.tokens[this.pos]}`);
     }
-    return result;
+    return this.toBoolean(result);
   }
 
-  private parseOr(): boolean {
+  private parseOr(): boolean | number | string {
     let left = this.parseAnd();
     while (this.peekUpper() === "OR") {
       this.pos++;
       const right = this.parseAnd();
-      left = left || right;
+      left = this.toBoolean(left) || this.toBoolean(right);
     }
     return left;
   }
 
-  private parseAnd(): boolean {
+  private parseAnd(): boolean | number | string {
     let left = this.parseNot();
     while (this.peekUpper() === "AND") {
       this.pos++;
       const right = this.parseNot();
-      left = left && right;
+      left = this.toBoolean(left) && this.toBoolean(right);
     }
     return left;
   }
 
-  private parseNot(): boolean {
+  private parseNot(): boolean | number | string {
     if (this.peekUpper() === "NOT") {
       this.pos++;
-      return !this.parseNot();
+      return !this.toBoolean(this.parseNot());
     }
     return this.parseComparison();
   }
 
-  private parseComparison(): boolean {
-    const left = this.parsePrimary();
+  private parseComparison(): boolean | number | string {
+    const left = this.parseAdditive();
     const op = this.peek();
     if (op === "==" || op === "!=" || op === ">" || op === "<" || op === ">=" || op === "<=") {
       this.pos++;
-      const right = this.parsePrimary();
+      const right = this.parseAdditive();
+      // Comparación de cadenas (p. ej. FSM == 'DESCENT'): solo igualdad.
+      // Ordenar cadenas no tiene sentido en reglas → falso (no lanzar: un
+      // throw invalidaría toda la regla aunque otro brazo del OR cumpla).
+      if (typeof left === "string" || typeof right === "string") {
+        if (op === "==") return String(left) === String(right);
+        if (op === "!=") return String(left) !== String(right);
+        return false;
+      }
       const l = this.toNumber(left);
       const r = this.toNumber(right);
       switch (op) {
@@ -1295,12 +2243,32 @@ class TelemetryExprParser {
         case "<=": return l <= r;
       }
     }
-    return this.toBoolean(left);
+    return left;
   }
 
-  private parsePrimary(): boolean | number {
+  private parseAdditive(): boolean | number | string {
+    let left = this.parsePrimary();
+    for (;;) {
+      const op = this.peek();
+      if (op !== "+" && op !== "-") return left;
+      this.pos++;
+      const right = this.parsePrimary();
+      const l = this.toNumber(left);
+      const r = this.toNumber(right);
+      left = op === "+" ? l + r : l - r;
+    }
+  }
+
+  private parsePrimary(): boolean | number | string {
     const tok = this.tokens[this.pos++];
     if (tok === undefined) throw new Error("Expresión incompleta");
+    // Literal entrecomillado '...' / "..." (p. ej. FSM == 'DESCENT').
+    if (tok.length >= 2 && ((tok.startsWith("'") && tok.endsWith("'")) || (tok.startsWith('"') && tok.endsWith('"')))) {
+      return tok.slice(1, -1);
+    }
+    // Signo unario (p. ej. VERTICAL_SPEED < -500).
+    if (tok === "-") return -this.toNumber(this.parsePrimary());
+    if (tok === "+") return +this.toNumber(this.parsePrimary());
     if (tok === "(") {
       const inner = this.parseOr();
       if (this.tokens[this.pos++] !== ")") throw new Error("Falta ')'");
@@ -1311,6 +2279,13 @@ class TelemetryExprParser {
     if (upper === "FALSE") return false;
     if (/^\d+(\.\d+)?$/.test(tok)) return Number(tok);
     if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(tok)) {
+      // Función ABS(<expr>) para reglas tipo ABS(PLANE_ALTITUDE - FLIGHT_LEVEL).
+      if (upper === "ABS" && this.tokens[this.pos] === "(") {
+        this.pos++;
+        const inner = this.parseOr();
+        if (this.tokens[this.pos++] !== ")") throw new Error("Falta ')' en ABS()");
+        return Math.abs(this.toNumber(inner));
+      }
       const v = this.vars[tok.toUpperCase()] ?? this.vars[tok];
       if (v === undefined) throw new Error(`Variable desconocida: ${tok}`);
       return v;
@@ -1326,12 +2301,19 @@ class TelemetryExprParser {
     return this.tokens[this.pos]?.toUpperCase();
   }
 
-  private toNumber(v: boolean | number): number {
-    return typeof v === "boolean" ? (v ? 1 : 0) : v;
+  private toNumber(v: boolean | number | string): number {
+    if (typeof v === "boolean") return v ? 1 : 0;
+    if (typeof v === "string") {
+      const n = Number(v);
+      return Number.isNaN(n) ? NaN : n;
+    }
+    return v;
   }
 
-  private toBoolean(v: boolean | number): boolean {
-    return typeof v === "boolean" ? v : v !== 0;
+  private toBoolean(v: boolean | number | string): boolean {
+    if (typeof v === "boolean") return v;
+    if (typeof v === "string") return v !== "";
+    return v !== 0;
   }
 }
 

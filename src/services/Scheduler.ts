@@ -593,6 +593,11 @@ export class Scheduler {
       if (phase === FlightPhase.CRUISE) {
         try {
           const zuluTime = this.flightContext.getTelemetry().zuluTime;
+          const cruiseTimeSeconds = this.flightContext.getFlight().cruiseTimeSeconds;
+          console.log('[Scheduler] Registrando cruiseEntryTime:', {
+            zuluTime,
+            cruiseTimeSeconds,
+          });
           if (typeof zuluTime === "number" && !Number.isNaN(zuluTime)) {
             this.flightContext.updateFlight({ cruiseEntryTime: zuluTime });
             console.log("[Scheduler] cruiseEntryTime registrado:", zuluTime);

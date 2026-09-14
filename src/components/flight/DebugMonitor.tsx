@@ -40,6 +40,7 @@ const TELEMETRY_UNITS: Record<string, string> = {
   windSpeed: "kts",
   windDirection: "°",
   agl: "ft",
+  radioHeight: "ft",
   flapsPosition: "°",
   simPhase: "",
   // Nuevas variables para preflight_capt_delay_parked
@@ -620,6 +621,55 @@ export default function DebugMonitor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tick, telemetry, fsm, snapshot, lastUpdate]);
 
+  // ── Transición CLIMB → CRUISE (ABS(ALT - FL) <= 500) ──
+  const cruiseTransition = useMemo(() => {
+    void tick;
+    const tel = telemetry as Record<string, any>;
+    const rawAlt = tel?.altitude;
+    const planeAltitude: number | null =
+      typeof rawAlt === "number" && !Number.isNaN(rawAlt) ? rawAlt : null;
+    const flt = flight as Record<string, any>;
+    const rawFl = flt?.cruiseAltitude;
+    const flightLevel: number | null =
+      typeof rawFl === "number" && !Number.isNaN(rawFl) ? rawFl : null;
+    const diff: number | null =
+      planeAltitude !== null && flightLevel !== null
+        ? Math.abs(planeAltitude - flightLevel)
+        : null;
+    const threshold = 500;
+    const met = diff !== null && diff <= threshold;
+    const hasData = planeAltitude !== null && flightLevel !== null;
+    // Preferir RuleEngine (misma lógica que el disparo); fallback espejo local.
+    let engineMet: boolean | null = null;
+    try {
+      const re: any = (ruleEngine as any) ?? (scheduler as any)?.ruleEngine ?? null;
+      const ctx: any = flightContext as any;
+      if (re?.getCruiseTransitionDetail) {
+        const d = ctx ? re.getCruiseTransitionDetail(ctx) : re.getCruiseTransitionDetail();
+        if (d && typeof d.met === "boolean") engineMet = d.met;
+      }
+    } catch {
+      engineMet = null;
+    }
+    const status = !hasData
+      ? ({ label: "⏳ Esperando datos", hint: "falta altitud o FLIGHT_LEVEL (cruiseAltitude SimBrief)", tone: "waiting" } as const)
+      : met
+        ? ({ label: "✅ Condición cumplida", hint: "dentro de ±500 ft del nivel", tone: "ready" } as const)
+        : ({ label: "⏳ Esperando", hint: `${Math.round(diff ?? 0).toLocaleString("en-US")} ft de diferencia (requiere <= 500)`, tone: "waiting" } as const);
+    return {
+      planeAltitude,
+      flightLevel,
+      diff,
+      threshold,
+      met,
+      engineMet,
+      hasData,
+      status,
+      lastEvaluation: new Date(lastUpdate).toLocaleString("es-ES"),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tick, telemetry, flight, ruleEngine, scheduler, flightContext, lastUpdate]);
+
   // ── Origen de la última transición (Scheduler.lastTransitionInfo) ──
   const transitionOrigin = useMemo(() => {
     void tick;
@@ -778,6 +828,67 @@ export default function DebugMonitor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tick, narrativeEngine, scheduler, ruleEngine, flightContext, lastUpdate]);
 
+  // ── Próximo evento bloqueante (WAIT_CONDITION blocking sin completar) ──
+  // Reutiliza la evaluación ya calculada en waitConditionSteps (sin efectos
+  // secundarios): el candidato es el paso actual si bloquea, si no el primer
+  // WAIT_CONDITION bloqueante pendiente del escenario.
+  const blockingStep = useMemo(() => {
+    void tick;
+    try {
+      const engines: any =
+        (narrativeEngine as any) ??
+        (scheduler as any)?.getNarrativeEngine?.() ??
+        (scheduler as any)?.narrativeEngine ??
+        null;
+      if (!engines) return null;
+      const isWaitBlocking = (s: any): boolean => {
+        const tr = s?.transition;
+        const isWait =
+          tr === (NarrativeTransition.WAIT_CONDITION as unknown) || tr === "WAIT_CONDITION";
+        return isWait && s?.blocking === true;
+      };
+      const isDone = (key: string): boolean => {
+        try {
+          return engines?.isStepCompleted?.(key) === true || engines?.hasFired?.(key) === true;
+        } catch {
+          return false;
+        }
+      };
+      let candidate: any = null;
+      try {
+        const cur = engines?.currentStep?.() ?? null;
+        if (cur && isWaitBlocking(cur) && !isDone(cur.eventKey)) candidate = cur;
+      } catch {}
+      if (!candidate) {
+        let steps: any[] = [];
+        try {
+          if (typeof engines?.getSteps === "function") steps = engines.getSteps();
+        } catch {
+          steps = [];
+        }
+        candidate = steps.find((s) => isWaitBlocking(s) && !isDone(s.eventKey)) ?? null;
+      }
+      if (!candidate) return null;
+      const evaluated = waitConditionSteps.find((w) => w.eventKey === String(candidate.eventKey)) ?? null;
+      let phase: string = "—";
+      try {
+        phase = (scheduler as any)?.getCurrentPhase?.() ?? (fsm as any)?.currentState ?? "—";
+      } catch {}
+      return {
+        eventKey: String(candidate.eventKey),
+        phase: String(phase ?? "—"),
+        rows: evaluated?.rows ?? [],
+        summary: evaluated?.summary ?? "Sin evaluación disponible",
+        met: evaluated?.met ?? null,
+        isCurrent: evaluated?.isCurrent ?? false,
+        evaluatedAt: new Date(lastUpdate).toLocaleString("es-ES"),
+      };
+    } catch {
+      return null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tick, narrativeEngine, scheduler, ruleEngine, flightContext, fsm, lastUpdate, waitConditionSteps]);
+
   // ── Variables de Crucero (cruise_time SimBrief + progreso + internacional) ──
   const cruiseVars = useMemo(() => {
     void tick;
@@ -798,9 +909,18 @@ export default function DebugMonitor({
     let progress = 0;
     let sleeping = false;
     let international = flightData?.isInternational === true;
+    let nightNow = false;
     let usedEngine = false;
+    const isWidebody = flightData?.aircraftIsWidebody === true;
+    const aircraftType: string = String(flightData?.aircraftType ?? "");
+    const durationMinutes: number | null =
+      typeof flightData?.durationMinutes === "number" && !Number.isNaN(flightData.durationMinutes)
+        ? flightData.durationMinutes
+        : null;
     try {
-      const re: any = (ruleEngine as any) ?? (scheduler as any)?.ruleEngine ?? null;
+      // P2: preferir el motor del Scheduler (tiene phaseProvider y contexto
+      // vivo; el prop puede ser otra instancia sin fase → mostraba 0.00).
+      const re: any = (scheduler as any)?.ruleEngine ?? (ruleEngine as any) ?? null;
       if (re?.getCruiseProgress) {
         const ctx: any = flightContext as any;
         progress = Number(ctx ? re.getCruiseProgress(ctx) : re.getCruiseProgress()) || 0;
@@ -814,6 +934,10 @@ export default function DebugMonitor({
         const ctx: any = flightContext as any;
         international = (ctx ? re.isInternationalFlight(ctx) : re.isInternationalFlight()) === true;
       }
+      if (re?.isNightNow) {
+        const ctx: any = flightContext as any;
+        nightNow = (ctx ? re.isNightNow(ctx) : re.isNightNow()) === true;
+      }
     } catch {
       usedEngine = false;
     }
@@ -826,9 +950,10 @@ export default function DebugMonitor({
         }
       }
       const local = Number(tel?.localTime);
-      if (progress >= 0.25 && progress < 0.80 && !Number.isNaN(local)) {
+      if (!Number.isNaN(local)) {
         const h = Math.floor((local % 86400) / 3600);
-        sleeping = h >= 23 || h < 6;
+        nightNow = h >= 23 || h < 6;
+        if (progress >= 0.25 && progress < 0.80) sleeping = nightNow;
       }
     }
 
@@ -838,6 +963,10 @@ export default function DebugMonitor({
       progress,
       sleeping,
       international,
+      nightNow,
+      isWidebody,
+      aircraftType,
+      durationMinutes,
       originICAO,
       destICAO,
       originCountry: originICAO ? getCountryKey(originICAO) : "—",
@@ -845,6 +974,98 @@ export default function DebugMonitor({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tick, flight, telemetry, ruleEngine, scheduler, flightContext]);
+
+  // ── Variables de Descenso (RADIO HEIGHT + tren + calculadas) ──
+  const descentVars = useMemo(() => {
+    void tick;
+    const tel = telemetry as Record<string, any>;
+    const altitude: number = Number(tel?.altitude ?? 0) || 0;
+    const radioHeightRaw = tel?.radioHeight ?? tel?.radio_height;
+    const radioHeight: number | null =
+      typeof radioHeightRaw === "number" && !Number.isNaN(radioHeightRaw) ? radioHeightRaw : null;
+    const radioValid = radioHeight !== null && radioHeight > 0;
+    const verticalSpeed: number = Number(tel?.verticalSpeed ?? 0) || 0;
+    const gearDown: boolean | null =
+      typeof tel?.gearDown === "boolean" ? (tel.gearDown as boolean) : null;
+
+    let remainingTime: number | null = null;
+    let distanceToDest: number | null = null;
+    try {
+      const re: any = (ruleEngine as any) ?? (scheduler as any)?.ruleEngine ?? null;
+      const ctx: any = flightContext as any;
+      if (re?.getRemainingTime) {
+        const v = Number(ctx ? re.getRemainingTime(ctx) : re.getRemainingTime());
+        remainingTime = Number.isNaN(v) ? null : v;
+      }
+      if (re?.getDistanceToDestination) {
+        const v = Number(ctx ? re.getDistanceToDestination(ctx) : re.getDistanceToDestination());
+        distanceToDest = Number.isNaN(v) ? null : v;
+      }
+    } catch {
+      remainingTime = null;
+      distanceToDest = null;
+    }
+
+    return {
+      altitude,
+      radioHeight,
+      radioValid,
+      verticalSpeed,
+      gearDown,
+      remainingTime,
+      distanceToDest,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tick, telemetry, flight, ruleEngine, scheduler, flightContext]);
+
+  // ── Variables de Rodaje (tiempo detenido en plataforma) ──
+  const taxiVars = useMemo(() => {
+    void tick;
+    const tel = telemetry as Record<string, any>;
+    const gsRaw = tel?.groundspeed ?? tel?.ground_speed;
+    const groundspeed: number =
+      typeof gsRaw === "number" && !Number.isNaN(gsRaw) ? gsRaw : 0;
+    let timeStopped: number | null = null;
+    try {
+      const re: any = (ruleEngine as any) ?? (scheduler as any)?.ruleEngine ?? null;
+      const ctx: any = flightContext as any;
+      if (re?.getTimeStopped) {
+        const v = Number(ctx ? re.getTimeStopped(ctx) : re.getTimeStopped());
+        timeStopped = Number.isNaN(v) ? null : v;
+      }
+    } catch {
+      timeStopped = null;
+    }
+    return { groundspeed, timeStopped };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tick, telemetry, ruleEngine, scheduler, flightContext]);
+
+  // ── Variables de Puerta (motores apagados) ──
+  const gateVars = useMemo(() => {
+    void tick;
+    const tel = telemetry as Record<string, any>;
+    const numRaw = tel?.numberOfEngines ?? tel?.numEngines;
+    const numberOfEngines: number | null =
+      typeof numRaw === "number" && Number.isFinite(numRaw) ? numRaw : null;
+    const eng = (i: number): boolean | null => {
+      const v = i === 1
+        ? (tel?.engineCombustion1 ?? tel?.engCombustion1 ?? tel?.engineRunning)
+        : (tel?.[`engineCombustion${i}`] ?? tel?.[`engCombustion${i}`]);
+      return typeof v === "boolean" ? v : null;
+    };
+    let allOff: boolean | null = null;
+    try {
+      const re: any = (ruleEngine as any) ?? (scheduler as any)?.ruleEngine ?? null;
+      const ctx: any = flightContext as any;
+      if (re?.areAllEnginesOff) {
+        allOff = (ctx ? re.areAllEnginesOff(ctx) : re.areAllEnginesOff()) === true;
+      }
+    } catch {
+      allOff = null;
+    }
+    return { numberOfEngines, eng1: eng(1), eng2: eng(2), eng3: eng(3), eng4: eng(4), allOff };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tick, telemetry, ruleEngine, scheduler, flightContext]);
 
   // ── Estado de espera del orquestador (timers, audio, pasos manuales) ──
   const waitSnapshot = useMemo(() => {
@@ -940,7 +1161,7 @@ export default function DebugMonitor({
           </Section>
 
           {/* Variables de Crucero */}
-          <Section title="✈️ Variables de Crucero" icon={Plane} count={7} defaultOpen={true}>
+          <Section title="✈️ Variables de Crucero" icon={Plane} count={11} defaultOpen={true}>
             <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
               Progreso de crucero (cruise_time SimBrief vs zuluTime) · actualización 1s
             </div>
@@ -960,8 +1181,34 @@ export default function DebugMonitor({
                 </span>
               </div>
               <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">PASSENGERS_SLEEPING</span>
-                <span>{formatValue("PASSENGERS_SLEEPING", cruiseVars.sleeping)}</span>
+                <span className="font-mono text-[11px] text-white/60">CRUISE_ENTRY_TIME</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {cruiseVars.cruiseEntryTime !== null
+                    ? `${secondsToHHMM(cruiseVars.cruiseEntryTime)} UTC`
+                    : <span className="text-white/30 italic">— (aún no en CRUISE)</span>}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">IS_NIGHT_FLIGHT</span>
+                <span>{formatValue("IS_NIGHT_FLIGHT", cruiseVars.nightNow)}</span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">IS_WIDEBODY</span>
+                <span>{formatValue("IS_WIDEBODY", cruiseVars.isWidebody)}</span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">AIRCRAFT_TYPE</span>
+                <span className="font-mono text-[11px] text-white/80">
+                  {cruiseVars.aircraftType || <span className="text-white/30 italic">—</span>}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">FLIGHT_DURATION</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {cruiseVars.durationMinutes !== null
+                    ? `${cruiseVars.durationMinutes} min (${secondsToTimeRemaining(cruiseVars.durationMinutes * 60)})`
+                    : <span className="text-white/30 italic">— (sin SimBrief)</span>}
+                </span>
               </div>
               <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
                 <span className="font-mono text-[11px] text-white/60">IS_INTERNATIONAL</span>
@@ -973,6 +1220,10 @@ export default function DebugMonitor({
                 </span>
               </div>
               <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">PASSENGERS_SLEEPING</span>
+                <span>{formatValue("PASSENGERS_SLEEPING", cruiseVars.sleeping)}</span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
                 <span className="font-mono text-[11px] text-white/60">originCountry</span>
                 <span className="font-mono text-[11px] text-white/80">{cruiseVars.originCountry}</span>
               </div>
@@ -980,12 +1231,138 @@ export default function DebugMonitor({
                 <span className="font-mono text-[11px] text-white/60">destCountry</span>
                 <span className="font-mono text-[11px] text-white/80">{cruiseVars.destCountry}</span>
               </div>
+            </div>
+          </Section>
+
+          {/* Variables de Descenso */}
+          <Section title="🛬 Variables de Descenso" icon={Plane} count={6} defaultOpen={true}>
+            <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
+              Aproximación y aterrizaje (RADIO HEIGHT solo válida &lt; 2500 ft AGL) · actualización 1s
+            </div>
+            <div className="space-y-0.5">
               <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">cruiseEntryTime</span>
+                <span className="font-mono text-[11px] text-white/60">ALTITUDE</span>
                 <span className="font-mono text-[11px] text-[#45AFFF]">
-                  {cruiseVars.cruiseEntryTime !== null
-                    ? `${secondsToHHMM(cruiseVars.cruiseEntryTime)} UTC`
-                    : <span className="text-white/30 italic">— (aún no en CRUISE)</span>}
+                  {Number.isInteger(descentVars.altitude) ? descentVars.altitude : descentVars.altitude.toFixed(1)}
+                  <span className="text-white/40 ml-1">ft</span>
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">RADIO_HEIGHT</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {descentVars.radioHeight !== null ? (
+                    <>
+                      {Number.isInteger(descentVars.radioHeight) ? descentVars.radioHeight : descentVars.radioHeight.toFixed(1)}
+                      <span className="text-white/40 ml-1">ft</span>
+                      {!descentVars.radioValid && (
+                        <span className="text-white/40 ml-1">(no válido &gt; 2500 ft)</span>
+                      )}
+                    </>
+                  ) : (
+                    <span className="text-white/30 italic">—</span>
+                  )}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">VERTICAL_SPEED</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {Number.isInteger(descentVars.verticalSpeed) ? descentVars.verticalSpeed : descentVars.verticalSpeed.toFixed(1)}
+                  <span className="text-white/40 ml-1">ft/min</span>
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">GEAR_DOWN</span>
+                <span>{descentVars.gearDown === null ? <span className="text-white/30 italic font-mono text-[11px]">—</span> : formatValue("GEAR_DOWN", descentVars.gearDown)}</span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">REMAINING_TIME</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {descentVars.remainingTime !== null ? (
+                    <>
+                      {descentVars.remainingTime.toFixed(1)}
+                      <span className="text-white/40 ml-1">min</span>
+                    </>
+                  ) : (
+                    <span className="text-white/30 italic">—</span>
+                  )}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">DISTANCE_TO_DEST</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {descentVars.distanceToDest !== null ? (
+                    <>
+                      {descentVars.distanceToDest.toFixed(1)}
+                      <span className="text-white/40 ml-1">NM</span>
+                    </>
+                  ) : (
+                    <span className="text-white/30 italic">—</span>
+                  )}
+                </span>
+              </div>
+            </div>
+          </Section>
+
+          {/* Variables de Rodaje */}
+          <Section title="🚗 Variables de Rodaje" icon={Timer} count={2} defaultOpen={true}>
+            <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
+              Detención en plataforma (menos de 1 kt = detenido) · actualización 1s
+            </div>
+            <div className="space-y-0.5">
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">GROUND_VELOCITY</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {Number.isInteger(taxiVars.groundspeed) ? taxiVars.groundspeed : taxiVars.groundspeed.toFixed(2)}
+                  <span className="text-white/40 ml-1">kt</span>
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">TIME_STOPPED</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {taxiVars.timeStopped !== null ? (
+                    <>
+                      {taxiVars.timeStopped.toFixed(0)}
+                      <span className="text-white/40 ml-1">s</span>
+                    </>
+                  ) : (
+                    <span className="text-white/30 italic">—</span>
+                  )}
+                </span>
+              </div>
+            </div>
+          </Section>
+
+          {/* Variables de Puerta */}
+          <Section title="🛬 Variables de Puerta" icon={Plane} count={5} defaultOpen={true}>
+            <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
+              Motores apagados en puerta (atgate_capt_disarm_doors) · actualización 1s
+            </div>
+            <div className="space-y-0.5">
+              {[
+                { label: "ENG_COMBUSTION_1", value: gateVars.eng1 },
+                { label: "ENG_COMBUSTION_2", value: gateVars.eng2 },
+                { label: "ENG_COMBUSTION_3", value: gateVars.eng3 },
+                { label: "ENG_COMBUSTION_4", value: gateVars.eng4 },
+              ].map((r) => (
+                <div key={r.label} className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                  <span className="font-mono text-[11px] text-white/60">{r.label}</span>
+                  <span>
+                    {r.value === null ? (
+                      <span className="text-white/30 italic font-mono text-[11px]">—</span>
+                    ) : (
+                      formatValue(r.label, r.value)
+                    )}
+                  </span>
+                </div>
+              ))}
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">ALL_ENGINES_OFF</span>
+                <span>
+                  {gateVars.allOff === null ? (
+                    <span className="text-white/30 italic font-mono text-[11px]">—</span>
+                  ) : (
+                    formatValue("ALL_ENGINES_OFF", gateVars.allOff)
+                  )}
                 </span>
               </div>
             </div>
@@ -1268,6 +1645,76 @@ export default function DebugMonitor({
             </div>
           </Section>
 
+          {/* Transición a CRUISE */}
+          <Section title="✈️ Transición a CRUISE" icon={Plane} count={3} defaultOpen={true}>
+            <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
+              Evaluación CLIMB → CRUISE (ABS(PLANE_ALTITUDE - FLIGHT_LEVEL) &lt;= 500) · actualización 1s
+            </div>
+            <div className="border border-white/10 rounded-[5px] overflow-hidden bg-white/[0.02]">
+              <div className="px-2 py-1.5 bg-white/[0.04] border-b border-white/5">
+                <span className="font-mono text-[11px] font-bold text-[#45AFFF]">
+                  Transición a CRUISE (CLIMB → CRUISE)
+                </span>
+              </div>
+              <div className="p-2 space-y-0.5">
+                <div className="text-[10px] font-mono text-white/40 uppercase tracking-wider px-2 pt-1">
+                  Condiciones:
+                </div>
+                <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                  <span className="font-mono text-[11px] text-white/60">PLANE_ALTITUDE</span>
+                  <span className="font-mono text-[11px] text-[#45AFFF]">
+                    {cruiseTransition.planeAltitude !== null ? (
+                      <>{Math.round(cruiseTransition.planeAltitude).toLocaleString("en-US")}<span className="text-white/40 ml-1">ft</span></>
+                    ) : (
+                      <span className="text-white/30 italic">—</span>
+                    )}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                  <span className="font-mono text-[11px] text-white/60">FLIGHT_LEVEL</span>
+                  <span className="font-mono text-[11px] text-[#45AFFF]">
+                    {cruiseTransition.flightLevel !== null ? (
+                      <>{Math.round(cruiseTransition.flightLevel).toLocaleString("en-US")}<span className="text-white/40 ml-1">ft</span></>
+                    ) : (
+                      <span className="text-white/30 italic">— (sin cruiseAltitude SimBrief)</span>
+                    )}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                  <span className="font-mono text-[11px] text-white/60">ABS(ALT - FL)</span>
+                  <span className="font-mono text-[11px] text-[#45AFFF]">
+                    {cruiseTransition.diff !== null ? (
+                      <>
+                        {Math.round(cruiseTransition.diff).toLocaleString("en-US")}
+                        <span className="text-white/40 ml-1">ft (requiere &lt;= {cruiseTransition.threshold})</span>
+                      </>
+                    ) : (
+                      <span className="text-white/30 italic">—</span>
+                    )}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                  <span className="font-mono text-[11px] text-white/60">{cruiseTransition.met ? "✅ Condición cumplida" : "❌ Condición no cumplida"}</span>
+                  <span className="font-mono text-[11px] text-white/60">
+                    {cruiseTransition.engineMet !== null && cruiseTransition.engineMet !== cruiseTransition.met ? (
+                      <span className="text-yellow-300">⚠️ RuleEngine: {String(cruiseTransition.engineMet)}</span>
+                    ) : null}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04] border-t border-white/5 mt-1 pt-2">
+                  <span className="font-mono text-[11px] text-white/60">Estado general</span>
+                  <span className="font-mono text-[11px] font-bold text-white/80">
+                    {cruiseTransition.status.label} <span className="font-normal text-white/60">({cruiseTransition.status.hint})</span>
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                  <span className="font-mono text-[11px] text-white/60">Última actualización</span>
+                  <span className="font-mono text-[10px] text-white/40">{cruiseTransition.lastEvaluation}</span>
+                </div>
+              </div>
+            </div>
+          </Section>
+
           {/* Pasos en espera (WAIT_CONDITION) */}
           <Section title="Pasos en espera (WAIT_CONDITION)" icon={Timer} count={waitConditionSteps.length} defaultOpen={true}>
             <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
@@ -1329,6 +1776,66 @@ export default function DebugMonitor({
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+          </Section>
+
+          {/* Próximo evento bloqueante */}
+          <Section title="🚫 Próximo Evento Bloqueante" icon={AlertTriangle} count={blockingStep ? 1 : 0} defaultOpen={true}>
+            <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
+              Primer WAIT_CONDITION bloqueante sin completar · actualización 1s
+            </div>
+            {!blockingStep ? (
+              <div className="text-[11px] font-mono text-white/30 italic px-2 py-2">
+                Sin eventos bloqueantes pendientes ✅
+              </div>
+            ) : (
+              <div className="border border-white/10 rounded-[5px] overflow-hidden bg-white/[0.02]">
+                <div className="px-2 py-1.5 bg-white/[0.04] border-b border-white/5">
+                  <span className="font-mono text-[11px] font-bold text-[#ffb340]">
+                    {blockingStep.eventKey}
+                    {blockingStep.isCurrent && <span className="ml-1 text-[#43E600]">▶</span>}
+                  </span>
+                </div>
+                <div className="p-2 space-y-0.5">
+                  <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                    <span className="font-mono text-[11px] text-white/60">Evento</span>
+                    <span className="font-mono text-[11px] text-white/80">{blockingStep.eventKey}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                    <span className="font-mono text-[11px] text-white/60">Fase</span>
+                    <span className="font-mono text-[11px] text-white/80">{blockingStep.phase}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                    <span className="font-mono text-[11px] text-white/60">Transición</span>
+                    <span className="font-mono text-[11px] text-white/80">WAIT_CONDITION</span>
+                  </div>
+                  <div className="text-[10px] font-mono text-white/40 uppercase tracking-wider px-2 pt-1">
+                    Condiciones:
+                  </div>
+                  {blockingStep.rows.length === 0 ? (
+                    <div className="px-2 py-1 font-mono text-[11px] text-white/40 italic">{blockingStep.summary}</div>
+                  ) : (
+                    blockingStep.rows.map((c) => (
+                      <div key={c.label} className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                        <span className="font-mono text-[11px] text-white/60">{c.label}</span>
+                        <span className={`font-mono text-[11px] font-bold ${c.ok ? "text-[#43E600]" : "text-red-400"}`}>
+                          {c.ok ? "✅" : "❌"} <span className="font-normal text-white/60">= {c.value}</span>
+                        </span>
+                      </div>
+                    ))
+                  )}
+                  <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04] border-t border-white/5 mt-1 pt-2">
+                    <span className="font-mono text-[11px] text-white/60">Estado</span>
+                    <span className="font-mono text-[11px] font-bold text-white/80">
+                      {blockingStep.met === true ? "✅ Listo" : blockingStep.met === false ? "⏳ Bloqueado" : "❓ Sin datos"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                    <span className="font-mono text-[11px] text-white/60">Última evaluación</span>
+                    <span className="font-mono text-[10px] text-white/40">{blockingStep.evaluatedAt}</span>
+                  </div>
+                </div>
               </div>
             )}
           </Section>

@@ -72,7 +72,8 @@ import { BoardingMusicService, BoardingMusicTrack } from "../services/BoardingMu
 import { musicController, RANDOM_MUSIC_ID } from "../services/MusicController";
 import { fileLogger } from "../services/FileLogger";
 import { secondsToHHMM } from "../utils/timeUtils";
-import { isInternationalFlight, getCountryKey } from "../utils/flightUtils";
+import { isInternationalFlight, getCountryKey, resolveCruiseTimeSeconds } from "../utils/flightUtils";
+import { getAircraftType } from "../services/aircraftService";
 import MusicPreview from "./music/MusicPreview";
 import type {
   ScenarioConfigSnapshot,
@@ -1217,6 +1218,8 @@ export default function VueloActualView({
   const [isFetchingSimbrief, setIsFetchingSimbrief] = useState<boolean>(false);
   const [simbriefRawData, setSimbriefRawData] = useState<any>(null);
   const [simbriefError, setSimbriefError] = useState<string | null>(null);
+  // Datos de aeronave resueltos contra aircraft_types (una sola vez por importación).
+  const [simbriefAircraft, setSimbriefAircraft] = useState<{ icao: string; isWidebody: boolean; displayName: string } | null>(null);
 
   // Load voices from DB — two-step query (more robust than FK join)
   useEffect(() => {
@@ -1852,6 +1855,7 @@ export default function VueloActualView({
     setIsFetchingSimbrief(true);
     setSimbriefError(null);
     setSimbriefRawData(null);
+    setSimbriefAircraft(null);
     try {
       const response = await fetch(`https://www.simbrief.com/api/xml.fetcher.php?userid=${simbriefId}&json=1`);
       if (response.status === 400) {
@@ -1861,6 +1865,45 @@ export default function VueloActualView({
       }
       const data = await response.json();
       setSimbriefRawData(data);
+
+      // --- Datos de crucero ---
+      // NOTA: SimBrief NO trae `times.cruise_time`; se deriva del navlog
+      // (Σ time_leg con stage CRZ). Ver resolveCruiseTimeSeconds.
+      const cruiseResolved = resolveCruiseTimeSeconds(data);
+      const cruiseTimeSeconds = cruiseResolved.seconds;
+      console.log('[SimBrief] cruise_time raw:', (data as any)?.times?.cruise_time);
+      console.log('[SimBrief] cruiseTimeSeconds:', cruiseTimeSeconds, `(fuente: ${cruiseResolved.source})`);
+
+      // --- Datos de vuelo internacional ---
+      const originICAO = data?.origin?.icao_code || "";
+      const destICAO = data?.destination?.icao_code || "";
+      const isInternational = originICAO && destICAO
+        ? isInternationalFlight(originICAO, destICAO)
+        : false;
+
+      // --- Datos de aeronave (widebody, una sola vez por importación) ---
+      const aircraftIcao = String(
+        data?.aircraft?.icao_code ?? data?.aircraft?.icaocode ?? data?.general?.icao_aircraft ?? ""
+      ).toUpperCase();
+      const aircraftData = await getAircraftType(aircraftIcao);
+      const aircraftIsWidebody = aircraftData?.is_widebody === true;
+      setSimbriefAircraft({
+        icao: aircraftIcao,
+        isWidebody: aircraftIsWidebody,
+        displayName: aircraftData?.display_name || "N/A",
+      });
+
+      console.log("[SimBrief] Datos de vuelo importados:", {
+        cruiseTimeSeconds,
+        originICAO,
+        destICAO,
+        isInternational,
+        originCountry: originICAO ? getCountryKey(originICAO) : "—",
+        destCountry: destICAO ? getCountryKey(destICAO) : "—",
+        aircraftIcao,
+        aircraftIsWidebody,
+        aircraftDisplayName: aircraftData?.display_name || "N/A",
+      });
 
       // Logs detallados solicitados: verificar estructura SimBrief
       console.log('[SimBrief] Estructura de datos:', Object.keys(data || {}));
@@ -2451,12 +2494,61 @@ export default function VueloActualView({
     // ── Datos de crucero (fase CRUISE) ──────────────────────────────────
     // cruise_time de SimBrief (segundos) + cálculo de vuelo internacional
     // (una sola vez aquí, al construir los datos; se propaga vía syncFlightContext).
-    const cruiseTimeSeconds = Number((simbriefRawData as any)?.times?.cruise_time || 0);
+    // NOTA: `times.cruise_time` no existe en el JSON de SimBrief; se deriva del
+    // navlog (Σ time_leg con stage CRZ). Ver resolveCruiseTimeSeconds.
+    const cruiseResolved = resolveCruiseTimeSeconds(simbriefRawData);
+    const cruiseTimeSeconds = cruiseResolved.seconds;
+    if (hasSimBrief) {
+      console.log('[SimBrief] cruise_time raw:', (simbriefRawData as any)?.times?.cruise_time);
+      console.log('[SimBrief] cruiseTimeSeconds:', cruiseTimeSeconds, `(fuente: ${cruiseResolved.source})`);
+      console.log('[SimBrief] durationMinutes:', (simbriefRawData as any)?.times?.est_time_enroute);
+    }
     const cruiseOriginICAO = simbriefRawData?.origin?.icao_code || originICAO || "";
     const cruiseDestICAO = simbriefRawData?.destination?.icao_code || destICAO || "";
     const cruiseIsInternational = cruiseOriginICAO && cruiseDestICAO
       ? isInternationalFlight(cruiseOriginICAO, cruiseDestICAO)
       : false;
+
+    // ── Datos de aeronave y duración (restricciones CRUISE) ─────────────
+    // El ICAO se deriva de forma síncrona; el flag widebody llega del estado
+    // `simbriefAircraft` (resuelto una sola vez en handleImportSimbrief contra
+    // aircraft_types). Si aún no resolvió, se preserva el valor previo del contexto.
+    const sbAircraftIcao = String(
+      (simbriefRawData as any)?.aircraft?.icao_code
+        ?? (simbriefRawData as any)?.aircraft?.icaocode
+        ?? (simbriefRawData as any)?.general?.icao_aircraft
+        ?? ""
+    ).toUpperCase();
+    const prevFlight = flightContextRef.current?.getFlight();
+    const aircraftIsWidebody = (simbriefAircraft && sbAircraftIcao !== "" && simbriefAircraft.icao === sbAircraftIcao)
+      ? simbriefAircraft.isWidebody
+      : (prevFlight?.aircraftType === sbAircraftIcao ? prevFlight?.aircraftIsWidebody : undefined);
+
+    // Duración estimada en minutos: est_time_enroute (segundos) con fallback
+    // a est_block (horas decimales). Misma convención que blockMinutes/flightDuration.
+    let durationMinutes = 0;
+    const enrouteRaw = Number((simbriefRawData as any)?.times?.est_time_enroute);
+    if (!Number.isNaN(enrouteRaw) && enrouteRaw > 0) {
+      durationMinutes = Math.round(enrouteRaw / 60);
+    } else {
+      const blockRaw = parseFloat((simbriefRawData as any)?.times?.est_block);
+      if (!Number.isNaN(blockRaw) && blockRaw > 0) durationMinutes = Math.round(blockRaw * 60);
+    }
+
+    // ── Altitud de crucero en pies (transición a descenso) ──────────────
+    // SimBrief `general.route_altitude` (pies, a veces "FL350"). Si el valor
+    // parece nivel de vuelo (<= 500), se convierte a pies. Sin dato se
+    // preserva el valor previo del contexto.
+    let cruiseAltitude: number | undefined;
+    const rawAlt = (simbriefRawData as any)?.general?.route_altitude
+      ?? (simbriefRawData as any)?.general?.initial_altitude
+      ?? "";
+    const altNum = Number(String(rawAlt).replace(/[^0-9.]/g, ""));
+    if (!Number.isNaN(altNum) && altNum > 0) {
+      cruiseAltitude = altNum <= 500 ? Math.round(altNum * 100) : Math.round(altNum);
+    } else if (prevFlight?.cruiseAltitude) {
+      cruiseAltitude = prevFlight.cruiseAltitude;
+    }
     if (hasSimBrief) {
       console.log("[SimBrief] Datos de crucero:", {
         cruiseTimeSeconds,
@@ -2496,6 +2588,10 @@ export default function VueloActualView({
         scheduledTakeoffTime: scheduledTakeoffSec,
         cruiseTimeSeconds,
         isInternational: cruiseIsInternational,
+        aircraftType: sbAircraftIcao || undefined,
+        aircraftIsWidebody,
+        durationMinutes,
+        cruiseAltitude,
         captainPrimaryLang,
         captainSecondaryLang,
         flightId,
@@ -2510,6 +2606,10 @@ export default function VueloActualView({
         scheduledTakeoffTime: scheduledTakeoffSec,
         cruiseTimeSeconds,
         isInternational: savedFlightData.isInternational ?? cruiseIsInternational,
+        aircraftType: savedFlightData.aircraftType ?? (sbAircraftIcao || undefined),
+        aircraftIsWidebody: savedFlightData.aircraftIsWidebody ?? aircraftIsWidebody,
+        durationMinutes: savedFlightData.durationMinutes ?? durationMinutes,
+        cruiseAltitude: savedFlightData.cruiseAltitude ?? cruiseAltitude,
         specialEvent: specialEvents,
         specialEventEnabled: specialEventEnabled,
       };
@@ -2528,6 +2628,10 @@ export default function VueloActualView({
       scheduledTakeoffTime: scheduledTakeoffSec,
       cruiseTimeSeconds,
       isInternational: cruiseIsInternational,
+      aircraftType: sbAircraftIcao || undefined,
+      aircraftIsWidebody,
+      durationMinutes,
+      cruiseAltitude,
       captainPrimaryLang,
       captainSecondaryLang,
       flightId,
@@ -2537,7 +2641,7 @@ export default function VueloActualView({
   }, [
     airline, flightCode, originICAO, destICAO, originCityName, destCityName,
     gate, departureTimeStr, departureTimeLocalStr, captainPrimaryLang, captainSecondaryLang, flightId,
-    simbriefRawData,
+    simbriefRawData, simbriefAircraft,
     specialEvents, specialEventEnabled,
   ]);
 

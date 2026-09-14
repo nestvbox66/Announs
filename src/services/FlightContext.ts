@@ -40,6 +40,14 @@ export interface FlightInfo {
   cruiseEntryTime?: number;
   /** Calculado al importar SimBrief (origen vs destino). */
   isInternational?: boolean;
+  /** Código ICAO del avión (de SimBrief `aircraft.icaocode`). */
+  aircraftType?: string;
+  /** Si es widebody (desde tabla `aircraft_types` al importar SimBrief). */
+  aircraftIsWidebody?: boolean;
+  /** Duración estimada del vuelo en minutos (de SimBrief `times`). */
+  durationMinutes?: number;
+  /** Altitud de crucero en pies (de SimBrief `general.route_altitude`). */
+  cruiseAltitude?: number;
 }
 
 export interface VoicesInfo {

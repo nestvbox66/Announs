@@ -151,6 +151,12 @@ export class NarrativeEngine {
     return [...this.definition.steps];
   }
 
+  /** Siguiente paso sin avanzar el índice (null si es el último o completado). */
+  getNextStep(): NarrativeStep | null {
+    if (this.completed) return null;
+    return this.definition.steps[this.currentStepIndex + 1] ?? null;
+  }
+
   // Helpers para auditoría WAIT_CONDITION / botón Cerrar Puertas
   // Considera completado si solo quedan pasos opcionales (ej. delay_parked no disparado no bloquea cierre)
   isPhaseComplete(_phase?: string): boolean {

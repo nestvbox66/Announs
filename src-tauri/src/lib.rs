@@ -2,6 +2,14 @@ mod simconnect;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+  // Trazabilidad del binario: versión + commit deben coincidir con el log
+  // del frontend ("[Announs] Frontend v..."). Si difieren, uno de los dos
+  // está desactualizado y hay que recompilar.
+  println!(
+    "[Announs] Backend  v{} (commit {})",
+    env!("CARGO_PKG_VERSION"),
+    option_env!("GIT_COMMIT").unwrap_or("unknown")
+  );
   tauri::Builder::default()
     .setup(|app| {
       if cfg!(debug_assertions) {
