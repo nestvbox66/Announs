@@ -48,6 +48,16 @@ export interface FlightInfo {
   durationMinutes?: number;
   /** Altitud de crucero en pies (de SimBrief `general.route_altitude`). */
   cruiseAltitude?: number;
+  /**
+   * Distancia total de la ruta en NM ("cuenta regresiva" del progreso).
+   * De SimBrief `general.route_distance` o círculo máximo origen→destino.
+   * Sin dato, el progreso usa fallback por tiempo (cruiseTimeSeconds).
+   */
+  totalDistanceNm?: number;
+  /** Latitud del destino (de SimBrief `destination.pos_lat`), para distancia restante. */
+  destLatitude?: number;
+  /** Longitud del destino (de SimBrief `destination.pos_long`), para distancia restante. */
+  destLongitude?: number;
 }
 
 export interface VoicesInfo {

@@ -907,6 +907,12 @@ export default function DebugMonitor({
 
     // Preferir RuleEngine (misma lógica que los disparadores); fallback manual.
     let progress = 0;
+    let remaining: number | null = null;
+    let distanceToDest: number | null = null;
+    const totalDistance: number | null =
+      typeof flightData?.totalDistanceNm === "number" && !Number.isNaN(flightData.totalDistanceNm) && flightData.totalDistanceNm > 0
+        ? flightData.totalDistanceNm
+        : null;
     let sleeping = false;
     let international = flightData?.isInternational === true;
     let nightNow = false;
@@ -925,6 +931,16 @@ export default function DebugMonitor({
         const ctx: any = flightContext as any;
         progress = Number(ctx ? re.getCruiseProgress(ctx) : re.getCruiseProgress()) || 0;
         usedEngine = true;
+      }
+      if (typeof re?.getCruiseProgressRemaining === "function") {
+        const ctx: any = flightContext as any;
+        const v = Number(ctx ? re.getCruiseProgressRemaining(ctx) : re.getCruiseProgressRemaining());
+        if (!Number.isNaN(v)) remaining = v;
+      }
+      if (typeof re?.getDistanceToDestination === "function") {
+        const ctx: any = flightContext as any;
+        const v = Number(ctx ? re.getDistanceToDestination(ctx) : re.getDistanceToDestination());
+        if (!Number.isNaN(v) && v >= 0) distanceToDest = v;
       }
       if (re?.isPassengersSleeping) {
         const ctx: any = flightContext as any;
@@ -956,11 +972,18 @@ export default function DebugMonitor({
         if (progress >= 0.25 && progress < 0.80) sleeping = nightNow;
       }
     }
+    // Fallback manual de distancia si el motor no la proveyó.
+    if (remaining === null && totalDistance !== null && totalDistance > 0 && distanceToDest !== null) {
+      remaining = Math.min(distanceToDest / totalDistance, 1);
+    }
 
     return {
       cruiseTimeSeconds,
       cruiseEntryTime,
       progress,
+      remaining,
+      totalDistance,
+      distanceToDest,
       sleeping,
       international,
       nightNow,
@@ -1161,9 +1184,9 @@ export default function DebugMonitor({
           </Section>
 
           {/* Variables de Crucero */}
-          <Section title="✈️ Variables de Crucero" icon={Plane} count={11} defaultOpen={true}>
+          <Section title="✈️ Variables de Crucero" icon={Plane} count={14} defaultOpen={true}>
             <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
-              Progreso de crucero (cruise_time SimBrief vs zuluTime) · actualización 1s
+              Cuenta regresiva (distancia restante / total SimBrief) · actualización 1s
             </div>
             <div className="space-y-0.5">
               <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
@@ -1186,6 +1209,30 @@ export default function DebugMonitor({
                   {cruiseVars.cruiseEntryTime !== null
                     ? `${secondsToHHMM(cruiseVars.cruiseEntryTime)} UTC`
                     : <span className="text-white/30 italic">— (aún no en CRUISE)</span>}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">CRUISE_REMAINING</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {cruiseVars.remaining !== null
+                    ? <>{cruiseVars.remaining.toFixed(2)} <span className="text-white/40">({Math.round(cruiseVars.remaining * 100)}%)</span></>
+                    : <span className="text-white/30 italic">—</span>}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">DISTANCE_TO_DESTINATION</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {cruiseVars.distanceToDest !== null
+                    ? <>{cruiseVars.distanceToDest.toFixed(1)} <span className="text-white/40 ml-1">NM</span></>
+                    : <span className="text-white/30 italic">—</span>}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">TOTAL_DISTANCE</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {cruiseVars.totalDistance !== null
+                    ? <>{cruiseVars.totalDistance} <span className="text-white/40 ml-1">NM</span></>
+                    : <span className="text-white/30 italic">— (sin SimBrief)</span>}
                 </span>
               </div>
               <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">

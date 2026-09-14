@@ -231,12 +231,14 @@ export class RuleEngine {
   }
 
   /**
-   * Devuelve el progreso del crucero de 0.0 a 1.0.
-   * elapsed = telemetry.zuluTime - flight.cruiseEntryTime (ambos en segundos
-   * UTC); se divide por flight.cruiseTimeSeconds (derivado de SimBrief vía
-   * resolveCruiseTimeSeconds: `times.cruise_time` no existe en el JSON, se usa
-   * Σ time_leg del navlog con stage CRZ).
-   * Fuera de CRUISE o sin datos devuelve 0.
+   * Devuelve el progreso del crucero de 0.0 a 1.0 ("cuenta regresiva" por
+   * distancia, inmune al TOD del ATC):
+   *   faltante = distancia_restante / distancia_total; progreso = 1 - faltante.
+   *
+   * Fuentes: `flight.totalDistanceNm` (SimBrief route_distance o GC) y
+   * `getDistanceToDestination()` (Haversine posición→destino). Sin datos de
+   * distancia se usa el fallback legacy por tiempo (cruiseEntryTime /
+   * cruiseTimeSeconds vs zuluTime). Fuera de CRUISE o sin datos devuelve 0.
    */
   public getCruiseProgress(context?: FlightContext): number {
     const ctx: FlightContext | undefined = context ?? this.flightContext;
@@ -250,25 +252,13 @@ export class RuleEngine {
     } catch {}
 
     console.log('[RuleEngine] getCruiseProgress - estado:', {
+      totalDistanceNm: flight.totalDistanceNm,
       cruiseTimeSeconds: flight.cruiseTimeSeconds,
       cruiseEntryTime: flight.cruiseEntryTime,
       currentZuluTime: telemetry.zuluTime ?? telemetry.zulu_time,
       currentPhase,
       schedulerPhase: this.currentFlightPhase(),
     });
-
-    const totalNum = Number(flight.cruiseTimeSeconds);
-    const entryNum = Number(flight.cruiseEntryTime);
-    if (
-      flight.cruiseTimeSeconds == null || flight.cruiseEntryTime == null ||
-      Number.isNaN(totalNum) || Number.isNaN(entryNum) || totalNum <= 0
-    ) {
-      console.warn('[RuleEngine] getCruiseProgress: faltan datos', {
-        cruiseTimeSeconds: flight.cruiseTimeSeconds,
-        cruiseEntryTime: flight.cruiseEntryTime,
-      });
-      return 0;
-    }
 
     // La fase de vuelo la provee el Scheduler (inyectado vía setPhaseProvider).
     // Fallback: FlightContext.getFSM().currentState (estado UI "A".."D" o fase).
@@ -289,21 +279,72 @@ export class RuleEngine {
       } catch {}
     }
 
+    // Vía principal: distancia ("cuenta regresiva").
+    const totalNum = Number(flight.totalDistanceNm);
+    if (flight.totalDistanceNm != null && !Number.isNaN(totalNum) && totalNum > 0) {
+      const remaining = this.getDistanceToDestination(ctx);
+      if (Number.isFinite(remaining) && remaining >= 0) {
+        const progress = 1 - remaining / totalNum;
+        console.log('[RuleEngine] getCruiseProgress cálculo (distancia):', {
+          remainingNm: remaining,
+          totalDistanceNm: totalNum,
+          progress,
+        });
+        return Math.min(Math.max(progress, 0), 1);
+      }
+      console.warn('[RuleEngine] getCruiseProgress: sin posición/destino para distancia', {
+        totalDistanceNm: totalNum,
+      });
+      return 0;
+    }
+
+    // Fallback legacy por tiempo (compatibilidad sin SimBrief/distancia).
+    const entryNum = Number(flight.cruiseEntryTime);
+    const totalTimeNum = Number(flight.cruiseTimeSeconds);
+    if (
+      flight.cruiseTimeSeconds == null || flight.cruiseEntryTime == null ||
+      Number.isNaN(totalTimeNum) || Number.isNaN(entryNum) || totalTimeNum <= 0
+    ) {
+      console.warn('[RuleEngine] getCruiseProgress: faltan datos', {
+        totalDistanceNm: flight.totalDistanceNm,
+        cruiseTimeSeconds: flight.cruiseTimeSeconds,
+        cruiseEntryTime: flight.cruiseEntryTime,
+      });
+      return 0;
+    }
+
     const zuluTime = Number(telemetry.zuluTime ?? telemetry.zulu_time);
     const entry = entryNum;
-    const total = totalNum;
+    const total = totalTimeNum;
     if (Number.isNaN(zuluTime) || total <= 0) return 0;
 
     const elapsed = zuluTime - entry;
     const progress = elapsed / total;
 
-    console.log('[RuleEngine] getCruiseProgress cálculo:', {
+    console.log('[RuleEngine] getCruiseProgress cálculo (tiempo, fallback):', {
       elapsed,
       cruiseTimeSeconds: flight.cruiseTimeSeconds,
       progress,
     });
 
     return Math.min(Math.max(progress, 0), 1);
+  }
+
+  /**
+   * Faltante del crucero de 1.0 a 0.0 (inverso del progreso):
+   *   faltante = distancia_restante / distancia_total.
+   * Sin distancia total devuelve 1 (nada consumido). Los eventos con
+   * `max_remaining` disparan cuando faltante <= max_remaining.
+   */
+  public getCruiseProgressRemaining(context?: FlightContext): number {
+    const ctx: FlightContext | undefined = context ?? this.flightContext;
+    if (!ctx) return 1;
+    const flight: any = ctx.getFlight?.() ?? {};
+    const totalNum = Number(flight.totalDistanceNm);
+    if (flight.totalDistanceNm == null || Number.isNaN(totalNum) || totalNum <= 0) return 1;
+    const remaining = this.getDistanceToDestination(ctx);
+    if (!Number.isFinite(remaining) || remaining < 0) return 1;
+    return Math.min(remaining / totalNum, 1);
   }
 
   /**
@@ -627,12 +668,23 @@ export class RuleEngine {
     return ok;
   }
 
-  /** Precondición `cruise_progress`: exige un progreso mínimo (0.0–1.0). */
+  /**
+   * Precondición de progreso de crucero. Dos formas (nueva arquitectura
+   * "cuenta regresiva" convive con la legacy):
+   *  - `max_remaining` (0.0–1.0): dispara cuando faltante <= max.
+   *  - `min_progress` (0.0–1.0): dispara cuando progreso >= min (legacy).
+   * Si hay ambas, basta que cumpla una. Sin ninguna, true.
+   */
   private evaluateCruiseProgress(conditions: any, context?: FlightContext): boolean {
+    const ctx = context ?? this.flightContext;
+    const maxRemaining = conditions?.max_remaining;
+    if (maxRemaining !== undefined) {
+      return this.getCruiseProgressRemaining(ctx) <= Number(maxRemaining);
+    }
     const minProgress = conditions?.min_progress;
     if (minProgress === undefined) return true;
 
-    return this.getCruiseProgress(context ?? this.flightContext) >= Number(minProgress);
+    return this.getCruiseProgress(ctx) >= Number(minProgress);
   }
 
   /**
@@ -1506,7 +1558,14 @@ export class RuleEngine {
         const ok = min === undefined ? true : prog >= Number(min);
         rows.push({ label: 'EN CRUCERO (fase)', ok: prog > 0, value: `${(prog * 100).toFixed(0)}%` });
         rows.push({ label: `PROGRESO >= ${min ?? '—'}`, ok, value: prog.toFixed(2) });
-        met = ok;
+        if (c.max_remaining !== undefined) {
+          const rem = this.getCruiseProgressRemaining((context ?? this.flightContext) as FlightContext);
+          const okRem = rem <= Number(c.max_remaining);
+          rows.push({ label: `FALTANTE <= ${c.max_remaining}`, ok: okRem, value: rem.toFixed(2) });
+          met = okRem;
+        } else {
+          met = ok;
+        }
       } catch {
         met = null;
       }

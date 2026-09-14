@@ -72,7 +72,7 @@ import { BoardingMusicService, BoardingMusicTrack } from "../services/BoardingMu
 import { musicController, RANDOM_MUSIC_ID } from "../services/MusicController";
 import { fileLogger } from "../services/FileLogger";
 import { secondsToHHMM } from "../utils/timeUtils";
-import { isInternationalFlight, getCountryKey, resolveCruiseTimeSeconds } from "../utils/flightUtils";
+import { isInternationalFlight, getCountryKey, resolveCruiseTimeSeconds, resolveTotalDistanceNm } from "../utils/flightUtils";
 import { getAircraftType } from "../services/aircraftService";
 import MusicPreview from "./music/MusicPreview";
 import type {
@@ -2561,6 +2561,25 @@ export default function VueloActualView({
       });
     }
 
+    // ── Distancia total + coords destino ("cuenta regresiva" del progreso) ─
+    // SimBrief `general.route_distance` o círculo máximo origen→destino
+    // (pos_lat/pos_long). Sin dato, el progreso usa fallback por tiempo.
+    const totalResolved = resolveTotalDistanceNm(simbriefRawData);
+    const totalDistanceNm = totalResolved.nm > 0 ? totalResolved.nm : undefined;
+    const sbDestLatRaw = Number(
+      (simbriefRawData as any)?.destination?.pos_lat ??
+      (simbriefRawData as any)?.destination?.posLat
+    );
+    const sbDestLonRaw = Number(
+      (simbriefRawData as any)?.destination?.pos_long ??
+      (simbriefRawData as any)?.destination?.posLong
+    );
+    const destLatitude = Number.isFinite(sbDestLatRaw) ? sbDestLatRaw : undefined;
+    const destLongitude = Number.isFinite(sbDestLonRaw) ? sbDestLonRaw : undefined;
+    if (hasSimBrief) {
+      console.log('[SimBrief] Distancia total:', totalDistanceNm ?? 0, `NM (fuente: ${totalResolved.source})`);
+    }
+
     if (hasSimBrief) {
       const srcOriginIcao = simbriefRawData?.origin?.icao_code ?? "";
       const srcDestIcao = simbriefRawData?.destination?.icao_code ?? "";
@@ -2592,6 +2611,9 @@ export default function VueloActualView({
         aircraftIsWidebody,
         durationMinutes,
         cruiseAltitude,
+        totalDistanceNm,
+        destLatitude,
+        destLongitude,
         captainPrimaryLang,
         captainSecondaryLang,
         flightId,
@@ -2605,6 +2627,9 @@ export default function VueloActualView({
         ...savedFlightData,
         scheduledTakeoffTime: scheduledTakeoffSec,
         cruiseTimeSeconds,
+        totalDistanceNm: totalDistanceNm ?? savedFlightData.totalDistanceNm,
+        destLatitude: destLatitude ?? savedFlightData.destLatitude,
+        destLongitude: destLongitude ?? savedFlightData.destLongitude,
         isInternational: savedFlightData.isInternational ?? cruiseIsInternational,
         aircraftType: savedFlightData.aircraftType ?? (sbAircraftIcao || undefined),
         aircraftIsWidebody: savedFlightData.aircraftIsWidebody ?? aircraftIsWidebody,

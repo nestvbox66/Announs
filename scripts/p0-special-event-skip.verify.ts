@@ -722,6 +722,99 @@ function vsContext(vs: number, zulu: number): { fc: FlightContext; rules: RuleEn
   check("T21 peek sin efectos (repite desglose)", d2.kind === "descent_condition" && d2.rows.length >= 3);
 }
 
+// ── Casos T22 (cuenta regresiva por distancia) ─────────────────────────
+// Haversine independiente (no reutiliza gcDistanceNm: valida el cableado).
+function haversineNm(aLat: number, aLon: number, bLat: number, bLon: number): number {
+  const R = 3440.065;
+  const dLa = ((bLat - aLat) * Math.PI) / 180;
+  const dLo = ((bLon - aLon) * Math.PI) / 180;
+  const la1 = (aLat * Math.PI) / 180;
+  const la2 = (bLat * Math.PI) / 180;
+  const h = Math.sin(dLa / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLo / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
+const DEST = { lat: -34.6, lon: -58.4 };
+const TOTAL_NM = 200;
+
+function distContext(lat: number, lon: number, phase = "CRUISE"): { fc: FlightContext; rules: RuleEngine } {
+  const fc = new FlightContext({
+    flight: { totalDistanceNm: TOTAL_NM, destLatitude: DEST.lat, destLongitude: DEST.lon } as any,
+    telemetry: { latitude: lat, longitude: lon } as any,
+  });
+  const rules = new RuleEngine(fc);
+  rules.setPhaseProvider(() => phase);
+  return { fc, rules };
+}
+
+function cruiseMaxStep(id: number, eventKey: string, maxRemaining: number): NarrativeStep {
+  return new NarrativeStep(
+    id, eventKey, NarrativeTransition.WAIT_CONDITION, false, false, 0,
+    undefined, undefined,
+    { type: "cruise_progress", conditions: { max_remaining: maxRemaining } },
+    { max_once_per_flight: true }, ["scheduler"], "polling", "scheduler", null
+  );
+}
+
+{
+  // a) Sobre el destino → progreso 1, faltante 0.
+  const { fc, rules } = distContext(DEST.lat, DEST.lon);
+  check("T22a en destino: progreso 1", rules.getCruiseProgress(fc) === 1);
+  check("T22a en destino: faltante 0", rules.getCruiseProgressRemaining(fc) === 0);
+}
+
+{
+  // b) Lejos (restante > total) → clamp: progreso 0, faltante 1.
+  const { fc, rules } = distContext(-29.0, DEST.lon); // ~340 NM al norte
+  const rem = haversineNm(-29.0, DEST.lon, DEST.lat, DEST.lon);
+  check("T22b escenario válido (restante > total)", rem > TOTAL_NM, rem.toFixed(1));
+  check("T22b progreso clamp 0", rules.getCruiseProgress(fc) === 0);
+  check("T22b faltante clamp 1", rules.getCruiseProgressRemaining(fc) === 1);
+}
+
+{
+  // c) Mitad aproximada: progreso + faltante suman 1.
+  const lat = -33.0;
+  const rem = haversineNm(lat, DEST.lon, DEST.lat, DEST.lon);
+  const { fc, rules } = distContext(lat, DEST.lon);
+  const prog = rules.getCruiseProgress(fc);
+  const falt = rules.getCruiseProgressRemaining(fc);
+  check("T22c progreso ≈ 1 - rem/total", Math.abs(prog - (1 - rem / TOTAL_NM)) < 0.02, prog.toFixed(3));
+  check("T22c progreso + faltante = 1", Math.abs(prog + falt - 1) < 0.001, `${prog.toFixed(3)}+${falt.toFixed(3)}`);
+}
+
+{
+  // d) max_remaining: dispara cuando faltante <= max.
+  const far = distContext(-29.0, DEST.lon); // faltante 1
+  const mid = distContext(-33.0, DEST.lon); // faltante ~0.5
+  const step = cruiseMaxStep(3, "cruise_crew_service_info", 0.85);
+  check("T22d lejos (falt 1 > 0.85) → false", far.rules.evaluateStep(step, far.fc) === false);
+  check("T22d mitad (falt ~0.5 <= 0.85) → true", mid.rules.evaluateStep(step, mid.fc) === true);
+}
+
+{
+  // e) min_progress legacy sigue funcionando con datos de distancia.
+  const mid = distContext(-33.0, DEST.lon);
+  const mk = (min: number) => new NarrativeStep(3, "cruise_crew_service_info",
+    NarrativeTransition.WAIT_CONDITION, false, false, 0, undefined, undefined,
+    { type: "cruise_progress", conditions: { min_progress: min } },
+    { max_once_per_flight: true }, ["scheduler"], "polling", "scheduler", null);
+  const prog = mid.rules.getCruiseProgress(mid.fc);
+  check("T22e legacy min 0.15 → true", mid.rules.evaluateStep(mk(0.15), mid.fc) === true, prog.toFixed(3));
+  check("T22e legacy min 0.99 → false", mid.rules.evaluateStep(mk(0.99), mid.fc) === false, prog.toFixed(3));
+}
+
+{
+  // f) Sin distancia total → Remaining 1; fuera de CRUISE → progreso 0.
+  const { fc, rules } = distContext(-33.0, DEST.lon);
+  const noTotal = new FlightContext({ telemetry: { latitude: -33.0, longitude: DEST.lon } as any });
+  const r2 = new RuleEngine(noTotal);
+  r2.setPhaseProvider(() => "CRUISE");
+  check("T22f sin total → faltante 1", r2.getCruiseProgressRemaining(noTotal) === 1);
+  const other = distContext(DEST.lat, DEST.lon, "DESCENT");
+  check("T22f fuera de CRUISE → progreso 0", other.rules.getCruiseProgress(other.fc) === 0);
+}
+
 // ── Resultado ────────────────────────────────────────────────────────
 
 if (failures > 0) {
