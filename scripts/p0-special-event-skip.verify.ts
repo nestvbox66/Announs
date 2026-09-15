@@ -21,6 +21,7 @@ import { EventCatalogService } from "../src/events/EventCatalogService";
 import { RuleEngine } from "../src/services/RuleEngine";
 import { FlightPhaseDetector } from "../src/services/FlightPhaseDetector";
 import { FlightPhase } from "../src/engine/FlightEngine";
+import { VariableResolver } from "../src/services/VariableResolver";
 
 // ── Fakes ────────────────────────────────────────────────────────────
 
@@ -899,6 +900,67 @@ function nearDestContext(extraFlight: any = {}): { fc: FlightContext; rules: Rul
     "variables de crucero", "variables de descenso", "simbrief", "variables de eventos"];
   check("T23 orden de bloques del monitor", JSON.stringify(titles.map(norm)) === JSON.stringify(expected), titles.join(" | "));
   check("T23 sin bloque Puerta", !titles.some((t) => norm(t).includes("puerta")));
+}
+
+// ── Casos T24 (resolver simbrief + desglose con umbrales) ─────────────
+
+{
+  // B: source simbrief resuelve ruta anidada del OFP crudo.
+  const fc = new FlightContext({});
+  fc.updateSimbrief({ data: { general: { route_altitude: 24000 } } });
+  const vr = new VariableResolver(fc);
+  const defs = { cruising_altitude: { source: "simbrief", source_path: "general.route_altitude", fallback: "FL320" } };
+  const out = vr.resolveVariables(defs as any, fc, false, "cruise_capt_general_info");
+  check("T24 simbrief anidado resuelve (24000)", out.cruising_altitude === 24000, String(out.cruising_altitude));
+}
+
+{
+  // B: sin OFP → fallback (no excepción).
+  const fc = new FlightContext({});
+  const vr = new VariableResolver(fc);
+  const defs = { cruising_altitude: { source: "simbrief", source_path: "general.route_altitude", fallback: "FL320" } };
+  const out = vr.resolveVariables(defs as any, fc, false, "cruise_capt_general_info");
+  check("T24 sin OFP usa fallback", out.cruising_altitude === "FL320", String(out.cruising_altitude));
+}
+
+{
+  // B: source_path con " / " jamás coincide con claves reales → fallback.
+  // (Pin del diagnóstico: formato SimVar/X-Plane no soportado por getValueByPath.)
+  const fc = new FlightContext({ telemetry: { altitude: 16000 } as any });
+  const vr = new VariableResolver(fc);
+  const defs = { altitude: { source: "telemetry", source_path: "PLANE_ALTITUDE / sim/flightmodel/position/elevation", fallback: "35000" } };
+  const out = vr.resolveVariables(defs as any, fc, false, "x");
+  check("T24 path con ' / ' cae a fallback", out.altitude === "35000", String(out.altitude));
+  const defs2 = { altitude: { source: "telemetry", source_path: "altitude" } };
+  const out2 = vr.resolveVariables(defs2 as any, fc, false, "x");
+  check("T24 path canónico resuelve (16000)", out2.altitude === 16000, String(out2.altitude));
+}
+
+{
+  // Desglose cruise con min+max: umbrales configurados + actuales, sin "—".
+  const { fc, rules } = distContext(-33.0, DEST.lon);
+  const step = new NarrativeStep(3, "cruise_crew_service_info",
+    NarrativeTransition.WAIT_CONDITION, false, false, 0, undefined, undefined,
+    { type: "cruise_progress", conditions: { min_progress: 0.1, max_remaining: 0.85 } },
+    { max_once_per_flight: true }, ["scheduler"], "polling", "scheduler", null);
+  const det = rules.evaluateWaitConditionDetail(step, fc);
+  const labels = det.rows.map((r) => r.label).join(" | ");
+  check("T24 muestra UMBRAL min_progress", labels.includes("UMBRAL min_progress: 0.1"), labels);
+  check("T24 muestra UMBRAL max_remaining", labels.includes("UMBRAL max_remaining: 0.85"), labels);
+  check("T24 muestra actuales", labels.includes("PROGRESO actual") && labels.includes("FALTANTE actual"), labels);
+  check("T24 sin 'Progreso >= —'", !labels.includes("—"), labels);
+}
+
+{
+  // Desglose cruise con regla: anexa átomos en vivo.
+  const { fc, rules } = distContext(-33.0, DEST.lon);
+  const step = new NarrativeStep(3, "cruise_crew_service_info",
+    NarrativeTransition.WAIT_CONDITION, false, false, 0, undefined, undefined,
+    { type: "cruise_progress", conditions: { max_remaining: 0.85 } },
+    { max_once_per_flight: true }, ["scheduler"], "polling", "scheduler",
+    "GROUND_SPEED > 100");
+  const det = rules.evaluateWaitConditionDetail(step, fc);
+  check("T24 con regla anexa átomos", det.rows.some((r) => r.label.includes("GROUND_SPEED")), det.rows.map((r) => r.label).join(" | "));
 }
 
 // ── Resultado ────────────────────────────────────────────────────────

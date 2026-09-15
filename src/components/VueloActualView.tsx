@@ -2542,12 +2542,14 @@ export default function VueloActualView({
     // Diagnóstico de campos de altitud del OFP (cruising_altitude caía a
     // fallback: verificar qué campo trae el dato real).
     if (hasSimBrief) {
-      console.log('[SimBrief] Campos de altitud:', {
+      console.log('[SimBrief] Claves de general:', Object.keys((simbriefRawData as any)?.general || {}));
+      console.log('[SimBrief] Valores de altitud:', {
         route_altitude: (simbriefRawData as any)?.general?.route_altitude,
         cruise_altitude: (simbriefRawData as any)?.general?.cruise_altitude,
         initial_altitude: (simbriefRawData as any)?.general?.initial_altitude,
+        cruise_alt: (simbriefRawData as any)?.general?.cruise_alt,
+        altitude: (simbriefRawData as any)?.general?.altitude,
         costindex_altitude: (simbriefRawData as any)?.general?.costindex_altitude,
-        allGeneralKeys: Object.keys((simbriefRawData as any)?.general || {}),
       });
     }
     let cruiseAltitude: number | undefined;

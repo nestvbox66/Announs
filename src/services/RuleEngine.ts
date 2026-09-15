@@ -675,18 +675,18 @@ export class RuleEngine {
    * "cuenta regresiva" convive con la legacy):
    *  - `max_remaining` (0.0–1.0): dispara cuando faltante <= max.
    *  - `min_progress` (0.0–1.0): dispara cuando progreso >= min (legacy).
-   * Si hay ambas, basta que cumpla una. Sin ninguna, true.
+   * Si hay ambas, deben cumplirse las dos. Sin ninguna, true.
    */
   private evaluateCruiseProgress(conditions: any, context?: FlightContext): boolean {
     const ctx = context ?? this.flightContext;
-    const maxRemaining = conditions?.max_remaining;
-    if (maxRemaining !== undefined) {
-      return this.getCruiseProgressRemaining(ctx) <= Number(maxRemaining);
+    let ok = true;
+    if (conditions?.max_remaining !== undefined) {
+      ok = this.getCruiseProgressRemaining(ctx) <= Number(conditions.max_remaining) && ok;
     }
-    const minProgress = conditions?.min_progress;
-    if (minProgress === undefined) return true;
-
-    return this.getCruiseProgress(ctx) >= Number(minProgress);
+    if (conditions?.min_progress !== undefined) {
+      ok = this.getCruiseProgress(ctx) >= Number(conditions.min_progress) && ok;
+    }
+    return ok;
   }
 
   /**
@@ -1556,17 +1556,24 @@ export class RuleEngine {
       let met: boolean | null = null;
       try {
         const prog = this.getCruiseProgress((context ?? this.flightContext) as FlightContext);
-        const min = c.min_progress;
-        const ok = min === undefined ? true : prog >= Number(min);
+        const rem = this.getCruiseProgressRemaining((context ?? this.flightContext) as FlightContext);
+        const hasMin = c.min_progress !== undefined;
+        const hasMax = c.max_remaining !== undefined;
+        const okMin = hasMin ? prog >= Number(c.min_progress) : true;
+        const okMax = hasMax ? rem <= Number(c.max_remaining) : true;
         rows.push({ label: 'EN CRUCERO (fase)', ok: prog > 0, value: `${(prog * 100).toFixed(0)}%` });
-        rows.push({ label: `PROGRESO >= ${min ?? '—'}`, ok, value: prog.toFixed(2) });
-        if (c.max_remaining !== undefined) {
-          const rem = this.getCruiseProgressRemaining((context ?? this.flightContext) as FlightContext);
-          const okRem = rem <= Number(c.max_remaining);
-          rows.push({ label: `FALTANTE <= ${c.max_remaining}`, ok: okRem, value: rem.toFixed(2) });
-          met = okRem;
-        } else {
-          met = ok;
+        // Umbrales configurados (objetivo) + valores actuales: nunca "Progreso >= —".
+        if (hasMin) rows.push({ label: `UMBRAL min_progress: ${c.min_progress}`, ok: okMin, value: `actual ${prog.toFixed(2)}` });
+        if (hasMax) rows.push({ label: `UMBRAL max_remaining: ${c.max_remaining}`, ok: okMax, value: `actual ${rem.toFixed(2)}` });
+        rows.push({ label: 'PROGRESO actual', ok: okMin, value: prog.toFixed(2) });
+        rows.push({ label: 'FALTANTE actual', ok: okMax, value: rem.toFixed(2) });
+        met = okMin && okMax;
+        // Si además trae scheduler_rule, anexar sus átomos en vivo.
+        const rule = (step as any).scheduler_rule as string | null | undefined;
+        if (typeof rule === "string" && rule.trim() !== "" && this.isTelemetryExpression(rule)) {
+          const d = this.getSchedulerRuleDetail(rule, context);
+          rows.push(...d.rows);
+          if (d.met === false) met = false;
         }
       } catch {
         met = null;
