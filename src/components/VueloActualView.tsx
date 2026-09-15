@@ -2539,6 +2539,17 @@ export default function VueloActualView({
     // SimBrief `general.route_altitude` (pies, a veces "FL350"). Si el valor
     // parece nivel de vuelo (<= 500), se convierte a pies. Sin dato se
     // preserva el valor previo del contexto.
+    // Diagnóstico de campos de altitud del OFP (cruising_altitude caía a
+    // fallback: verificar qué campo trae el dato real).
+    if (hasSimBrief) {
+      console.log('[SimBrief] Campos de altitud:', {
+        route_altitude: (simbriefRawData as any)?.general?.route_altitude,
+        cruise_altitude: (simbriefRawData as any)?.general?.cruise_altitude,
+        initial_altitude: (simbriefRawData as any)?.general?.initial_altitude,
+        costindex_altitude: (simbriefRawData as any)?.general?.costindex_altitude,
+        allGeneralKeys: Object.keys((simbriefRawData as any)?.general || {}),
+      });
+    }
     let cruiseAltitude: number | undefined;
     const rawAlt = (simbriefRawData as any)?.general?.route_altitude
       ?? (simbriefRawData as any)?.general?.initial_altitude

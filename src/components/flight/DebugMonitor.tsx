@@ -1063,33 +1063,6 @@ export default function DebugMonitor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tick, telemetry, ruleEngine, scheduler, flightContext]);
 
-  // ── Variables de Puerta (motores apagados) ──
-  const gateVars = useMemo(() => {
-    void tick;
-    const tel = telemetry as Record<string, any>;
-    const numRaw = tel?.numberOfEngines ?? tel?.numEngines;
-    const numberOfEngines: number | null =
-      typeof numRaw === "number" && Number.isFinite(numRaw) ? numRaw : null;
-    const eng = (i: number): boolean | null => {
-      const v = i === 1
-        ? (tel?.engineCombustion1 ?? tel?.engCombustion1 ?? tel?.engineRunning)
-        : (tel?.[`engineCombustion${i}`] ?? tel?.[`engCombustion${i}`]);
-      return typeof v === "boolean" ? v : null;
-    };
-    let allOff: boolean | null = null;
-    try {
-      const re: any = (ruleEngine as any) ?? (scheduler as any)?.ruleEngine ?? null;
-      const ctx: any = flightContext as any;
-      if (re?.areAllEnginesOff) {
-        allOff = (ctx ? re.areAllEnginesOff(ctx) : re.areAllEnginesOff()) === true;
-      }
-    } catch {
-      allOff = null;
-    }
-    return { numberOfEngines, eng1: eng(1), eng2: eng(2), eng3: eng(3), eng4: eng(4), allOff };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tick, telemetry, ruleEngine, scheduler, flightContext]);
-
   // ── Estado de espera del orquestador (timers, audio, pasos manuales) ──
   const waitSnapshot = useMemo(() => {
     void tick;
@@ -1160,6 +1133,8 @@ export default function DebugMonitor({
           </Section>
 
           {/* Vuelo */}
+
+          {/* Vuelo */}
           <Section title="Vuelo (FlightContext)" icon={Plane} count={Object.keys(flight).length} defaultOpen={true}>
             <KeyValueGrid
               data={flight}
@@ -1184,247 +1159,6 @@ export default function DebugMonitor({
           </Section>
 
           {/* Variables de Crucero */}
-          <Section title="✈️ Variables de Crucero" icon={Plane} count={14} defaultOpen={true}>
-            <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
-              Cuenta regresiva (distancia restante / total SimBrief) · actualización 1s
-            </div>
-            <div className="space-y-0.5">
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">CRUISE_TIME</span>
-                <span className="font-mono text-[11px] text-[#45AFFF]">
-                  {cruiseVars.cruiseTimeSeconds !== null
-                    ? `${cruiseVars.cruiseTimeSeconds}s (${secondsToTimeRemaining(cruiseVars.cruiseTimeSeconds)})`
-                    : <span className="text-white/30 italic">— (sin SimBrief)</span>}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">CRUISE_PROGRESS</span>
-                <span className="font-mono text-[11px] text-[#45AFFF]">
-                  {cruiseVars.progress.toFixed(2)} <span className="text-white/40">({Math.round(cruiseVars.progress * 100)}%)</span>
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">CRUISE_ENTRY_TIME</span>
-                <span className="font-mono text-[11px] text-[#45AFFF]">
-                  {cruiseVars.cruiseEntryTime !== null
-                    ? `${secondsToHHMM(cruiseVars.cruiseEntryTime)} UTC`
-                    : <span className="text-white/30 italic">— (aún no en CRUISE)</span>}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">CRUISE_REMAINING</span>
-                <span className="font-mono text-[11px] text-[#45AFFF]">
-                  {cruiseVars.remaining !== null
-                    ? <>{cruiseVars.remaining.toFixed(2)} <span className="text-white/40">({Math.round(cruiseVars.remaining * 100)}%)</span></>
-                    : <span className="text-white/30 italic">—</span>}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">DISTANCE_TO_DESTINATION</span>
-                <span className="font-mono text-[11px] text-[#45AFFF]">
-                  {cruiseVars.distanceToDest !== null
-                    ? <>{cruiseVars.distanceToDest.toFixed(1)} <span className="text-white/40 ml-1">NM</span></>
-                    : <span className="text-white/30 italic">—</span>}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">TOTAL_DISTANCE</span>
-                <span className="font-mono text-[11px] text-[#45AFFF]">
-                  {cruiseVars.totalDistance !== null
-                    ? <>{cruiseVars.totalDistance} <span className="text-white/40 ml-1">NM</span></>
-                    : <span className="text-white/30 italic">— (sin SimBrief)</span>}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">IS_NIGHT_FLIGHT</span>
-                <span>{formatValue("IS_NIGHT_FLIGHT", cruiseVars.nightNow)}</span>
-              </div>
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">IS_WIDEBODY</span>
-                <span>{formatValue("IS_WIDEBODY", cruiseVars.isWidebody)}</span>
-              </div>
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">AIRCRAFT_TYPE</span>
-                <span className="font-mono text-[11px] text-white/80">
-                  {cruiseVars.aircraftType || <span className="text-white/30 italic">—</span>}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">FLIGHT_DURATION</span>
-                <span className="font-mono text-[11px] text-[#45AFFF]">
-                  {cruiseVars.durationMinutes !== null
-                    ? `${cruiseVars.durationMinutes} min (${secondsToTimeRemaining(cruiseVars.durationMinutes * 60)})`
-                    : <span className="text-white/30 italic">— (sin SimBrief)</span>}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">IS_INTERNATIONAL</span>
-                <span className="font-mono text-[11px]">
-                  {formatValue("IS_INTERNATIONAL", cruiseVars.international)}
-                  {cruiseVars.originICAO || cruiseVars.destICAO ? (
-                    <span className="text-white/40 ml-1">({cruiseVars.originICAO || "—"} → {cruiseVars.destICAO || "—"})</span>
-                  ) : null}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">PASSENGERS_SLEEPING</span>
-                <span>{formatValue("PASSENGERS_SLEEPING", cruiseVars.sleeping)}</span>
-              </div>
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">originCountry</span>
-                <span className="font-mono text-[11px] text-white/80">{cruiseVars.originCountry}</span>
-              </div>
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">destCountry</span>
-                <span className="font-mono text-[11px] text-white/80">{cruiseVars.destCountry}</span>
-              </div>
-            </div>
-          </Section>
-
-          {/* Variables de Descenso */}
-          <Section title="🛬 Variables de Descenso" icon={Plane} count={6} defaultOpen={true}>
-            <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
-              Aproximación y aterrizaje (RADIO HEIGHT solo válida &lt; 2500 ft AGL) · actualización 1s
-            </div>
-            <div className="space-y-0.5">
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">ALTITUDE</span>
-                <span className="font-mono text-[11px] text-[#45AFFF]">
-                  {Number.isInteger(descentVars.altitude) ? descentVars.altitude : descentVars.altitude.toFixed(1)}
-                  <span className="text-white/40 ml-1">ft</span>
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">RADIO_HEIGHT</span>
-                <span className="font-mono text-[11px] text-[#45AFFF]">
-                  {descentVars.radioHeight !== null ? (
-                    <>
-                      {Number.isInteger(descentVars.radioHeight) ? descentVars.radioHeight : descentVars.radioHeight.toFixed(1)}
-                      <span className="text-white/40 ml-1">ft</span>
-                      {!descentVars.radioValid && (
-                        <span className="text-white/40 ml-1">(no válido &gt; 2500 ft)</span>
-                      )}
-                    </>
-                  ) : (
-                    <span className="text-white/30 italic">—</span>
-                  )}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">VERTICAL_SPEED</span>
-                <span className="font-mono text-[11px] text-[#45AFFF]">
-                  {Number.isInteger(descentVars.verticalSpeed) ? descentVars.verticalSpeed : descentVars.verticalSpeed.toFixed(1)}
-                  <span className="text-white/40 ml-1">ft/min</span>
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">GEAR_DOWN</span>
-                <span>{descentVars.gearDown === null ? <span className="text-white/30 italic font-mono text-[11px]">—</span> : formatValue("GEAR_DOWN", descentVars.gearDown)}</span>
-              </div>
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">REMAINING_TIME</span>
-                <span className="font-mono text-[11px] text-[#45AFFF]">
-                  {descentVars.remainingTime !== null ? (
-                    <>
-                      {descentVars.remainingTime.toFixed(1)}
-                      <span className="text-white/40 ml-1">min</span>
-                    </>
-                  ) : (
-                    <span className="text-white/30 italic">—</span>
-                  )}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">DISTANCE_TO_DEST</span>
-                <span className="font-mono text-[11px] text-[#45AFFF]">
-                  {descentVars.distanceToDest !== null ? (
-                    <>
-                      {descentVars.distanceToDest.toFixed(1)}
-                      <span className="text-white/40 ml-1">NM</span>
-                    </>
-                  ) : (
-                    <span className="text-white/30 italic">—</span>
-                  )}
-                </span>
-              </div>
-            </div>
-          </Section>
-
-          {/* Variables de Rodaje */}
-          <Section title="🚗 Variables de Rodaje" icon={Timer} count={2} defaultOpen={true}>
-            <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
-              Detención en plataforma (menos de 1 kt = detenido) · actualización 1s
-            </div>
-            <div className="space-y-0.5">
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">GROUND_VELOCITY</span>
-                <span className="font-mono text-[11px] text-[#45AFFF]">
-                  {Number.isInteger(taxiVars.groundspeed) ? taxiVars.groundspeed : taxiVars.groundspeed.toFixed(2)}
-                  <span className="text-white/40 ml-1">kt</span>
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">TIME_STOPPED</span>
-                <span className="font-mono text-[11px] text-[#45AFFF]">
-                  {taxiVars.timeStopped !== null ? (
-                    <>
-                      {taxiVars.timeStopped.toFixed(0)}
-                      <span className="text-white/40 ml-1">s</span>
-                    </>
-                  ) : (
-                    <span className="text-white/30 italic">—</span>
-                  )}
-                </span>
-              </div>
-            </div>
-          </Section>
-
-          {/* Variables de Puerta */}
-          <Section title="🛬 Variables de Puerta" icon={Plane} count={5} defaultOpen={true}>
-            <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
-              Motores apagados en puerta (atgate_capt_disarm_doors) · actualización 1s
-            </div>
-            <div className="space-y-0.5">
-              {[
-                { label: "ENG_COMBUSTION_1", value: gateVars.eng1 },
-                { label: "ENG_COMBUSTION_2", value: gateVars.eng2 },
-                { label: "ENG_COMBUSTION_3", value: gateVars.eng3 },
-                { label: "ENG_COMBUSTION_4", value: gateVars.eng4 },
-              ].map((r) => (
-                <div key={r.label} className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                  <span className="font-mono text-[11px] text-white/60">{r.label}</span>
-                  <span>
-                    {r.value === null ? (
-                      <span className="text-white/30 italic font-mono text-[11px]">—</span>
-                    ) : (
-                      formatValue(r.label, r.value)
-                    )}
-                  </span>
-                </div>
-              ))}
-              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                <span className="font-mono text-[11px] text-white/60">ALL_ENGINES_OFF</span>
-                <span>
-                  {gateVars.allOff === null ? (
-                    <span className="text-white/30 italic font-mono text-[11px]">—</span>
-                  ) : (
-                    formatValue("ALL_ENGINES_OFF", gateVars.allOff)
-                  )}
-                </span>
-              </div>
-            </div>
-          </Section>
-
-          {/* SimBrief */}
-          <Section title="SimBrief" icon={FileText} count={simbrief ? Object.keys(simbrief).length : 0} defaultOpen={false}>
-            {simbrief ? (
-              <KeyValueGrid data={simbrief as Record<string, unknown>} />
-            ) : (
-              <div className="text-[11px] font-mono text-white/30 italic px-2 py-2">
-                Sin datos SimBrief (importá un vuelo)
-              </div>
-            )}
-          </Section>
 
           {/* Narrativa */}
           <Section title="Narrativa (NarrativeEngine)" icon={Layers} count={narrativeInfo?.totalSteps} defaultOpen={true}>
@@ -1491,99 +1225,6 @@ export default function DebugMonitor({
           </Section>
 
           {/* Eventos de Demora */}
-          <Section title="Eventos de Demora" icon={Timer} count={delayEvents.length} defaultOpen={true}>
-            <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
-              Evaluación delay_detection (zuluTime vs scheduledTakeoffTime / threshold)
-            </div>
-            {delayEvents.length === 0 ? (
-              <div className="text-[11px] font-mono text-white/30 italic px-2 py-2">Sin eventos de demora</div>
-            ) : (
-              <div className="space-y-2">
-                {delayEvents.map((ev) => (
-                  <div key={ev.key} className="border border-white/10 rounded-[5px] overflow-hidden bg-white/[0.02]">
-                    <div className="flex items-center justify-between px-2 py-1.5 bg-white/[0.04] border-b border-white/5">
-                      <span className="font-mono text-[11px] font-bold text-[#ffb340] flex items-center gap-1.5">
-                        <AlertTriangle className="w-3 h-3" />
-                        {ev.label}
-                      </span>
-                      <span className="font-mono text-[11px] px-1.5 py-0.5 rounded border bg-white/5 border-white/10 text-white/80">
-                        {ev.state}
-                      </span>
-                    </div>
-                    <div className="p-2 space-y-0.5">
-                      <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                        <span className="font-mono text-[11px] text-white/60">Hora actual (UTC)</span>
-                        <span className="font-mono text-[11px] text-[#45AFFF]">
-                          {ev.currentTimeDisplay} <span className="text-white/40 ml-1">({ev.currentTime != null ? `${ev.currentTime}s` : "—"})</span>
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                        <span className="font-mono text-[11px] text-white/60">Hora salida (UTC)</span>
-                        <span className="font-mono text-[11px] text-[#45AFFF]">
-                          {ev.scheduledTimeDisplay} <span className="text-white/40 ml-1">({ev.scheduledTime != null && ev.scheduledTime !== "" ? `${String(ev.scheduledTime)}${typeof ev.scheduledTime === "number" ? "s" : ""}` : "—"})</span>
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                        <span className="font-mono text-[11px] text-white/60">threshold</span>
-                        <span className="font-mono text-[11px] text-[#45AFFF]">{ev.threshold}ms<span className="text-white/40 ml-1">({(ev.threshold / 60000).toFixed(1)} min)</span></span>
-                      </div>
-                      <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                        <span className="font-mono text-[11px] text-white/60">Tiempo restante</span>
-                        <span className="font-mono text-[11px] text-[#45AFFF]">
-                          {ev.timeRemainingDisplay} <span className="text-white/40 ml-1">({ev.timeRemaining != null ? `${ev.timeRemaining}s` : "—"})</span>
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                        <span className="font-mono text-[11px] text-white/60">isDelayed (umbral superado)</span>
-                        <span>{ev.isDelayed ? <span className="inline-flex items-center gap-1 text-[#43E600] font-bold text-[11px]">✅ true</span> : <span className="inline-flex items-center gap-1 text-red-400 font-bold text-[11px]">❌ false</span>}</span>
-                      </div>
-                      <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                        <span className="font-mono text-[11px] text-white/60">currentPhase (fsm)</span>
-                        <span className="font-mono text-[11px] text-white/80">{String(ev.currentPhase)}</span>
-                      </div>
-                      <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                        <span className="font-mono text-[11px] text-white/60">fase (scheduler)</span>
-                        <span className="font-mono text-[11px] text-white/80">{String((ev as any).schedulerPhase ?? "—")}</span>
-                      </div>
-                      {ev.preferredCondition && (
-                        <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04] border border-white/5 bg-white/[0.02]">
-                          <span className="font-mono text-[11px] text-[#45AFFF]/90 flex items-center gap-1">
-                            <MoonStar className="w-3 h-3" />
-                            preferred_condition: {String(ev.preferredCondition)}
-                          </span>
-                          <span className="text-[11px] font-bold">
-                            {ev.preferredCondition === "is_night_flight" ? (
-                              ev.isNightFlight ? (
-                                <span className="inline-flex items-center gap-1 text-[#43E600]">✅ se cumple</span>
-                              ) : (
-                                <span className="inline-flex items-center gap-1 text-red-400">❌ no se cumple</span>
-                              )
-                            ) : (
-                              <span className="inline-flex items-center gap-1 text-white/50">—</span>
-                            )}
-                          </span>
-                        </div>
-                      )}
-                      <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
-                        <span className="font-mono text-[11px] text-white/60">lastEvaluation</span>
-                        <span className="font-mono text-[10px] text-white/40">{ev.lastEvaluation}</span>
-                      </div>
-                      {/* Línea de tiempo visual */}
-                      <div className="px-2 py-2 border-t border-white/5 bg-black/10">
-                        <DelayTimeline
-                          eventKey={ev.key}
-                          currentTime={typeof ev.currentTime === "number" ? ev.currentTime : NaN}
-                          scheduledTakeoff={typeof ev.scheduledTime === "number" ? ev.scheduledTime : NaN}
-                          thresholdMs={ev.threshold}
-                          label={ev.label}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </Section>
 
           {/* Transiciones */}
           <Section title="Transiciones" icon={GitBranch} count={1} defaultOpen={true}>
@@ -1693,6 +1334,8 @@ export default function DebugMonitor({
           </Section>
 
           {/* Transición a CRUISE */}
+
+          {/* Transición a CRUISE */}
           <Section title="✈️ Transición a CRUISE" icon={Plane} count={3} defaultOpen={true}>
             <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
               Evaluación CLIMB → CRUISE (ABS(PLANE_ALTITUDE - FLIGHT_LEVEL) &lt;= 500) · actualización 1s
@@ -1763,6 +1406,105 @@ export default function DebugMonitor({
           </Section>
 
           {/* Pasos en espera (WAIT_CONDITION) */}
+
+          {/* Eventos de Demora */}
+          <Section title="Eventos de Demora" icon={Timer} count={delayEvents.length} defaultOpen={true}>
+            <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
+              Evaluación delay_detection (zuluTime vs scheduledTakeoffTime / threshold)
+            </div>
+            {delayEvents.length === 0 ? (
+              <div className="text-[11px] font-mono text-white/30 italic px-2 py-2">Sin eventos de demora</div>
+            ) : (
+              <div className="space-y-2">
+                {delayEvents.map((ev) => (
+                  <div key={ev.key} className="border border-white/10 rounded-[5px] overflow-hidden bg-white/[0.02]">
+                    <div className="flex items-center justify-between px-2 py-1.5 bg-white/[0.04] border-b border-white/5">
+                      <span className="font-mono text-[11px] font-bold text-[#ffb340] flex items-center gap-1.5">
+                        <AlertTriangle className="w-3 h-3" />
+                        {ev.label}
+                      </span>
+                      <span className="font-mono text-[11px] px-1.5 py-0.5 rounded border bg-white/5 border-white/10 text-white/80">
+                        {ev.state}
+                      </span>
+                    </div>
+                    <div className="p-2 space-y-0.5">
+                      <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                        <span className="font-mono text-[11px] text-white/60">Hora actual (UTC)</span>
+                        <span className="font-mono text-[11px] text-[#45AFFF]">
+                          {ev.currentTimeDisplay} <span className="text-white/40 ml-1">({ev.currentTime != null ? `${ev.currentTime}s` : "—"})</span>
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                        <span className="font-mono text-[11px] text-white/60">Hora salida (UTC)</span>
+                        <span className="font-mono text-[11px] text-[#45AFFF]">
+                          {ev.scheduledTimeDisplay} <span className="text-white/40 ml-1">({ev.scheduledTime != null && ev.scheduledTime !== "" ? `${String(ev.scheduledTime)}${typeof ev.scheduledTime === "number" ? "s" : ""}` : "—"})</span>
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                        <span className="font-mono text-[11px] text-white/60">threshold</span>
+                        <span className="font-mono text-[11px] text-[#45AFFF]">{ev.threshold}ms<span className="text-white/40 ml-1">({(ev.threshold / 60000).toFixed(1)} min)</span></span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                        <span className="font-mono text-[11px] text-white/60">Tiempo restante</span>
+                        <span className="font-mono text-[11px] text-[#45AFFF]">
+                          {ev.timeRemainingDisplay} <span className="text-white/40 ml-1">({ev.timeRemaining != null ? `${ev.timeRemaining}s` : "—"})</span>
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                        <span className="font-mono text-[11px] text-white/60">isDelayed (umbral superado)</span>
+                        <span>{ev.isDelayed ? <span className="inline-flex items-center gap-1 text-[#43E600] font-bold text-[11px]">✅ true</span> : <span className="inline-flex items-center gap-1 text-red-400 font-bold text-[11px]">❌ false</span>}</span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                        <span className="font-mono text-[11px] text-white/60">currentPhase (fsm)</span>
+                        <span className="font-mono text-[11px] text-white/80">{String(ev.currentPhase)}</span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                        <span className="font-mono text-[11px] text-white/60">fase (scheduler)</span>
+                        <span className="font-mono text-[11px] text-white/80">{String((ev as any).schedulerPhase ?? "—")}</span>
+                      </div>
+                      {ev.preferredCondition && (
+                        <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04] border border-white/5 bg-white/[0.02]">
+                          <span className="font-mono text-[11px] text-[#45AFFF]/90 flex items-center gap-1">
+                            <MoonStar className="w-3 h-3" />
+                            preferred_condition: {String(ev.preferredCondition)}
+                          </span>
+                          <span className="text-[11px] font-bold">
+                            {ev.preferredCondition === "is_night_flight" ? (
+                              ev.isNightFlight ? (
+                                <span className="inline-flex items-center gap-1 text-[#43E600]">✅ se cumple</span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 text-red-400">❌ no se cumple</span>
+                              )
+                            ) : (
+                              <span className="inline-flex items-center gap-1 text-white/50">—</span>
+                            )}
+                          </span>
+                        </div>
+                      )}
+                      <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                        <span className="font-mono text-[11px] text-white/60">lastEvaluation</span>
+                        <span className="font-mono text-[10px] text-white/40">{ev.lastEvaluation}</span>
+                      </div>
+                      {/* Línea de tiempo visual */}
+                      <div className="px-2 py-2 border-t border-white/5 bg-black/10">
+                        <DelayTimeline
+                          eventKey={ev.key}
+                          currentTime={typeof ev.currentTime === "number" ? ev.currentTime : NaN}
+                          scheduledTakeoff={typeof ev.scheduledTime === "number" ? ev.scheduledTime : NaN}
+                          thresholdMs={ev.threshold}
+                          label={ev.label}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Section>
+
+          {/* Transiciones */}
+
+          {/* Pasos en espera (WAIT_CONDITION) */}
           <Section title="Pasos en espera (WAIT_CONDITION)" icon={Timer} count={waitConditionSteps.length} defaultOpen={true}>
             <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
               Precondiciones de pasos WAIT_CONDITION del escenario cargado · actualización 1s
@@ -1828,6 +1570,8 @@ export default function DebugMonitor({
           </Section>
 
           {/* Próximo evento bloqueante */}
+
+          {/* Próximo evento bloqueante */}
           <Section title="🚫 Próximo Evento Bloqueante" icon={AlertTriangle} count={blockingStep ? 1 : 0} defaultOpen={true}>
             <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
               Primer WAIT_CONDITION bloqueante sin completar · actualización 1s
@@ -1886,6 +1630,221 @@ export default function DebugMonitor({
               </div>
             )}
           </Section>
+
+          {/* Variables de eventos */}
+
+          {/* Variables de Rodaje */}
+          <Section title="🚗 Variables de Rodaje" icon={Timer} count={2} defaultOpen={true}>
+            <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
+              Detención en plataforma (menos de 1 kt = detenido) · actualización 1s
+            </div>
+            <div className="space-y-0.5">
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">GROUND_VELOCITY</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {Number.isInteger(taxiVars.groundspeed) ? taxiVars.groundspeed : taxiVars.groundspeed.toFixed(2)}
+                  <span className="text-white/40 ml-1">kt</span>
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">TIME_STOPPED</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {taxiVars.timeStopped !== null ? (
+                    <>
+                      {taxiVars.timeStopped.toFixed(0)}
+                      <span className="text-white/40 ml-1">s</span>
+                    </>
+                  ) : (
+                    <span className="text-white/30 italic">—</span>
+                  )}
+                </span>
+              </div>
+            </div>
+          </Section>
+
+          {/* Variables de Crucero */}
+          <Section title="✈️ Variables de Crucero" icon={Plane} count={14} defaultOpen={true}>
+            <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
+              Cuenta regresiva (distancia restante / total SimBrief) · actualización 1s
+            </div>
+            <div className="space-y-0.5">
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">CRUISE_TIME</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {cruiseVars.cruiseTimeSeconds !== null
+                    ? `${cruiseVars.cruiseTimeSeconds}s (${secondsToTimeRemaining(cruiseVars.cruiseTimeSeconds)})`
+                    : <span className="text-white/30 italic">— (sin SimBrief)</span>}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">CRUISE_PROGRESS</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {cruiseVars.progress.toFixed(2)} <span className="text-white/40">({Math.round(cruiseVars.progress * 100)}%)</span>
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">CRUISE_ENTRY_TIME</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {cruiseVars.cruiseEntryTime !== null
+                    ? `${secondsToHHMM(cruiseVars.cruiseEntryTime)} UTC`
+                    : <span className="text-white/30 italic">— (aún no en CRUISE)</span>}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">CRUISE_REMAINING</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {cruiseVars.remaining !== null
+                    ? <>{cruiseVars.remaining.toFixed(2)} <span className="text-white/40">({Math.round(cruiseVars.remaining * 100)}%)</span></>
+                    : <span className="text-white/30 italic">—</span>}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">DISTANCE_TO_DESTINATION</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {cruiseVars.distanceToDest !== null
+                    ? <>{cruiseVars.distanceToDest.toFixed(1)} <span className="text-white/40 ml-1">NM</span></>
+                    : <span className="text-white/30 italic">—</span>}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">TOTAL_DISTANCE</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {cruiseVars.totalDistance !== null
+                    ? <>{cruiseVars.totalDistance} <span className="text-white/40 ml-1">NM</span></>
+                    : <span className="text-white/30 italic">— (sin SimBrief)</span>}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">IS_NIGHT_FLIGHT</span>
+                <span>{formatValue("IS_NIGHT_FLIGHT", cruiseVars.nightNow)}</span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">IS_WIDEBODY</span>
+                <span>{formatValue("IS_WIDEBODY", cruiseVars.isWidebody)}</span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">AIRCRAFT_TYPE</span>
+                <span className="font-mono text-[11px] text-white/80">
+                  {cruiseVars.aircraftType || <span className="text-white/30 italic">—</span>}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">FLIGHT_DURATION</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {cruiseVars.durationMinutes !== null
+                    ? `${cruiseVars.durationMinutes} min (${secondsToTimeRemaining(cruiseVars.durationMinutes * 60)})`
+                    : <span className="text-white/30 italic">— (sin SimBrief)</span>}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">IS_INTERNATIONAL</span>
+                <span className="font-mono text-[11px]">
+                  {formatValue("IS_INTERNATIONAL", cruiseVars.international)}
+                  {cruiseVars.originICAO || cruiseVars.destICAO ? (
+                    <span className="text-white/40 ml-1">({cruiseVars.originICAO || "—"} → {cruiseVars.destICAO || "—"})</span>
+                  ) : null}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">PASSENGERS_SLEEPING</span>
+                <span>{formatValue("PASSENGERS_SLEEPING", cruiseVars.sleeping)}</span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">originCountry</span>
+                <span className="font-mono text-[11px] text-white/80">{cruiseVars.originCountry}</span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">destCountry</span>
+                <span className="font-mono text-[11px] text-white/80">{cruiseVars.destCountry}</span>
+              </div>
+            </div>
+          </Section>
+
+          {/* Variables de Descenso */}
+
+          {/* Variables de Descenso */}
+          <Section title="🛬 Variables de Descenso" icon={Plane} count={6} defaultOpen={true}>
+            <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
+              Aproximación y aterrizaje (RADIO HEIGHT solo válida &lt; 2500 ft AGL) · actualización 1s
+            </div>
+            <div className="space-y-0.5">
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">ALTITUDE</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {Number.isInteger(descentVars.altitude) ? descentVars.altitude : descentVars.altitude.toFixed(1)}
+                  <span className="text-white/40 ml-1">ft</span>
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">RADIO_HEIGHT</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {descentVars.radioHeight !== null ? (
+                    <>
+                      {Number.isInteger(descentVars.radioHeight) ? descentVars.radioHeight : descentVars.radioHeight.toFixed(1)}
+                      <span className="text-white/40 ml-1">ft</span>
+                      {!descentVars.radioValid && (
+                        <span className="text-white/40 ml-1">(no válido &gt; 2500 ft)</span>
+                      )}
+                    </>
+                  ) : (
+                    <span className="text-white/30 italic">—</span>
+                  )}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">VERTICAL_SPEED</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {Number.isInteger(descentVars.verticalSpeed) ? descentVars.verticalSpeed : descentVars.verticalSpeed.toFixed(1)}
+                  <span className="text-white/40 ml-1">ft/min</span>
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">GEAR_DOWN</span>
+                <span>{descentVars.gearDown === null ? <span className="text-white/30 italic font-mono text-[11px]">—</span> : formatValue("GEAR_DOWN", descentVars.gearDown)}</span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">REMAINING_TIME</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {descentVars.remainingTime !== null ? (
+                    <>
+                      {descentVars.remainingTime.toFixed(1)}
+                      <span className="text-white/40 ml-1">min</span>
+                    </>
+                  ) : (
+                    <span className="text-white/30 italic">—</span>
+                  )}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">DISTANCE_TO_DEST</span>
+                <span className="font-mono text-[11px] text-[#45AFFF]">
+                  {descentVars.distanceToDest !== null ? (
+                    <>
+                      {descentVars.distanceToDest.toFixed(1)}
+                      <span className="text-white/40 ml-1">NM</span>
+                    </>
+                  ) : (
+                    <span className="text-white/30 italic">—</span>
+                  )}
+                </span>
+              </div>
+            </div>
+          </Section>
+
+          {/* Variables de Rodaje */}
+
+          {/* SimBrief */}
+          <Section title="SimBrief" icon={FileText} count={simbrief ? Object.keys(simbrief).length : 0} defaultOpen={false}>
+            {simbrief ? (
+              <KeyValueGrid data={simbrief as Record<string, unknown>} />
+            ) : (
+              <div className="text-[11px] font-mono text-white/30 italic px-2 py-2">
+                Sin datos SimBrief (importá un vuelo)
+              </div>
+            )}
+          </Section>
+
+          {/* Narrativa */}
 
           {/* Variables de eventos */}
           <Section title="Variables de eventos (resueltas)" icon={Variable} count={Object.keys(eventVars).length} defaultOpen={true}>

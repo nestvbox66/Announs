@@ -441,11 +441,13 @@ export class RuleEngine {
   /**
    * Distancia al destino en NM (fórmula de Haversine).
    * Usa telemetry.latitude/longitude vs flight.destLatitude/destLongitude.
-   * Sin coordenadas devuelve 0.
+   * Sin coordenadas devuelve NaN (desconocido), NO 0: 0 significaría "en
+   * destino" y dispararía reglas tipo DISTANCE_TO_DESTINATION <= 70 a ciegas.
+   * Los llamadores tratan NaN como "sin dato" (isFinite / || 0 en display).
    */
   public getDistanceToDestination(context?: FlightContext): number {
     const ctx: FlightContext | undefined = context ?? this.flightContext;
-    if (!ctx) return 0;
+    if (!ctx) return NaN;
     const telemetry: any = ctx.getTelemetry?.() ?? {};
     const flight: any = ctx.getFlight?.() ?? {};
 
@@ -453,9 +455,9 @@ export class RuleEngine {
     const lon1d = Number(telemetry.longitude);
     const lat2d = Number(flight.destLatitude ?? flight.dest_latitude);
     const lon2d = Number(flight.destLongitude ?? flight.dest_longitude);
-    if ([lat1d, lon1d, lat2d, lon2d].some((v) => Number.isNaN(v))) return 0;
-    if (!lat1d && !lon1d) return 0;
-    if (!lat2d && !lon2d) return 0;
+    if ([lat1d, lon1d, lat2d, lon2d].some((v) => Number.isNaN(v))) return NaN;
+    if (!lat1d && !lon1d) return NaN;
+    if (!lat2d && !lon2d) return NaN;
 
     const R = 3440.065; // Radio de la Tierra en NM
     const lat1 = lat1d * Math.PI / 180;
@@ -1839,6 +1841,7 @@ export class RuleEngine {
     "CRUISE_PROGRESS",
     "FSM",
     "REMAINING_TIME",
+    "DISTANCE_TO_DESTINATION",
   ];
 
   private isTelemetryExpression(rule: string): boolean {
@@ -1868,6 +1871,8 @@ export class RuleEngine {
     FSM: string;
     /** Minutos restantes (SimBrief). NaN sin datos: así `<= 5` es falso y un OR degrada al otro brazo. */
     REMAINING_TIME: number;
+    /** NM restantes al destino (Haversine). NaN sin posición/destino. */
+    DISTANCE_TO_DESTINATION: number;
     _raw: { simOnGround: unknown; groundspeed: unknown; parkingBrake: unknown; atcOnParkingSpot: unknown; atcClearedTakeoff: unknown; onAnyRunway: unknown; altitude: unknown; verticalSpeed: unknown; radioHeight: unknown; gearDown: unknown; seatbeltOn: unknown };
   } {
     const ctx: any = context ?? this.flightContext;
@@ -1935,6 +1940,15 @@ export class RuleEngine {
     } catch {
       remainingTime = NaN;
     }
+    // NM restantes para átomos tipo DISTANCE_TO_DESTINATION <= 70.
+    // Sin posición/destino → NaN (falso en comparaciones, sin lanzar).
+    let distanceToDest = NaN;
+    try {
+      const dd = this.getDistanceToDestination(ctx as FlightContext);
+      if (Number.isFinite(dd) && dd >= 0) distanceToDest = dd;
+    } catch {
+      distanceToDest = NaN;
+    }
     return {
       SIM_ON_GROUND: simOnGround === true,
       GROUND_VELOCITY: groundspeed,
@@ -1957,6 +1971,7 @@ export class RuleEngine {
       CRUISE_PROGRESS: this.getCruiseProgress(ctx as FlightContext),
       FSM: fsm,
       REMAINING_TIME: remainingTime,
+      DISTANCE_TO_DESTINATION: distanceToDest,
       _raw: { simOnGround, groundspeed: tel.groundspeed ?? tel.ground_speed, parkingBrake, atcOnParkingSpot, atcClearedTakeoff, onAnyRunway, altitude: tel.altitude, verticalSpeed: tel.verticalSpeed, radioHeight: tel.radioHeight, gearDown, seatbeltOn },
     };
   }
@@ -1994,6 +2009,7 @@ export class RuleEngine {
       FSM: fsmState,
       CRUISE_PROGRESS: this.getCruiseProgress(ctx as FlightContext),
       REMAINING_TIME: this.getRemainingTime(ctx as FlightContext),
+      DISTANCE_TO_DESTINATION: this.getDistanceToDestination(ctx as FlightContext),
     };
   }
 
@@ -2028,6 +2044,7 @@ export class RuleEngine {
           CRUISE_PROGRESS: ctx.CRUISE_PROGRESS,
           FSM: ctx.FSM,
           REMAINING_TIME: ctx.REMAINING_TIME,
+          DISTANCE_TO_DESTINATION: ctx.DISTANCE_TO_DESTINATION,
         },
         result,
       });

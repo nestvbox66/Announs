@@ -815,6 +815,92 @@ function cruiseMaxStep(id: number, eventKey: string, maxRemaining: number): Narr
   check("T22f fuera de CRUISE → progreso 0", other.rules.getCruiseProgress(other.fc) === 0);
 }
 
+// ── Casos T23 (regla descenso por distancia + max_remaining visible) ──
+const NEW_DESCENT_RULE = "(PLANE_ALTITUDE - FLIGHT_LEVEL) <= -1000 AND DISTANCE_TO_DESTINATION <= 70 AND VERTICAL_SPEED < -500";
+
+function nearDestContext(extraFlight: any = {}): { fc: FlightContext; rules: RuleEngine } {
+  // Destino a ~30 NM de la posición (dentro de 70).
+  const fc = new FlightContext({
+    flight: { cruiseAltitude: 16000, destLatitude: -34.6, destLongitude: -58.4, ...extraFlight } as any,
+    telemetry: { altitude: 15000, verticalSpeed: -700, latitude: -34.3, longitude: -58.4 } as any,
+  });
+  const rules = new RuleEngine(fc);
+  rules.setPhaseProvider(() => "DESCENT");
+  return { fc, rules };
+}
+
+{
+  const { fc, rules } = nearDestContext();
+  const d = rules.getSchedulerRuleDetail(NEW_DESCENT_RULE, fc);
+  check("T23 nueva regla TRUE descendiendo cerca", d.met === true, JSON.stringify(d.rows));
+  check("T23 átomo DISTANCE con valor (no '-')",
+    d.rows.some((r) => r.label.includes("DISTANCE_TO_DESTINATION") && !r.value.includes("—")),
+    JSON.stringify(d.rows));
+}
+
+{
+  // Lejos del destino (>70 NM) → FALSE por distancia aunque lo demás cumpla.
+  const fc = new FlightContext({
+    flight: { cruiseAltitude: 16000, destLatitude: -34.6, destLongitude: -58.4 } as any,
+    telemetry: { altitude: 15000, verticalSpeed: -700, latitude: -30.0, longitude: -58.4 } as any,
+  });
+  const rules = new RuleEngine(fc);
+  rules.setPhaseProvider(() => "DESCENT");
+  check("T23 lejos (>70NM) → FALSE", rules.getSchedulerRuleDetail(NEW_DESCENT_RULE, fc).met === false);
+}
+
+{
+  // Sin coords de destino (NaN) → FALSE sin lanzar.
+  const fc = new FlightContext({
+    flight: { cruiseAltitude: 16000 } as any,
+    telemetry: { altitude: 15000, verticalSpeed: -700, latitude: -34.3, longitude: -58.4 } as any,
+  });
+  const rules = new RuleEngine(fc);
+  rules.setPhaseProvider(() => "DESCENT");
+  let threw = false;
+  let met: boolean | null = null;
+  try {
+    met = rules.getSchedulerRuleDetail(NEW_DESCENT_RULE, fc).met;
+  } catch {
+    threw = true;
+  }
+  check("T23 sin destino → FALSE sin excepción", !threw && met === false);
+}
+
+{
+  // max_remaining visible en el desglose de CRUISE.
+  const { fc, rules } = distContext(-33.0, DEST.lon);
+  const step = cruiseMaxStep(3, "cruise_crew_service_info", 0.8);
+  const det = rules.evaluateWaitConditionDetail(step, fc);
+  const falt = det.rows.find((r) => r.label.includes("FALTANTE"));
+  check("T23 FALTANTE visible con max_remaining", !!falt, JSON.stringify(det.rows));
+  check("T23 FALTANTE muestra valor actual", !!falt && /\d+\.\d+/.test(falt.value), falt?.value ?? "—");
+}
+
+{
+  // Orden de bloques del monitor según especificación (sin Puerta).
+  const { readFileSync } = await import("node:fs");
+  const { join, dirname } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const src = readFileSync(join(root, "src", "components", "flight", "DebugMonitor.tsx"), "utf-8");
+  const titles = [...src.matchAll(/^ +<Section title="([^"]+)"/gm)].map((m) => m[1]);
+  const norm = (s: string) =>
+    s
+      .replace(/\(.*?\)/g, "")
+      .normalize("NFD")
+      .replace(new RegExp("[\\u0300-\\u036f]", "g"), "")
+      .toLowerCase()
+      .replace(/[^a-z ]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  const expected = ["telemetria", "vuelo", "narrativa", "transiciones", "transicion a cruise",
+    "eventos de demora", "pasos en espera", "proximo evento bloqueante", "variables de rodaje",
+    "variables de crucero", "variables de descenso", "simbrief", "variables de eventos"];
+  check("T23 orden de bloques del monitor", JSON.stringify(titles.map(norm)) === JSON.stringify(expected), titles.join(" | "));
+  check("T23 sin bloque Puerta", !titles.some((t) => norm(t).includes("puerta")));
+}
+
 // ── Resultado ────────────────────────────────────────────────────────
 
 if (failures > 0) {
