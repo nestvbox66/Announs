@@ -9,6 +9,7 @@ import { supabase } from "../lib/supabase";
 import { generateManifest, getRegionFromICAO } from "../engine/PassengerManifest";
 import { getAirportName, parseMETAR, getAirportTimezone } from "../utils/airportMapping";
 import { getAirlineName } from "../utils/airlineMapping";
+import { getAirportByIcao, type CachedAirport } from "../services/airportService";
 import { useToast } from "./Toast";
 import { 
   Plane, 
@@ -1220,6 +1221,12 @@ export default function VueloActualView({
   const [simbriefError, setSimbriefError] = useState<string | null>(null);
   // Datos de aeronave resueltos contra aircraft_types (una sola vez por importación).
   const [simbriefAircraft, setSimbriefAircraft] = useState<{ icao: string; isWidebody: boolean; displayName: string } | null>(null);
+  // Aeropuertos resueltos contra la tabla `airports` de Supabase (caché 7 días).
+  // El fallback síncrono sigue siendo `airportMapping.ts` (ver buildFlightDataForContext).
+  const [resolvedAirports, setResolvedAirports] = useState<{ origin: CachedAirport | null; dest: CachedAirport | null }>({
+    origin: null,
+    dest: null,
+  });
 
   // Load voices from DB — two-step query (more robust than FK join)
   useEffect(() => {
@@ -1567,6 +1574,15 @@ export default function VueloActualView({
     }
   }, [simBriefData]);
 
+  // Resolver aeropuertos contra Supabase cuando cambian los ICAOs por edición
+  // manual o por prop simBriefData. El fallback inmediato ya está aplicado
+  // arriba (getRouteDetails/getAirportName); aquí se sobrescribe con la DB.
+  React.useEffect(() => {
+    if (!originICAO && !destICAO) return;
+    resolveAirports(originICAO, destICAO).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [originICAO, destICAO]);
+
   // Phase 1 boarding simulation timer effect
   React.useEffect(() => {
     let intervalId: any = null;
@@ -1851,6 +1867,52 @@ export default function VueloActualView({
     handleStartFlight("test");
   };
 
+  /**
+   * Resuelve origen/destino contra la tabla `airports` de Supabase (con caché).
+   * Si la DB no devuelve un aeropuerto, se usa `airportMapping.ts` como fallback.
+   * Actualiza nombres de ciudad en la UI y coords del destino en FlightContext.
+   *
+   * Lleva guardia de secuencia: si se disparan varias resoluciones concurrentes
+   * (p. ej. re-importación rápida), solo la última aplica sus valores.
+   */
+  const resolveSeqRef = useRef(0);
+  const resolveAirports = useCallback(async (originICAO: string, destICAO: string) => {
+    if (!originICAO && !destICAO) return;
+    const seq = ++resolveSeqRef.current;
+    try {
+      const [originAirport, destAirport] = await Promise.all([
+        originICAO ? getAirportByIcao(originICAO) : Promise.resolve(null),
+        destICAO ? getAirportByIcao(destICAO) : Promise.resolve(null),
+      ]);
+      if (seq !== resolveSeqRef.current) {
+        console.log('[SimBrief] Resolución de aeropuertos obsoleta, ignorando:', { originICAO, destICAO });
+        return;
+      }
+      setResolvedAirports({ origin: originAirport, dest: destAirport });
+
+      if (originAirport?.municipality) setOriginCityName(originAirport.municipality);
+      else if (originICAO) setOriginCityName((prev) => prev || getAirportName(originICAO) || originICAO);
+      if (destAirport?.municipality) setDestCityName(destAirport.municipality);
+      else if (destICAO) setDestCityName((prev) => prev || getAirportName(destICAO) || destICAO);
+
+      flightContextRef.current?.updateFlight({
+        originICAO,
+        destICAO,
+        originCity: originAirport?.municipality || (originICAO ? getAirportName(originICAO) || originICAO : ""),
+        destCity: destAirport?.municipality || (destICAO ? getAirportName(destICAO) || destICAO : ""),
+        ...(destAirport?.latitude_deg != null ? { destLatitude: destAirport.latitude_deg } : {}),
+        ...(destAirport?.longitude_deg != null ? { destLongitude: destAirport.longitude_deg } : {}),
+      });
+
+      console.log('[SimBrief] Aeropuertos resueltos:', {
+        origin: { icao: originICAO, city: originAirport?.municipality ?? getAirportName(originICAO) ?? originICAO },
+        destination: { icao: destICAO, city: destAirport?.municipality ?? getAirportName(destICAO) ?? destICAO },
+      });
+    } catch (e) {
+      console.warn('[SimBrief] No se pudieron resolver aeropuertos (fallback a airportMapping):', e);
+    }
+  }, []);
+
   const handleImportSimbrief = async () => {
     setIsFetchingSimbrief(true);
     setSimbriefError(null);
@@ -1864,6 +1926,42 @@ export default function VueloActualView({
         throw new Error("simbrief_generic_error");
       }
       const data = await response.json();
+
+      // --- Normalización de altitud de crucero (pipeline del anuncio) ---
+      // La variable `cruising_altitude` se resuelve desde
+      // `simbrief.general.route_altitude` crudo. Algunos OFP lo omiten aunque
+      // traigan `initial_altitude`: se copia para que el anuncio no caiga al
+      // fallback FL320 del catálogo. Sin ningún candidato se deja como está
+      // (aplica el fallback actual). No se toca `prompts.variables`.
+      try {
+        const genAlt: any = (data as any)?.general ?? null;
+        if (genAlt && typeof genAlt === "object") {
+          const originalRouteAlt = genAlt.route_altitude;
+          const isMissing =
+            originalRouteAlt === undefined ||
+            originalRouteAlt === null ||
+            String(originalRouteAlt).trim() === "";
+          const candidate =
+            genAlt.initial_altitude ??
+            genAlt.cruise_altitude ??
+            genAlt.cruise_alt ??
+            null;
+          const candidateUsable =
+            candidate !== undefined &&
+            candidate !== null &&
+            String(candidate).trim() !== "";
+          if (isMissing && candidateUsable) {
+            genAlt.route_altitude = candidate;
+          }
+          console.log('[SimBrief] Normalizando altitud de crucero:', {
+            route_altitude: originalRouteAlt ?? null,
+            initial_altitude: genAlt.initial_altitude ?? null,
+            normalized: genAlt.route_altitude ?? null,
+          });
+        }
+      } catch (normErr) {
+        console.warn('[SimBrief] No se pudo normalizar route_altitude:', normErr);
+      }
       setSimbriefRawData(data);
 
       // --- Datos de crucero ---
@@ -1892,6 +1990,13 @@ export default function VueloActualView({
         isWidebody: aircraftIsWidebody,
         displayName: aircraftData?.display_name || "N/A",
       });
+
+      // --- Aeropuertos: tabla `airports` de Supabase (caché 7 días) ---
+      // NOTA: NO resolver aquí con fire-and-forget. En re-lecturas el caché
+      // responde al instante (microtask) y el `setDestCityName` síncrono de
+      // abajo (fallback → ICAO) lo sobrescribiría después. Se resuelve con
+      // `await` tras aplicar el fallback (ver más abajo).
+      // `resolveAirports` actualiza ciudades en UI + FlightContext (lat/lon destino).
 
       console.log("[SimBrief] Datos de vuelo importados:", {
         cruiseTimeSeconds,
@@ -2023,6 +2128,13 @@ export default function VueloActualView({
       const initialRoute = getRouteDetails(origin.icao_code || "", dest.icao_code || "");
       setOriginCityName(initialRoute.orgCity);
       setDestCityName(initialRoute.destCity);
+
+      // Resolver contra Supabase DESPUÉS del fallback síncrono y con `await`:
+      // el valor de la DB (o su fallback) siempre se aplica en último lugar.
+      // Sin `await`, en re-lecturas el caché instantáneo ganaba primero y el
+      // fallback síncrono lo pisaba con el ICAO (bug: 1ª importación OK,
+      // 2ª mostraba el código ICAO en ciudad destino).
+      await resolveAirports(origin.icao_code || "", dest.icao_code || "");
 
       const mappedSimbriefData = {
         username: data.general?.pilot_id ? `pilot_${data.general.pilot_id}` : "capitán_msfs2024",
@@ -2577,8 +2689,12 @@ export default function VueloActualView({
     // ── Distancia total + coords destino ("cuenta regresiva" del progreso) ─
     // SimBrief `general.route_distance` o círculo máximo origen→destino
     // (pos_lat/pos_long). Sin dato, el progreso usa fallback por tiempo.
+    // Las coords de la tabla `airports` (ya resueltas) tienen prioridad sobre
+    // SimBrief porque cubren +10.000 aeropuertos con datos curados.
     const totalResolved = resolveTotalDistanceNm(simbriefRawData);
     const totalDistanceNm = totalResolved.nm > 0 ? totalResolved.nm : undefined;
+    const dbDestLat = resolvedAirports.dest?.latitude_deg;
+    const dbDestLon = resolvedAirports.dest?.longitude_deg;
     const sbDestLatRaw = Number(
       (simbriefRawData as any)?.destination?.pos_lat ??
       (simbriefRawData as any)?.destination?.posLat
@@ -2587,8 +2703,14 @@ export default function VueloActualView({
       (simbriefRawData as any)?.destination?.pos_long ??
       (simbriefRawData as any)?.destination?.posLong
     );
-    const destLatitude = Number.isFinite(sbDestLatRaw) ? sbDestLatRaw : undefined;
-    const destLongitude = Number.isFinite(sbDestLonRaw) ? sbDestLonRaw : undefined;
+    const destLatitude =
+      typeof dbDestLat === "number" && Number.isFinite(dbDestLat)
+        ? dbDestLat
+        : Number.isFinite(sbDestLatRaw) ? sbDestLatRaw : undefined;
+    const destLongitude =
+      typeof dbDestLon === "number" && Number.isFinite(dbDestLon)
+        ? dbDestLon
+        : Number.isFinite(sbDestLonRaw) ? sbDestLonRaw : undefined;
     if (hasSimBrief) {
       console.log('[SimBrief] Distancia total:', totalDistanceNm ?? 0, `NM (fuente: ${totalResolved.source})`);
     }
@@ -2605,11 +2727,13 @@ export default function VueloActualView({
         originICAO: srcOriginIcao || originICAO,
         destICAO: srcDestIcao || destICAO,
         originCity:
+          resolvedAirports.origin?.municipality ||
           getAirportName(srcOriginIcao) ||
           simbriefRawData?.origin?.city ||
           originCityName ||
           getRouteDetails(originICAO, destICAO).orgCity,
         destCity:
+          resolvedAirports.dest?.municipality ||
           getAirportName(srcDestIcao) ||
           simbriefRawData?.destination?.city ||
           destCityName ||
@@ -2679,7 +2803,7 @@ export default function VueloActualView({
   }, [
     airline, flightCode, originICAO, destICAO, originCityName, destCityName,
     gate, departureTimeStr, departureTimeLocalStr, captainPrimaryLang, captainSecondaryLang, flightId,
-    simbriefRawData, simbriefAircraft,
+    simbriefRawData, simbriefAircraft, resolvedAirports,
     specialEvents, specialEventEnabled,
   ]);
 

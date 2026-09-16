@@ -19,6 +19,29 @@ interface TimerAction {
 
 export type RuleAction = AnnouncementAction | TimerAction;
 
+type WaitDetailRow = { label: string; ok: boolean | null; value: string };
+
+/** AND de los checks evaluables; null si ninguno tiene dato. */
+function andOk(rows: WaitDetailRow[]): boolean | null {
+  let saw = false;
+  for (const r of rows) {
+    if (r.ok === null || r.ok === undefined) continue;
+    saw = true;
+    if (!r.ok) return false;
+  }
+  return saw ? true : null;
+}
+
+/** JSON compacto para valores configurados (nunca lanza). */
+function safeJson(v: unknown): string {
+  try {
+    const s = JSON.stringify(v);
+    return s === undefined ? String(v) : s;
+  } catch {
+    return String(v);
+  }
+}
+
 export class RuleEngine {
   private timerCounter = 0;
 
@@ -318,7 +341,12 @@ export class RuleEngine {
     const total = totalTimeNum;
     if (Number.isNaN(zuluTime) || total <= 0) return 0;
 
-    const elapsed = zuluTime - entry;
+    let elapsed = zuluTime - entry;
+    // Wrap de medianoche: zuluTime son segundos del día UTC (0-86400). Si el
+    // crucero empezó antes de medianoche y ya es el día siguiente, elapsed
+    // sale negativo y el progreso se clava en 0 (caso real: cruiseEntryTime
+    // 52681 = 14:37 UTC con zulu 3564 = 00:59 UTC del día siguiente).
+    if (elapsed < 0) elapsed += 86400;
     const progress = elapsed / total;
 
     console.log('[RuleEngine] getCruiseProgress cálculo (tiempo, fallback):', {
@@ -434,7 +462,12 @@ export class RuleEngine {
     const sched = Number(flight.scheduledTakeoffTime ?? flight.scheduled_takeoff_time);
     if (Number.isNaN(zulu) || Number.isNaN(sched)) return 0;
 
-    const elapsedMinutes = (zulu - sched) / 60;
+    // Wrap de medianoche (igual que getCruiseProgress): zulu y sched son
+    // segundos del día UTC; si el despegue fue antes de medianoche, la
+    // diferencia sale negativa y el restante superaría la duración total.
+    let elapsedSeconds = zulu - sched;
+    if (elapsedSeconds < 0) elapsedSeconds += 86400;
+    const elapsedMinutes = elapsedSeconds / 60;
     return Math.max(0, Number(flight.durationMinutes) - elapsedMinutes);
   }
 
@@ -671,6 +704,22 @@ export class RuleEngine {
   }
 
   /**
+   * Umbrales de progreso de crucero con soporte para el shape anidado del
+   * Backoffice: `preconditions: {type: 'cruise_progress', conditions:
+   * {conditions: {max_remaining: X}, allow_night: ...}}`.
+   * Sin este unwrap, `max_remaining`/`min_progress` quedaban en undefined y
+   * todo WAIT de crucero evaluaba TRUE al entrar en CRUISE (ráfaga de eventos).
+   */
+  private cruiseThresholds(conditions: any): { minRaw: unknown; maxRaw: unknown } {
+    const c: any = conditions ?? {};
+    const nested: any = c.conditions && typeof c.conditions === "object" ? c.conditions : {};
+    return {
+      minRaw: c.min_progress ?? nested.min_progress,
+      maxRaw: c.max_remaining ?? nested.max_remaining,
+    };
+  }
+
+  /**
    * Precondición de progreso de crucero. Dos formas (nueva arquitectura
    * "cuenta regresiva" convive con la legacy):
    *  - `max_remaining` (0.0–1.0): dispara cuando faltante <= max.
@@ -679,12 +728,13 @@ export class RuleEngine {
    */
   private evaluateCruiseProgress(conditions: any, context?: FlightContext): boolean {
     const ctx = context ?? this.flightContext;
+    const { minRaw, maxRaw } = this.cruiseThresholds(conditions);
     let ok = true;
-    if (conditions?.max_remaining !== undefined) {
-      ok = this.getCruiseProgressRemaining(ctx) <= Number(conditions.max_remaining) && ok;
+    if (maxRaw !== undefined) {
+      ok = this.getCruiseProgressRemaining(ctx) <= Number(maxRaw) && ok;
     }
-    if (conditions?.min_progress !== undefined) {
-      ok = this.getCruiseProgress(ctx) >= Number(conditions.min_progress) && ok;
+    if (minRaw !== undefined) {
+      ok = this.getCruiseProgress(ctx) >= Number(minRaw) && ok;
     }
     return ok;
   }
@@ -994,9 +1044,15 @@ export class RuleEngine {
       return false;
     }
 
-    // Si es el paso de transición a descenso, usar lógica específica
-    // (altitud + progreso de crucero + velocidad vertical).
+    // Si es el paso de transición a descenso: con preconditions configuradas
+    // (Backoffice) se evalúan tal cual (phase_transition + conditions); sin
+    // ellas se usa la lógica específica legacy (altitud + progreso + VS).
+    // Sin este gate, la parametría publicada se ignoraba siempre y el monitor
+    // (que sí lee las preconditions) podía verse en verde sin que el sistema
+    // avanzara.
     if (step.eventKey === 'transition_to_descent') {
+      const pre: any = (step as any).preconditions;
+      if (pre) return this.evaluatePreconditions(step, context);
       return this.evaluateTransitionToDescent(context);
     }
 
@@ -1267,6 +1323,16 @@ export class RuleEngine {
   private evaluatePhaseTransition(conditions: any, step?: NarrativeStep, context?: FlightContext): boolean {
     const detail = this.getPhaseTransitionDetail(conditions, context);
     const ctxTel: any = (context ?? this.flightContext as any)?.getTelemetry?.() ?? {};
+    const ctxFlight: any = (context ?? this.flightContext as any)?.getFlight?.() ?? {};
+    const currentAltitude = Number(ctxTel.altitude ?? ctxTel.plane_altitude ?? 0) || 0;
+    const flightLevel = Number(ctxFlight.cruiseAltitude ?? 0) || 0;
+    let distanceToDest: number | null = null;
+    try {
+      const dd = this.getDistanceToDestination((context ?? this.flightContext) as FlightContext);
+      if (Number.isFinite(dd) && (dd as number) >= 0) distanceToDest = dd as number;
+    } catch {
+      distanceToDest = null;
+    }
     console.log('[RuleEngine] Evaluando phase_transition:', {
       eventKey: step?.eventKey ?? 'transition_to_taxi',
       targetPhase: detail.targetPhase,
@@ -1277,6 +1343,12 @@ export class RuleEngine {
       groundspeed: ctxTel.groundspeed ?? ctxTel.ground_speed,
       parkingBrake: ctxTel.parkingBrake ?? ctxTel.parking_brake,
       atcOnParkingSpot: ctxTel.atcOnParkingSpot ?? ctxTel.atc_on_parking_spot,
+      // Campos de descenso (transition_to_descent)
+      currentAltitude,
+      flightLevel,
+      altitudeDiff: currentAltitude - flightLevel,
+      distanceToDest,
+      verticalSpeed: Number(ctxTel.verticalSpeed ?? ctxTel.vertical_speed ?? 0) || 0,
       conditions: detail.items.length > 0
         ? Object.fromEntries(detail.items.map((it) => [it.key, { ok: it.ok, value: it.value }]))
         : {
@@ -1316,6 +1388,9 @@ export class RuleEngine {
       atcClearedTakeoff: unknown;
       onAnyRunway: unknown;
       altitude: unknown;
+      cruiseAltitude: unknown;
+      verticalSpeed: unknown;
+      distanceToDest: unknown;
     };
   } {
     const conds: any = conditions ?? {};
@@ -1427,6 +1502,60 @@ export class RuleEngine {
       const alt = Number(altitude) || 0;
       items.push({ key: 'altitude_lt', label: `ALTITUDE < ${threshold} ft`, ok: alt < threshold, value: `${Number.isInteger(alt) ? alt : alt.toFixed(1)} ft` });
     }
+    // ── Transición a DESCENT (transition_to_descent) ────────────────────
+    // altitude_diff_lt: (altitud actual − FL crucero) <= umbral (p. ej. -1000).
+    // distance_to_dest_lt: distancia al destino (Haversine) <= umbral NM.
+    // vertical_speed_lt: velocidad vertical < umbral (p. ej. -500 fpm).
+    // Sin estas claves, `items` quedaba vacío y se caía a la receta clásica
+    // de TAXI (en tierra), que en crucero nunca cumple: el ancla no avanzaba
+    // aunque el monitor (vía scheduler_rule) se viera en verde.
+    const flight: any = ctx?.getFlight?.() ?? {};
+    const cruiseAltitude = Number(flight.cruiseAltitude ?? 0) || 0;
+    const verticalSpeed = Number(tel.verticalSpeed ?? tel.vertical_speed ?? 0) || 0;
+    let distanceToDest = NaN;
+    try {
+      const dd = this.getDistanceToDestination(ctx as FlightContext);
+      if (Number.isFinite(dd) && (dd as number) >= 0) distanceToDest = dd as number;
+    } catch {
+      distanceToDest = NaN;
+    }
+    const fmtAlt = (v: number): string => `${Number.isInteger(v) ? v : v.toFixed(1)} ft`;
+    if (has('altitude_diff_lt') || has('altitudeDiffLt')) {
+      const rawTh = conds.altitude_diff_lt ?? conds.altitudeDiffLt;
+      const threshold = Number(rawTh);
+      const diff = (Number(altitude) || 0) - cruiseAltitude;
+      const ok = !Number.isNaN(threshold) ? diff <= threshold : false;
+      items.push({
+        key: 'altitude_diff_lt',
+        label: `ALT DIFF <= ${String(rawTh)} ft`,
+        ok,
+        value: `actual ${fmtAlt(diff)} (alt ${fmtAlt(Number(altitude) || 0)} − FL ${fmtAlt(cruiseAltitude)})`,
+      });
+    }
+    if (has('distance_to_dest_lt') || has('distanceToDestLt')) {
+      const rawTh = conds.distance_to_dest_lt ?? conds.distanceToDestLt;
+      const threshold = Number(rawTh);
+      const ok = !Number.isNaN(threshold) && Number.isFinite(distanceToDest)
+        ? (distanceToDest as number) <= threshold
+        : false;
+      items.push({
+        key: 'distance_to_dest_lt',
+        label: `DIST DEST <= ${String(rawTh)} NM`,
+        ok,
+        value: Number.isFinite(distanceToDest) ? `actual ${(distanceToDest as number).toFixed(1)} NM` : 'actual: sin dato',
+      });
+    }
+    if (has('vertical_speed_lt') || has('verticalSpeedLt')) {
+      const rawTh = conds.vertical_speed_lt ?? conds.verticalSpeedLt;
+      const threshold = Number(rawTh);
+      const ok = !Number.isNaN(threshold) ? verticalSpeed < threshold : false;
+      items.push({
+        key: 'vertical_speed_lt',
+        label: `VS < ${String(rawTh)} fpm`,
+        ok,
+        value: `actual ${Number.isInteger(verticalSpeed) ? verticalSpeed : verticalSpeed.toFixed(1)} fpm`,
+      });
+    }
 
     const allConditionsMet =
       items.length > 0
@@ -1453,6 +1582,9 @@ export class RuleEngine {
         atcClearedTakeoff,
         onAnyRunway,
         altitude,
+        cruiseAltitude,
+        verticalSpeed,
+        distanceToDest: Number.isFinite(distanceToDest) ? distanceToDest : null,
       },
     };
   }
@@ -1464,8 +1596,8 @@ export class RuleEngine {
   private withNightRow(
     step: NarrativeStep,
     context: FlightContext | undefined,
-    result: { met: boolean | null; kind: string; rows: { label: string; ok: boolean; value: string }[]; summary: string }
-  ): { met: boolean | null; kind: string; rows: { label: string; ok: boolean; value: string }[]; summary: string } {
+    result: { met: boolean | null; kind: string; rows: { label: string; ok: boolean | null; value: string }[]; summary: string }
+  ): { met: boolean | null; kind: string; rows: { label: string; ok: boolean | null; value: string }[]; summary: string } {
     try {
       if ((step as any).restrictions?.preferred_condition === 'is_night_flight') {
         const night = this.isNightFlight(context ?? this.flightContext);
@@ -1489,7 +1621,7 @@ export class RuleEngine {
   ): {
     met: boolean | null;
     kind: string;
-    rows: { label: string; ok: boolean; value: string }[];
+    rows: { label: string; ok: boolean | null; value: string }[];
     summary: string;
   } {
     const pre: any = (step as any).preconditions;
@@ -1552,19 +1684,20 @@ export class RuleEngine {
     }
     if (pre.type === 'cruise_progress') {
       const c: any = pre.conditions ?? {};
-      const rows: { label: string; ok: boolean; value: string }[] = [];
+      const rows: { label: string; ok: boolean | null; value: string }[] = [];
       let met: boolean | null = null;
       try {
         const prog = this.getCruiseProgress((context ?? this.flightContext) as FlightContext);
         const rem = this.getCruiseProgressRemaining((context ?? this.flightContext) as FlightContext);
-        const hasMin = c.min_progress !== undefined;
-        const hasMax = c.max_remaining !== undefined;
-        const okMin = hasMin ? prog >= Number(c.min_progress) : true;
-        const okMax = hasMax ? rem <= Number(c.max_remaining) : true;
+        const { minRaw, maxRaw } = this.cruiseThresholds(c);
+        const hasMin = minRaw !== undefined;
+        const hasMax = maxRaw !== undefined;
+        const okMin = hasMin ? prog >= Number(minRaw) : true;
+        const okMax = hasMax ? rem <= Number(maxRaw) : true;
         rows.push({ label: 'EN CRUCERO (fase)', ok: prog > 0, value: `${(prog * 100).toFixed(0)}%` });
         // Umbrales configurados (objetivo) + valores actuales: nunca "Progreso >= —".
-        if (hasMin) rows.push({ label: `UMBRAL min_progress: ${c.min_progress}`, ok: okMin, value: `actual ${prog.toFixed(2)}` });
-        if (hasMax) rows.push({ label: `UMBRAL max_remaining: ${c.max_remaining}`, ok: okMax, value: `actual ${rem.toFixed(2)}` });
+        if (hasMin) rows.push({ label: `UMBRAL min_progress: ${minRaw}`, ok: okMin, value: `actual ${prog.toFixed(2)}` });
+        if (hasMax) rows.push({ label: `UMBRAL max_remaining: ${maxRaw}`, ok: okMax, value: `actual ${rem.toFixed(2)}` });
         rows.push({ label: 'PROGRESO actual', ok: okMin, value: prog.toFixed(2) });
         rows.push({ label: 'FALTANTE actual', ok: okMax, value: rem.toFixed(2) });
         met = okMin && okMax;
@@ -1663,6 +1796,443 @@ export class RuleEngine {
     return this.withNightRow(step, context, { met: null, kind, rows: [], summary: `Tipo '${kind}' sin desglose` });
   }
 
+  // ── Tipos del desglose estructurado para el monitor ────────────────────
+
+  /**
+   * Desglose estructurado de un paso WAIT_CONDITION para el DebugMonitor.
+   * Secciones:
+   *  - REGLA DEL SCHEDULER: fórmula configurada + check global + cada
+   *    variable de la fórmula con valor configurado (en el átomo) y actual.
+   *  - PRECONDICIONES (<tipo>): filas del evaluador especializado.
+   *  - CONDITIONS (grupo): cada variable del grupo `conditions` con valor
+   *    configurado y valor actual usado para determinar si se cumple.
+   *  - RESTRICCIONES: cada restricción con valor configurado y actual.
+   * `ok: null` = sin dato / solo informativo (el monitor lo muestra como ❓).
+   * `executedChecker` resuelve "ya ejecutado" (monitor: RuleEngine +
+   * NarrativeEngine); por defecto solo el registro interno. Sin efectos
+   * secundarios.
+   */
+  public explainWaitStep(
+    step: NarrativeStep,
+    context?: FlightContext,
+    executedChecker?: (eventKey: string) => boolean
+  ): {
+    met: boolean | null;
+    kind: string;
+    summary: string;
+    sections: Array<{
+      title: string;
+      formula?: string;
+      met: boolean | null;
+      rows: Array<{ label: string; ok: boolean | null; value: string }>;
+    }>;
+  } {
+    const detail = this.evaluateWaitConditionDetail(step, context);
+    const sections: Array<{
+      title: string;
+      formula?: string;
+      met: boolean | null;
+      rows: Array<{ label: string; ok: boolean | null; value: string }>;
+    }> = [];
+    const isDone = (key: string): boolean => {
+      try {
+        if (executedChecker && executedChecker(key)) return true;
+      } catch {}
+      try {
+        return this.executedEvents.has(key);
+      } catch {
+        return false;
+      }
+    };
+
+    // 1. Regla del scheduler (fórmula + check + variables).
+    const rule = (step as any).scheduler_rule as string | null | undefined;
+    const hasRule = typeof rule === "string" && rule.trim() !== "";
+    if (hasRule) {
+      const formula = (rule as string).trim();
+      if (detail.kind === "scheduler_rule") {
+        // El desglose base ya son los átomos de la regla: reutilizar.
+        sections.push({ title: "REGLA DEL SCHEDULER", formula, met: detail.met, rows: detail.rows });
+      } else if (this.isTelemetryExpression(formula)) {
+        const d = this.getSchedulerRuleDetail(formula, context);
+        sections.push({ title: "REGLA DEL SCHEDULER", formula, met: d.met, rows: d.rows });
+      } else {
+        sections.push({
+          title: "REGLA DEL SCHEDULER",
+          formula,
+          met: detail.met,
+          rows: [{ label: "Regla no-telemetría (fecha/hora/cron)", ok: null, value: "se evalúa al activar el paso" }],
+        });
+      }
+    }
+
+    // 2. Precondiciones (filas del evaluador especializado). Si el desglose
+    // base ya era la regla, no duplicar esas filas aquí.
+    const pre: any = (step as any).preconditions;
+    if (!pre && !hasRule) {
+      sections.push({
+        title: "PRECONDICIONES",
+        met: detail.met,
+        rows: [{ label: "Sin precondiciones configuradas", ok: null, value: "el paso no espera ninguna condición" }],
+      });
+    } else if (detail.kind !== "scheduler_rule" && detail.kind !== "none") {
+      sections.push({ title: `PRECONDICIONES (${detail.kind})`, met: detail.met, rows: detail.rows });
+    }
+
+    // 3. Grupo `conditions`: todas sus variables con configurado vs actual.
+    const condRows = this.buildConditionsGroupRows(step, context, isDone);
+    if (condRows.length > 0) {
+      sections.push({ title: "CONDITIONS (grupo)", met: andOk(condRows), rows: condRows });
+    }
+
+    // 4. Restricciones: todas con configurado vs actual.
+    const restRows = this.buildRestrictionsRows(step, context, isDone);
+    if (restRows.length > 0) {
+      sections.push({ title: "RESTRICCIONES", met: andOk(restRows), rows: restRows });
+    }
+
+    return { met: detail.met, kind: detail.kind, summary: detail.summary, sections };
+  }
+
+  /**
+   * Desglosa cada entrada del grupo `conditions` (preconditions.conditions o
+   * el propio objeto preconditions sin `type`) con valor configurado y valor
+   * actual. Claves ya representadas en las filas especializadas de
+   * cruise_progress (min_progress/max_remaining) se omiten para no duplicar.
+   */
+  private buildConditionsGroupRows(
+    step: NarrativeStep,
+    context?: FlightContext,
+    isDone?: (eventKey: string) => boolean
+  ): Array<{ label: string; ok: boolean | null; value: string }> {
+    const pre: any = (step as any).preconditions;
+    if (!pre || typeof pre !== "object") return [];
+    const src: any = pre.conditions && typeof pre.conditions === "object" ? pre.conditions : pre;
+    if (!src || typeof src !== "object") return [];
+    // Shape anidado del Backoffice: conditions: {conditions: {max_remaining},
+    // allow_night}. Se desciende un nivel para evaluar los umbrales reales en
+    // vez de mostrar el objeto como blob informativo.
+    const nested: any =
+      src.conditions && typeof src.conditions === "object" && !Array.isArray(src.conditions)
+        ? src.conditions
+        : null;
+    const entries: Array<[string, unknown]> = [];
+    if (nested) {
+      for (const [k, v] of Object.entries(nested)) entries.push([k, v]);
+      for (const [k, v] of Object.entries(src)) {
+        if (k === "type" || k === "conditions") continue;
+        entries.push([k, v]);
+      }
+    } else {
+      for (const [k, v] of Object.entries(src)) entries.push([k, v]);
+    }
+    const coversThresholds = pre?.type === "cruise_progress";
+    const rows: Array<{ label: string; ok: boolean | null; value: string }> = [];
+    let ctx: any = null;
+    let tel: any = {};
+    let flight: any = {};
+    try {
+      ctx = context ?? this.flightContext;
+      tel = ctx?.getTelemetry?.() ?? {};
+      flight = ctx?.getFlight?.() ?? {};
+    } catch {
+      tel = {};
+      flight = {};
+    }
+    const fmtBool = (v: unknown): string =>
+      v === true ? "true" : v === false ? "false" : "sin dato";
+    const phaseNow = (): string | null => {
+      try {
+        const provided = this.currentFlightPhase();
+        if (provided) return provided;
+        const f: any = ctx?.getFSM?.() ?? {};
+        const raw = f?.currentState ?? f?.getCurrentState?.() ?? null;
+        return raw !== undefined && raw !== null && String(raw) !== "" ? String(raw) : null;
+      } catch {
+        return null;
+      }
+    };
+    for (const [key, expected] of entries) {
+      if (key === "type") continue;
+      // Cubiertas por las filas especializadas de cruise_progress (UMBRAL …);
+      // en cualquier otro tipo se evalúan aquí de forma genérica.
+      if ((key === "min_progress" || key === "max_remaining") && coversThresholds) continue;
+      try {
+        switch (key) {
+          case "min_progress": {
+            const prog = this.getCruiseProgress(ctx as FlightContext);
+            const th = Number(expected);
+            rows.push({
+              label: `min_progress >= ${String(expected)}`,
+              ok: Number.isNaN(th) ? null : prog >= th,
+              value: `actual: ${prog.toFixed(2)}`,
+            });
+            break;
+          }
+          case "max_remaining": {
+            const rem = this.getCruiseProgressRemaining(ctx as FlightContext);
+            const th = Number(expected);
+            rows.push({
+              label: `max_remaining <= ${String(expected)}`,
+              ok: Number.isNaN(th) ? null : rem <= th,
+              value: `actual: ${rem.toFixed(2)}`,
+            });
+            break;
+          }
+          case "fsm": {
+            const actual = phaseNow();
+            rows.push({
+              label: `fsm = ${String(expected)}`,
+              ok: actual === null ? null : actual === String(expected),
+              value: `actual: ${actual ?? "sin dato"}`,
+            });
+            break;
+          }
+          case "phase_entered":
+            rows.push({ label: "phase_entered", ok: null, value: `configurado: ${fmtBool(expected)}` });
+            break;
+          case "previous_event": {
+            const done = isDone ? isDone(String(expected)) : null;
+            rows.push({
+              label: `previous_event = ${String(expected)}`,
+              ok: done,
+              value: done === null ? "sin registro de ejecución" : `ya ejecutado: ${done ? "sí" : "no"}`,
+            });
+            break;
+          }
+          case "is_international": {
+            const actual = this.isInternationalFlight(ctx as FlightContext);
+            rows.push({
+              label: "is_international",
+              ok: actual === (expected !== false),
+              value: `configurado: ${fmtBool(expected)} · actual: ${actual ? "sí" : "no"}`,
+            });
+            break;
+          }
+          case "vertical_speed_lt": {
+            const vs = Number(tel.verticalSpeed ?? tel.vertical_speed ?? 0) || 0;
+            const th = Number(expected);
+            rows.push({
+              label: `vertical_speed < ${String(expected)}`,
+              ok: Number.isNaN(th) ? null : vs < th,
+              value: `actual: ${Number.isInteger(vs) ? vs : vs.toFixed(1)} fpm`,
+            });
+            break;
+          }
+          case "duration_above_threshold_sec":
+            rows.push({ label: "duration_above_threshold_sec", ok: null, value: `configurado: ${String(expected)}s (ventana sostenida)` });
+            break;
+          case "ground_velocity_lt":
+          case "groundspeed_lt": {
+            const gs = Number(tel.groundspeed ?? tel.ground_speed ?? NaN);
+            const th = Number(expected);
+            rows.push({
+              label: `groundspeed < ${String(expected)}`,
+              ok: Number.isNaN(gs) || Number.isNaN(th) ? null : gs < th,
+              value: Number.isNaN(gs) ? "actual: sin dato" : `actual: ${Number.isInteger(gs) ? gs : gs.toFixed(1)} kt`,
+            });
+            break;
+          }
+          case "sim_on_ground": {
+            const raw = tel.simOnGround ?? tel.sim_on_ground;
+            rows.push({
+              label: `sim_on_ground = ${fmtBool(expected)}`,
+              ok: typeof raw !== "boolean" ? null : raw === (expected !== false),
+              value: `actual: ${fmtBool(raw)}`,
+            });
+            break;
+          }
+          case "atc_on_parking_spot": {
+            const raw = tel.atcOnParkingSpot ?? tel.atc_on_parking_spot;
+            rows.push({
+              label: `atc_on_parking_spot = ${fmtBool(expected)}`,
+              ok: typeof raw !== "boolean" ? null : raw === (expected !== false),
+              value: `actual: ${fmtBool(raw)}`,
+            });
+            break;
+          }
+          case "all_engines_off": {
+            const actual = this.areAllEnginesOff(ctx as FlightContext);
+            rows.push({
+              label: `all_engines_off = ${fmtBool(expected)}`,
+              ok: actual === (expected !== false),
+              value: `actual: ${actual ? "apagados" : "encendidos"}`,
+            });
+            break;
+          }
+          case "time_stopped_gt": {
+            const stopped = this.peekTimeStopped(ctx as FlightContext);
+            const th = Number(expected);
+            rows.push({
+              label: `time_stopped > ${String(expected)}s`,
+              ok: Number.isNaN(th) ? null : stopped > th,
+              value: `actual: ${stopped.toFixed(0)}s`,
+            });
+            break;
+          }
+          case "seatbelt_on": {
+            const raw = tel.seatbeltOn ?? tel.seatbelt_on;
+            rows.push({
+              label: `seatbelt_on = ${fmtBool(expected)}`,
+              ok: typeof raw !== "boolean" ? null : raw === (expected !== false),
+              value: `actual: ${fmtBool(raw)} (SEATBELT_SWITCH: ${raw ? 1 : 0})`,
+            });
+            break;
+          }
+          case "target_phase":
+            rows.push({ label: `target_phase = ${String(expected)}`, ok: null, value: "fase objetivo del ancla" });
+            break;
+          case "altitude_diff_lt": {
+            const fl = Number((flight as any)?.cruiseAltitude ?? NaN);
+            const alt = Number(tel.altitude ?? tel.plane_altitude ?? NaN);
+            const th = Number(expected);
+            const ok = !Number.isNaN(fl) && !Number.isNaN(alt) && !Number.isNaN(th)
+              ? alt - fl <= th
+              : null;
+            rows.push({
+              label: `altitude_diff <= ${String(expected)} ft`,
+              ok,
+              value: !Number.isNaN(fl) && !Number.isNaN(alt)
+                ? `actual: ${alt - fl} ft (alt ${alt} − FL ${fl})`
+                : "actual: sin dato",
+            });
+            break;
+          }
+          case "distance_to_dest_lt": {
+            let dd = NaN;
+            try {
+              const v = this.getDistanceToDestination(ctx as FlightContext);
+              if (Number.isFinite(v) && (v as number) >= 0) dd = v as number;
+            } catch {
+              dd = NaN;
+            }
+            const th = Number(expected);
+            rows.push({
+              label: `distance_to_dest <= ${String(expected)} NM`,
+              ok: !Number.isNaN(th) && Number.isFinite(dd) ? (dd as number) <= th : null,
+              value: Number.isFinite(dd) ? `actual: ${(dd as number).toFixed(1)} NM` : "actual: sin dato",
+            });
+            break;
+          }
+          case "vertical_speed_lt": {
+            const vs = Number(tel.verticalSpeed ?? tel.vertical_speed ?? NaN);
+            const th = Number(expected);
+            rows.push({
+              label: `vertical_speed < ${String(expected)} fpm`,
+              ok: Number.isNaN(vs) || Number.isNaN(th) ? null : vs < th,
+              value: Number.isNaN(vs) ? "actual: sin dato" : `actual: ${vs} fpm`,
+            });
+            break;
+          }
+          default:
+            rows.push({ label: String(key), ok: null, value: `configurado: ${safeJson(expected)}` });
+            break;
+        }
+      } catch {
+        rows.push({ label: String(key), ok: null, value: `configurado: ${safeJson(expected)} (error al leer actual)` });
+      }
+    }
+    return rows;
+  }
+
+  /**
+   * Desglosa cada restricción del paso con valor configurado y valor actual
+   * usado para determinar si se cumple. Misma semántica que la evaluación
+   * real (evaluateExcludeIfNight / AircraftIsWidebody / FlightDuration /
+   * RequiresInternational + one-shots).
+   */
+  private buildRestrictionsRows(
+    step: NarrativeStep,
+    context?: FlightContext,
+    isDone?: (eventKey: string) => boolean
+  ): Array<{ label: string; ok: boolean | null; value: string }> {
+    const r: any = (step as any).restrictions;
+    if (!r || typeof r !== "object") return [];
+    const rows: Array<{ label: string; ok: boolean | null; value: string }> = [];
+    let ctx: any = null;
+    try {
+      ctx = context ?? this.flightContext;
+    } catch {
+      ctx = null;
+    }
+    for (const [key, expected] of Object.entries(r)) {
+      try {
+        switch (key) {
+          case "max_once_per_flight": {
+            const done = isDone ? isDone(step.eventKey) : null;
+            rows.push({
+              label: "max_once_per_flight",
+              ok: done === null ? null : !(expected === true && done),
+              value: `configurado: ${String(expected)} · ya ejecutado: ${done === null ? "sin dato" : done ? "sí" : "no"}`,
+            });
+            break;
+          }
+          case "flight_duration_minutes": {
+            const actual = this.getFlightDurationMinutes(ctx as FlightContext);
+            const req = Number(expected);
+            rows.push({
+              label: `duración vuelo >= ${String(expected)} min`,
+              ok: Number.isNaN(req) ? null : actual >= req,
+              value: `actual: ${actual} min`,
+            });
+            break;
+          }
+          case "requires_international_flight": {
+            const actual = this.isInternationalFlight(ctx as FlightContext);
+            rows.push({
+              label: "requires_international_flight",
+              ok: expected !== true ? true : actual,
+              value: `configurado: ${String(expected)} · actual: ${actual ? "internacional" : "doméstico"}`,
+            });
+            break;
+          }
+          case "aircraft_is_widebody": {
+            const actual = this.isWidebodyAircraft(ctx as FlightContext);
+            rows.push({
+              label: "aircraft_is_widebody",
+              ok: expected !== true ? true : actual,
+              value: `configurado: ${String(expected)} · actual: ${actual ? "widebody" : "narrowbody"}`,
+            });
+            break;
+          }
+          case "exclude_if_night": {
+            const night = this.isNightNow(ctx as FlightContext);
+            rows.push({
+              label: "exclude_if_night",
+              ok: expected !== true ? true : !night,
+              value: `configurado: ${String(expected)} · ahora: ${night ? "noche (excluido)" : "día"}`,
+            });
+            break;
+          }
+          case "preferred_condition":
+            rows.push({
+              label: `preferred_condition = ${String(expected)}`,
+              ok: null,
+              value: expected === "is_night_flight"
+                ? `noche programada: ${this.isNightFlight(ctx as FlightContext) ? "sí" : "no"} (solo informativa: de día se omite)`
+                : "solo informativa",
+            });
+            break;
+          case "requires_previous": {
+            const done = isDone ? isDone(String(expected)) : null;
+            rows.push({
+              label: `requires_previous = ${String(expected)}`,
+              ok: done,
+              value: done === null ? "sin registro de ejecución" : `previo ejecutado: ${done ? "sí" : "no"}`,
+            });
+            break;
+          }
+          default:
+            rows.push({ label: String(key), ok: null, value: `configurado: ${safeJson(expected)}` });
+            break;
+        }
+      } catch {
+        rows.push({ label: String(key), ok: null, value: `configurado: ${safeJson(expected)} (error al leer actual)` });
+      }
+    }
+    return rows;
+  }
+
   /**
    * Evalúa las precondiciones de un paso. Para delay_detection usa isDelayThresholdExceeded
    * y además verifica conditions.fsm, sim_on_ground, atc_on_parking_spot y ground_velocity_lt.
@@ -1680,10 +2250,13 @@ export class RuleEngine {
     if (preconditions.type === 'cruise_progress') {
       const conditions = preconditions.conditions ?? preconditions;
       const ok = this.evaluateCruiseProgress(conditions, context);
+      const { minRaw, maxRaw } = this.cruiseThresholds(conditions);
       console.log(`[RuleEngine] Evaluando cruise_progress para ${step.eventKey}:`, {
         eventKey: step.eventKey,
-        minProgress: conditions?.min_progress ?? null,
+        minProgress: minRaw ?? null,
+        maxRemaining: maxRaw ?? null,
         cruiseProgress: this.getCruiseProgress(context ?? this.flightContext),
+        cruiseRemaining: this.getCruiseProgressRemaining(context ?? this.flightContext),
         decision: ok ? "✅ EJECUTAR" : "❌ OMITIR (progreso insuficiente)",
       });
       return ok;
@@ -2073,7 +2646,7 @@ export class RuleEngine {
   ): {
     isExpression: boolean;
     met: boolean | null;
-    rows: { label: string; ok: boolean; value: string }[];
+    rows: { label: string; ok: boolean | null; value: string }[];
   } {
     if (!this.isTelemetryExpression(rule)) return { isExpression: false, met: null, rows: [] };
     const ctx = this.getTelemetryExpressionContext(context);

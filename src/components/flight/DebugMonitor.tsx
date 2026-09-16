@@ -156,6 +156,77 @@ function KeyValueGrid({ data, units }: { data: Record<string, unknown>; units?: 
   );
 }
 
+// ── Desglose estructurado de pasos WAIT (RuleEngine.explainWaitStep) ─────
+// `ok: null` = sin dato / solo informativo → se muestra como ❓.
+export interface WaitDetailRow {
+  label: string;
+  ok: boolean | null;
+  value: string;
+}
+
+export interface WaitDetailSection {
+  title: string;
+  formula?: string;
+  met: boolean | null;
+  rows: WaitDetailRow[];
+}
+
+function waitCheckBadge(ok: boolean | null): React.ReactNode {
+  if (ok === true) return <span className="text-[#43E600] font-bold">✅</span>;
+  if (ok === false) return <span className="text-red-400 font-bold">❌</span>;
+  return <span className="text-white/40 font-bold" title="Sin dato / solo informativo">❓</span>;
+}
+
+function waitCheckClass(ok: boolean | null): string {
+  if (ok === true) return "text-[#43E600]";
+  if (ok === false) return "text-red-400";
+  return "text-white/40";
+}
+
+/** Render compartido: secciones de un paso WAIT (lista de espera + bloqueante). */
+function WaitDetailSections({ sections }: { sections: WaitDetailSection[] }) {
+  if (!sections || sections.length === 0) {
+    return (
+      <div className="px-2 py-1 font-mono text-[11px] text-white/40 italic">
+        Sin desglose disponible
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-1.5">
+      {sections.map((sec) => (
+        <div key={sec.title} className="border border-white/10 rounded-[5px] overflow-hidden bg-white/[0.02]">
+          <div className="flex items-center justify-between gap-2 px-2 py-1 bg-white/[0.04] border-b border-white/5">
+            <span className="font-mono text-[10px] font-bold text-[#45AFFF] uppercase tracking-wider">
+              {sec.title}
+            </span>
+            <span className={`font-mono text-[11px] font-bold ${waitCheckClass(sec.met)}`}>
+              {sec.met === true ? "✅" : sec.met === false ? "❌" : "❓"}
+            </span>
+          </div>
+          {sec.formula ? (
+            <div className="px-2 py-1 font-mono text-[11px] text-white/85 break-all border-b border-white/5 bg-black/20" title={sec.formula}>
+              <span className="text-white/40">fórmula: </span>{sec.formula}
+            </div>
+          ) : null}
+          {sec.rows.length === 0 ? (
+            <div className="px-2 py-1 font-mono text-[11px] text-white/40 italic">Sin variables</div>
+          ) : (
+            sec.rows.map((c) => (
+              <div key={c.label} className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                <span className="font-mono text-[11px] text-white/60">{c.label}</span>
+                <span className={`font-mono text-[11px] font-bold ${waitCheckClass(c.ok)}`}>
+                  {waitCheckBadge(c.ok)} <span className="font-normal text-white/60">= {c.value}</span>
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export interface DebugMonitorProps {
   isOpen: boolean;
   onClose: () => void;
@@ -780,8 +851,22 @@ export default function DebugMonitor({
       currentKey = null;
     }
     const evaluatedAt = new Date(lastUpdate).toLocaleString("es-ES");
+    // Checker "ya ejecutado": RuleEngine + NarrativeEngine (el registro interno
+    // del motor no siempre conoce los pasos narrativos completados).
+    const isDone = (key: string): boolean => {
+      try {
+        if (re?.hasExecuted?.(key) === true) return true;
+      } catch {}
+      try {
+        if (engines?.isStepCompleted?.(key) === true) return true;
+      } catch {}
+      try {
+        if (engines?.hasFired?.(key) === true) return true;
+      } catch {}
+      return false;
+    };
     return steps.filter(isWait).map((s: any) => {
-      let evalDetail: { met: boolean | null; kind: string; rows: { label: string; ok: boolean; value: string }[]; summary: string } | null = null;
+      let evalDetail: { met: boolean | null; kind: string; rows: { label: string; ok: boolean | null; value: string }[]; summary: string } | null = null;
       try {
         if (typeof re?.evaluateWaitConditionDetail === "function") {
           evalDetail = re.evaluateWaitConditionDetail(s, flightContext as any);
@@ -804,6 +889,17 @@ export default function DebugMonitor({
         triggered = false;
       }
       const isCurrent = currentKey !== null && s.eventKey === currentKey;
+      // Desglose estructurado (fórmula + conditions + restricciones) cuando el
+      // motor lo soporta; si no, se renderizan las filas planas legacy.
+      let sections: WaitDetailSection[] | null = null;
+      try {
+        if (typeof re?.explainWaitStep === "function") {
+          const expl = re.explainWaitStep(s, flightContext as any, isDone);
+          if (expl && Array.isArray(expl.sections)) sections = expl.sections;
+        }
+      } catch {
+        sections = null;
+      }
       const status = triggered
         ? ({ label: "✅ Disparado", tone: "done" } as const)
         : evalDetail.met === true
@@ -817,6 +913,7 @@ export default function DebugMonitor({
         eventKey: String(s.eventKey),
         kind: evalDetail.kind,
         rows: evalDetail.rows,
+        sections,
         summary: evalDetail.summary,
         met: evalDetail.met,
         triggered,
@@ -878,6 +975,7 @@ export default function DebugMonitor({
         eventKey: String(candidate.eventKey),
         phase: String(phase ?? "—"),
         rows: evaluated?.rows ?? [],
+        sections: (evaluated as any)?.sections ?? null,
         summary: evaluated?.summary ?? "Sin evaluación disponible",
         met: evaluated?.met ?? null,
         isCurrent: evaluated?.isCurrent ?? false,
@@ -1156,6 +1254,25 @@ export default function DebugMonitor({
                 <KeyValueGrid data={announcement as Record<string, unknown>} />
               </div>
             )}
+          </Section>
+
+          {/* Aeropuertos (resueltos vía airportService / fallback airportMapping) */}
+          <Section title="✈️ Aeropuertos" icon={Plane} count={6} defaultOpen={true}>
+            <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
+              Origen/destino resueltos (Supabase airports + caché 7 días, fallback airportMapping) · actualización 1s
+            </div>
+            <KeyValueGrid
+              data={
+                {
+                  ORIGIN_ICAO: (flight as any)?.originICAO ?? "—",
+                  ORIGIN_CITY: (flight as any)?.originCity ?? "—",
+                  DEST_ICAO: (flight as any)?.destICAO ?? "—",
+                  DEST_CITY: (flight as any)?.destCity ?? "—",
+                  DEST_LAT: (flight as any)?.destLatitude ?? "—",
+                  DEST_LON: (flight as any)?.destLongitude ?? "—",
+                } as Record<string, unknown>
+              }
+            />
           </Section>
 
           {/* Variables de Crucero */}
@@ -1538,16 +1655,18 @@ export default function DebugMonitor({
                     </div>
                     <div className="p-2 space-y-0.5">
                       <div className="text-[10px] font-mono text-white/40 uppercase tracking-wider px-2 pt-1">
-                        Precondiciones (type: {w.kind}):
+                        Desglose {w.kind !== "none" ? `(type: ${w.kind})` : "(sin type)"} · ✅ cumplida · ❌ no cumplida · ❓ sin dato
                       </div>
-                      {w.rows.length === 0 ? (
+                      {w.sections && w.sections.length > 0 ? (
+                        <WaitDetailSections sections={w.sections} />
+                      ) : w.rows.length === 0 ? (
                         <div className="px-2 py-1 font-mono text-[11px] text-white/40 italic">{w.summary}</div>
                       ) : (
                         w.rows.map((c) => (
                           <div key={c.label} className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
                             <span className="font-mono text-[11px] text-white/60">{c.label}</span>
-                            <span className={`font-mono text-[11px] font-bold ${c.ok ? "text-[#43E600]" : "text-red-400"}`}>
-                              {c.ok ? "✅" : "❌"} <span className="font-normal text-white/60">= {c.value}</span>
+                            <span className={`font-mono text-[11px] font-bold ${waitCheckClass(c.ok)}`}>
+                              {waitCheckBadge(c.ok)} <span className="font-normal text-white/60">= {c.value}</span>
                             </span>
                           </div>
                         ))
@@ -1602,16 +1721,18 @@ export default function DebugMonitor({
                     <span className="font-mono text-[11px] text-white/80">WAIT_CONDITION</span>
                   </div>
                   <div className="text-[10px] font-mono text-white/40 uppercase tracking-wider px-2 pt-1">
-                    Condiciones:
+                    Desglose · ✅ cumplida · ❌ no cumplida · ❓ sin dato
                   </div>
-                  {blockingStep.rows.length === 0 ? (
+                  {blockingStep.sections && blockingStep.sections.length > 0 ? (
+                    <WaitDetailSections sections={blockingStep.sections} />
+                  ) : blockingStep.rows.length === 0 ? (
                     <div className="px-2 py-1 font-mono text-[11px] text-white/40 italic">{blockingStep.summary}</div>
                   ) : (
                     blockingStep.rows.map((c) => (
                       <div key={c.label} className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
                         <span className="font-mono text-[11px] text-white/60">{c.label}</span>
-                        <span className={`font-mono text-[11px] font-bold ${c.ok ? "text-[#43E600]" : "text-red-400"}`}>
-                          {c.ok ? "✅" : "❌"} <span className="font-normal text-white/60">= {c.value}</span>
+                        <span className={`font-mono text-[11px] font-bold ${waitCheckClass(c.ok)}`}>
+                          {waitCheckBadge(c.ok)} <span className="font-normal text-white/60">= {c.value}</span>
                         </span>
                       </div>
                     ))

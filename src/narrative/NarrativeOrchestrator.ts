@@ -403,6 +403,12 @@ export class NarrativeOrchestrator {
     }
     if (!force && this.isPhaseTransitionWaitStep(step)) {
       const shouldExecute = this.evaluatePhaseTransitionStep(step);
+      console.log('[NarrativeOrchestrator] ¿Es phase_transition?:', {
+        eventKey: step.eventKey,
+        transition: NarrativeTransition[step.transition],
+        preconditionsType: (step as any).preconditions?.type ?? null,
+        isPhaseTransition: this.isPhaseTransitionWaitStep(step),
+      });
       this.logWaitConditionEvaluation(step, shouldExecute);
       const gateOrigin = reason?.startsWith("wait-poll:") ? "polling" : "executeCurrentStep";
       this.recordAnchor(step, 'evaluando', gateOrigin, true, shouldExecute);
