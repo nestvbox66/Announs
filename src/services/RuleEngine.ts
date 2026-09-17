@@ -811,6 +811,19 @@ export class RuleEngine {
     }
 
     const elapsed = now - state.startedAt;
+    // Guard anti-wrap: si el vuelo cruza medianoche UTC (o el reloj del sim
+    // salta atrás) con la ventana abierta, elapsed sale negativo y `met`
+    // quedaría en false para siempre. Se rebasea la ventana al reloj actual.
+    if (elapsed < 0) {
+      console.log('[RuleEngine] descent_condition: wrap de medianoche detectado, reseteando ventana:', {
+        eventKey,
+        currentZuluTime: now,
+        startedAt: state.startedAt,
+        elapsed,
+      });
+      state.startedAt = now;
+      return false;
+    }
     const met = elapsed >= durationRequired;
     console.log('[RuleEngine] descent_condition evaluando:', {
       eventKey, currentVs, threshold, elapsed, durationRequired, met,
@@ -839,7 +852,9 @@ export class RuleEngine {
     }
     const now = this.sustainedClockS(ctx as FlightContext);
     if (now === null) return { vs, threshold, required, elapsed: null, met: false };
-    const elapsed = now - startedAt;
+    // Coherencia con el guard anti-wrap del evaluador (que rebasea en el
+    // próximo tick): nunca mostrar elapsed negativo.
+    const elapsed = Math.max(0, now - startedAt);
     return { vs, threshold, required, elapsed, met: elapsed >= required };
   }
 

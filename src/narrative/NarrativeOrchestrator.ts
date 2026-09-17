@@ -571,27 +571,26 @@ export class NarrativeOrchestrator {
   }
 
   /**
-   * Un WAIT_CONDITION de transición de fase (ancla transition_to_taxi) bloquea
-   * la narrativa hasta que la telemetría cumple las condiciones: preconditions
-   * type phase_transition o scheduler_rule con expresión de telemetría.
+   * Un WAIT_CONDITION es ancla de transición de fase SOLO si declara
+   * `preconditions.type === "phase_transition"` o su eventKey es
+   * `transition_to_*`. Antes bastaba con que la scheduler_rule mencionara
+   * telemetría, lo que clasificaba como ancla pasos comunes (p. ej.
+   * `common_capt_seatbelt` con `SEATBELT_SWITCH == 1`) y los sacaba de la vía
+   * genérica + los convertía en candidatos de overtake.
    */
   private isPhaseTransitionWaitStep(step: NarrativeStep): boolean {
     if ((step as any).transition !== NarrativeTransition.WAIT_CONDITION) return false;
     const pre: any = (step as any).preconditions;
-    if (pre?.type === "phase_transition") return true;
-    const rule = (step as any).scheduler_rule as string | null | undefined;
-    if (typeof rule === "string" && rule.trim() !== "") {
-      try {
-        const engine: any = this.ruleEngine;
-        if (typeof engine?.getSchedulerRuleDetail === "function") {
-          return engine.getSchedulerRuleDetail(rule).isExpression === true;
-        }
-      } catch { /* fallback por tokens */ }
-      const upper = rule.toUpperCase();
-      return ["SIM_ON_GROUND", "GROUND_VELOCITY", "GROUND_SPEED", "PARKING_BRAKE", "ATC_ON_PARKING_SPOT", "ALL_ENGINES_RUNNING"]
-        .some((t) => upper.includes(t));
-    }
-    return false;
+    const result =
+      pre?.type === "phase_transition" ||
+      (typeof step.eventKey === "string" && step.eventKey.startsWith("transition_to_"));
+    console.log('[NarrativeOrchestrator] isPhaseTransitionWaitStep:', {
+      eventKey: step.eventKey,
+      transition: NarrativeTransition[(step as any).transition],
+      preconditionsType: pre?.type ?? null,
+      isPhaseTransition: result,
+    });
+    return result;
   }
 
   /**

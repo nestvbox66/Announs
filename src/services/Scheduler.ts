@@ -463,7 +463,22 @@ export class Scheduler {
     const fromIdx = orderedNormalized.indexOf(from);
     const toIdx = orderedNormalized.indexOf(toNorm);
     if (fromIdx === -1 || toIdx === -1) return true; // si no está en lista, permitir (fases custom)
-    return toIdx === fromIdx + 1;
+    if (toIdx === fromIdx + 1) return true;
+    // Transiciones de "recuperación" (espejo de FlightFSM.RECOVERY_TRANSITIONS,
+    // en claves normalizadas): el avión puede adelantarse a la narrativa
+    // (p. ej. aterriza con el scheduler aún en DESCENT). Sin esto, el
+    // Scheduler quedaba clavado tras el aterrizaje aunque el FSM aceptara.
+    const recovery = new Set([
+      "DESCENT\0LANDING",
+      "DESCENT\0TAXI",
+      "DESCENT\0TAXI_TO_GATE",
+      "LANDING\0TAXI_TO_GATE",
+    ]);
+    if (recovery.has(from + "\0" + toNorm)) {
+      console.log(`[Scheduler] Transición de recuperación aceptada: ${from} → ${toNorm}`);
+      return true;
+    }
+    return false;
   }
 
   async enterPhase(phase: FlightPhase, source: TransitionSource = 'auto'): Promise<void> {

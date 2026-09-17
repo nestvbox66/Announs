@@ -18,8 +18,25 @@ const VALID_TRANSITIONS: [FlightPhase, FlightPhase][] = [
   [FlightPhase.AT_GATE, FlightPhase.FLIGHT_COMPLETED],
 ];
 
+// Transiciones de "recuperación": el avión puede adelantarse a la narrativa
+// (p. ej. aterriza mientras el scheduler sigue en DESCENT porque un paso
+// bloqueó el avance). Sin estas aristas, el detector las rechaza y el vuelo
+// queda clavado en la fase vieja para siempre (silencio total en log).
+const RECOVERY_TRANSITIONS: [FlightPhase, FlightPhase][] = [
+  [FlightPhase.DESCENT, FlightPhase.LANDING],
+  [FlightPhase.DESCENT, FlightPhase.TAXI],
+  [FlightPhase.DESCENT, FlightPhase.TAXI_IN],
+  [FlightPhase.APPROACH, FlightPhase.TAXI],
+  [FlightPhase.APPROACH, FlightPhase.TAXI_IN],
+  [FlightPhase.LANDING, FlightPhase.TAXI_IN],
+];
+
 const transitionAllowed = new Set(
   VALID_TRANSITIONS.map(([from, to]) => from + "\0" + to)
+);
+
+const recoveryAllowed = new Set(
+  RECOVERY_TRANSITIONS.map(([from, to]) => from + "\0" + to)
 );
 
 export class FlightFSM {
@@ -50,11 +67,23 @@ export class FlightFSM {
     console.log("callId: " + callId);
 
     const key = this.currentState + "\0" + nextState;
-    if (!transitionAllowed.has(key)) {
+    const isRecovery = !transitionAllowed.has(key) && recoveryAllowed.has(key);
+    console.log('[FlightFSM] Transición solicitada:', {
+      from: this.currentState,
+      to: nextState,
+      isValid: transitionAllowed.has(key) || recoveryAllowed.has(key),
+      viaRecuperacion: isRecovery,
+    });
+    if (!transitionAllowed.has(key) && !recoveryAllowed.has(key)) {
       console.log(
         "[FSM] Transition rechazada: " + this.currentState + " -> " + nextState
       );
       return false;
+    }
+    if (isRecovery) {
+      console.log(
+        "[FSM] Transición de recuperación aceptada: " + this.currentState + " -> " + nextState
+      );
     }
 
     console.log(
