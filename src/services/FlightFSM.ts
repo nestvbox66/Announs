@@ -85,6 +85,24 @@ export class FlightFSM {
     console.log("[FSM] Reset a " + this.currentState);
   }
 
+  /**
+   * Sincronización forzada con una fase (salta el grafo de transiciones).
+   * Uso: al iniciar el vuelo, `executeFlightStart` entra fases vía
+   * `scheduler.enterPhase()` directo; sin esto el FSM quedaba en GATE mientras
+   * el Scheduler avanzaba, y el detector rechazaba todas las transiciones
+   * (p. ej. CRUISE → DESCENT) desde el despegue. No llama al Scheduler
+   * (el llamador ya hace enterPhase); solo actualiza estado + listeners.
+   */
+  syncState(nextState: FlightPhase, source: 'simulator' | 'user' | 'auto' = 'auto'): void {
+    this.fsmCallId++;
+    const from = this.currentState;
+    console.log("[FSM] Sincronización forzada: " + from + " -> " + nextState + " (" + source + ")");
+    this.currentState = nextState;
+    for (const listener of this.listeners) {
+      listener(this.currentState);
+    }
+  }
+
   subscribe(listener: FSMListener): void {
     this.listeners.add(listener);
   }

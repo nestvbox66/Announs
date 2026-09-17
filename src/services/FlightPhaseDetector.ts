@@ -198,11 +198,25 @@ export class FlightPhaseDetector {
     if (altitude >= 500 && altitude < 35000 && verticalSpeed > 0) {
       return FlightPhase.CLIMB;
     }
-    // CRUISE: ajustado a >30000 para evitar saltos (antes >=35000)
-    if (altitude > 30000 && verticalSpeed === 0) {
+    // CRUISE: banda de tolerancia en vez de igualdad estricta. SimConnect
+    // entrega floats con jitter (±50-200 fpm): `verticalSpeed === 0` casi nunca
+    // se cumple y el crucero caía al fallthrough GATE, con lo que el FSM jamás
+    // llegaba a CRUISE y la transición CRUISE → DESCENT era rechazada siempre.
+    // Umbral de altitud 25000 ft (cruceros regionales vuelan por debajo de FL300).
+    const absVs = Math.abs(verticalSpeed);
+    const isCruise = altitude > 25000 && absVs <= 200;
+    if (altitude > 20000) {
+      console.log('[FlightPhaseDetector] Evaluando CRUISE:', {
+        altitude,
+        verticalSpeed,
+        absVs,
+        isCruise,
+      });
+    }
+    if (isCruise) {
       return FlightPhase.CRUISE;
     }
-    if (altitude > 1000 && altitude < 35000 && verticalSpeed < 0) {
+    if (altitude > 1000 && altitude <= 35000 && verticalSpeed < 0) {
       return FlightPhase.DESCENT;
     }
     if (altitude <= 1000 && altitude > 0 && groundspeed > 50) {

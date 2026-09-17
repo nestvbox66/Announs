@@ -1792,7 +1792,24 @@ export default function VueloActualView({
       // (events.default_delay_ms); se re-aplican los delays elegidos por el usuario
       // en los sliders de "Configurar Eventos" para que se usen en el vuelo.
       applyUserDelayOverridesToContext();
-      // Delegar lógica de fase inicial al Scheduler según preferencias
+      // Delegar lógica de fase inicial al Scheduler según preferencias.
+      // El FSM se sincroniza con la fase inicial ANTES del enterPhase: sin
+      // esto quedaba en GATE mientras el Scheduler avanzaba, y el detector
+      // rechazaba todas las transiciones (p. ej. CRUISE → DESCENT).
+      const enterInitialPhase = async (phase: FlightPhase, reason: string) => {
+        flightFSMRef.current?.syncState(phase, 'simulator');
+        await schedulerRef.current?.enterPhase(phase, 'simulator');
+        console.log('[Scheduler] FSM sincronizado con fase inicial:', {
+          phase,
+          fsmState: flightFSMRef.current?.getCurrentState(),
+          reason,
+        });
+        fileLogger.log('[Scheduler] FSM sincronizado con fase inicial', {
+          phase,
+          fsmState: flightFSMRef.current?.getCurrentState(),
+          reason,
+        });
+      };
       if (preferences.initialState === 'runway') {
         // Cabecera de pista: embarcar a todos y saltar GATE/BOARDING
         const total = boardingManifest.length > 0 ? boardingManifest.length : passengers.length;
@@ -1803,7 +1820,7 @@ export default function VueloActualView({
           setBoardingStepsDone(true);
         }
         schedulerRef.current?.applyFlightStart(preferences);
-        await schedulerRef.current?.enterPhase(FlightPhase.TAKEOFF, 'simulator');
+        await enterInitialPhase(FlightPhase.TAKEOFF, `Iniciar vuelo (modo: ${mode}, ${preferences.initialState}) -> Scheduler.enterPhase(TAKEOFF)`);
         console.log(`[UI] Iniciar vuelo (modo: ${mode}, ${preferences.initialState}) -> Scheduler.enterPhase(TAKEOFF)`);
       } else if (preferences.initialState === 'gate_engines_on' && !preferences.includeBoarding) {
         const total = boardingManifest.length > 0 ? boardingManifest.length : passengers.length;
@@ -1814,12 +1831,12 @@ export default function VueloActualView({
           setBoardingStepsDone(true);
         }
         schedulerRef.current?.applyFlightStart(preferences);
-        await schedulerRef.current?.enterPhase(FlightPhase.GATE, 'simulator');
+        await enterInitialPhase(FlightPhase.GATE, `Iniciar vuelo (modo: ${mode}, gate_engines_on sin abordaje) -> GATE con embarque omitido`);
         console.log(`[UI] Iniciar vuelo (modo: ${mode}, gate_engines_on sin abordaje) -> GATE con embarque omitido`);
       } else {
         // cold_and_dark o gate_engines_on con abordaje: flujo normal desde GATE
         schedulerRef.current?.applyFlightStart(preferences);
-        await schedulerRef.current?.enterPhase(FlightPhase.GATE, 'simulator');
+        await enterInitialPhase(FlightPhase.GATE, `Iniciar vuelo (modo: ${mode}, ${preferences.initialState}) -> Scheduler.enterPhase(GATE)`);
         console.log(`[UI] Iniciar vuelo (modo: ${mode}, ${preferences.initialState}) -> Scheduler.enterPhase(GATE)`);
       }
     } catch (err: any) {
