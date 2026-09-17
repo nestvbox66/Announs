@@ -1757,12 +1757,12 @@ export class RuleEngine {
       }
       return this.withNightRow(step, context, { met, kind, rows, summary: met === true ? 'Condiciones cumplidas' : met === false ? 'Condiciones NO cumplidas' : 'Sin datos suficientes' });
     }
-    // Otros tipos de precondiciones (descent_condition, landing_condition,
-    // preconditions sin `type`, etc.): si el paso trae scheduler_rule de
-    // telemetría, desglosarla para el monitor en vez de "sin desglose".
-    // Los handlers específicos de arriba (delay, cruise, ...) se conservan.
+    // Otros tipos de precondiciones (landing_condition, preconditions sin
+    // `type`, etc.): si el paso trae scheduler_rule de telemetría, desglosarla
+    // para el monitor en vez de "sin desglose". descent_condition tiene su
+    // propia rama abajo (ventana sostenida + regla si existe).
     const maybeRule = (step as any).scheduler_rule as string | null | undefined;
-    if (typeof maybeRule === "string" && maybeRule.trim() !== "" && this.isTelemetryExpression(maybeRule)) {
+    if (pre?.type !== 'descent_condition' && typeof maybeRule === "string" && maybeRule.trim() !== "" && this.isTelemetryExpression(maybeRule)) {
       const d = this.getSchedulerRuleDetail(maybeRule, context);
       return this.withNightRow(step, context, {
         met: d.met,
@@ -1771,11 +1771,15 @@ export class RuleEngine {
         summary: d.met === true ? 'Condiciones cumplidas (scheduler_rule)' : d.met === false ? 'Condiciones NO cumplidas (scheduler_rule)' : 'Sin datos suficientes (scheduler_rule)',
       });
     }
-    // descent_condition sin regla: mostrar ventana sostenida (lectura pura).
+    // descent_condition (con o sin regla): ventana sostenida + átomos de la
+    // regla si existe. Mismo patrón que cruise_progress: AMBAS deben cumplirse,
+    // igual que en la ejecución (evaluatePreconditions + evaluateSchedulerRule).
+    // Sin esto, un paso con regla en verde mostraba "cumplida" aunque la
+    // ventana sostenida aún no cerrara.
     if (pre?.type === 'descent_condition') {
       const c: any = pre.conditions ?? {};
       const peek = this.peekDescentCondition(step, c, context);
-      const rows: { label: string; ok: boolean; value: string }[] = [
+      const rows: { label: string; ok: boolean | null; value: string }[] = [
         { label: 'VERTICAL_SPEED', ok: peek.vs < peek.threshold, value: `${Number.isInteger(peek.vs) ? peek.vs : peek.vs.toFixed(1)} fpm` },
         { label: `VS < ${peek.threshold}`, ok: peek.vs < peek.threshold, value: peek.vs < peek.threshold ? 'sí' : 'no' },
       ];
@@ -1786,11 +1790,17 @@ export class RuleEngine {
           value: peek.elapsed === null ? 'ventana no abierta' : `${peek.elapsed.toFixed(0)}s / ${peek.required}s`,
         });
       }
+      let met: boolean | null = peek.met;
+      if (typeof maybeRule === "string" && maybeRule.trim() !== "" && this.isTelemetryExpression(maybeRule)) {
+        const d = this.getSchedulerRuleDetail(maybeRule, context);
+        rows.push(...d.rows);
+        if (d.met === false) met = false;
+      }
       return this.withNightRow(step, context, {
-        met: peek.met,
+        met,
         kind: 'descent_condition',
         rows,
-        summary: peek.met ? 'Condiciones cumplidas (descent_condition)' : 'Condiciones NO cumplidas (descent_condition)',
+        summary: met ? 'Condiciones cumplidas (descent_condition)' : 'Condiciones NO cumplidas (descent_condition)',
       });
     }
     return this.withNightRow(step, context, { met: null, kind, rows: [], summary: `Tipo '${kind}' sin desglose` });
@@ -1957,6 +1967,9 @@ export class RuleEngine {
       // Cubiertas por las filas especializadas de cruise_progress (UMBRAL …);
       // en cualquier otro tipo se evalúan aquí de forma genérica.
       if ((key === "min_progress" || key === "max_remaining") && coversThresholds) continue;
+      // vertical_speed_lt bajo descent_condition lo cubren las filas SOSTENIDO
+      // (ventana anti-jitter); la fila directa contradiría esa semántica.
+      if (key === "vertical_speed_lt" && (pre as any)?.type === "descent_condition") continue;
       try {
         switch (key) {
           case "min_progress": {
@@ -2019,9 +2032,30 @@ export class RuleEngine {
             });
             break;
           }
-          case "duration_above_threshold_sec":
-            rows.push({ label: "duration_above_threshold_sec", ok: null, value: `configurado: ${String(expected)}s (ventana sostenida)` });
+          case "duration_above_threshold_sec": {
+            // Ventana sostenida con la MISMA semántica que la evaluación real
+            // (peek puro: no abre ni resetea ventanas).
+            const peek = this.peekDescentCondition(step, src, ctx as FlightContext);
+            const vsFmt = Number.isInteger(peek.vs) ? peek.vs : peek.vs.toFixed(1);
+            rows.push({
+              label: `SOSTENIDO VS < ${peek.threshold} durante >= ${String(expected)}s`,
+              ok: peek.met,
+              value: peek.elapsed === null
+                ? `ventana no abierta · actual ${vsFmt} fpm`
+                : `${peek.elapsed.toFixed(0)}s / ${peek.required}s · actual ${vsFmt} fpm`,
+            });
             break;
+          }
+          case "altitude_below": {
+            const alt = Number(tel.altitude ?? tel.plane_altitude ?? NaN);
+            const th = Number(expected);
+            rows.push({
+              label: `altitude <= ${String(expected)} ft`,
+              ok: Number.isNaN(alt) || Number.isNaN(th) ? null : alt <= th,
+              value: Number.isNaN(alt) ? "actual: sin dato" : `actual: ${Number.isInteger(alt) ? alt : alt.toFixed(1)} ft`,
+            });
+            break;
+          }
           case "ground_velocity_lt":
           case "groundspeed_lt": {
             const gs = Number(tel.groundspeed ?? tel.ground_speed ?? NaN);
@@ -2395,8 +2429,61 @@ export class RuleEngine {
       return ok;
     }
 
+    // Modificadores sueltos (con o sin `type`): puerta de fase + umbrales
+    // directos. Los tipos con evaluador propio ya retornaron arriba, así que
+    // esto solo afecta a typeless (p. ej. descent_capt_10kfeet) y tipos sin
+    // evaluador específico (p. ej. landing_condition: al menos su fsm).
+    const mods: any = preconditions.conditions ?? preconditions;
+    if (mods && typeof mods === 'object') {
+      const ctxM: any = context ?? this.flightContext;
+      const telM: any = ctxM?.getTelemetry?.() ?? {};
+      if (mods.fsm) {
+        const fsmInfo: any = ctxM?.getFSM?.() ?? {};
+        const currentState = fsmInfo?.currentState ?? fsmInfo?.getCurrentState?.() ?? undefined;
+        const flightPhase = this.currentFlightPhase();
+        const expected = String(mods.fsm);
+        const fsmOk = String(currentState) === expected || (flightPhase !== null && flightPhase === expected);
+        if (!fsmOk) {
+          console.log(`[RuleEngine] Precondición fsm no cumplida para ${step.eventKey}: esperado ${expected}, actual fsm=${currentState} fase=${flightPhase ?? '—'}`);
+          return false;
+        }
+      }
+      if (mods.altitude_below !== undefined) {
+        if (!this.evaluateAltitudeBelow(mods, context)) return false;
+      }
+      // vertical_speed_lt DIRECTO solo fuera de descent_condition (ese tipo ya
+      // se evaluó arriba con ventana sostenida anti-jitter).
+      if (mods.vertical_speed_lt !== undefined && preconditions.type !== 'descent_condition') {
+        const vs = Number(telM.verticalSpeed ?? telM.vertical_speed ?? 0) || 0;
+        if (!(vs < Number(mods.vertical_speed_lt))) {
+          console.log(`[RuleEngine] Precondición vertical_speed_lt no cumplida para ${step.eventKey}: actual ${vs} >= ${mods.vertical_speed_lt}`);
+          return false;
+        }
+      }
+    }
+
     // Otros tipos de precondiciones: por defecto pasar (extensible)
     return true;
+  }
+
+  /**
+   * Umbral de altitud (p. ej. `descent_capt_10kfeet` con `altitude_below`).
+   * Dispara cuando la altitud actual <= umbral. Fail-closed con umbral
+   * inválido. Sin efectos secundarios.
+   */
+  private evaluateAltitudeBelow(conditions: any, context?: FlightContext): boolean {
+    const rawThreshold = conditions?.altitude_below;
+    const threshold = Number(rawThreshold);
+    const ctx: any = context ?? this.flightContext;
+    const tel: any = ctx?.getTelemetry?.() ?? {};
+    const altitude = Number(tel.altitude ?? tel.plane_altitude ?? 0) || 0;
+    const result = !Number.isNaN(threshold) ? altitude <= threshold : false;
+    console.log('[RuleEngine] Evaluando altitude_below:', {
+      currentAltitude: altitude,
+      threshold: rawThreshold,
+      result,
+    });
+    return result;
   }
 
   /** Variables de telemetría disponibles en las expresiones de scheduler_rule. */
