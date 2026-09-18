@@ -564,6 +564,12 @@ export default function VueloActualView({
   const lastDetectedPhaseRef = useRef<FlightPhase | null>(null);
   const phaseDetectorRef = useRef<FlightPhaseDetector | null>(null);
   if (!phaseDetectorRef.current) phaseDetectorRef.current = new FlightPhaseDetector();
+  // El detector necesita flight.cruiseAltitude (SimBrief) para detectar CRUISE
+  // a la altitud real del vuelo (p. ej. FL170) en vez del umbral fijo 25000.
+  // flightContextRef es estable (misma instancia), basta con inyectarlo una vez.
+  if (flightContextRef.current) {
+    phaseDetectorRef.current.setFlightContext(flightContextRef.current);
+  }
 
   const bindFlightController = useCallback((controller: FlightController) => {
     const ctx = flightContextRef.current!;

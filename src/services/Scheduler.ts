@@ -469,6 +469,7 @@ export class Scheduler {
     // (p. ej. aterriza con el scheduler aún en DESCENT). Sin esto, el
     // Scheduler quedaba clavado tras el aterrizaje aunque el FSM aceptara.
     const recovery = new Set([
+      "CLIMB\0DESCENT",
       "DESCENT\0LANDING",
       "DESCENT\0TAXI",
       "DESCENT\0TAXI_TO_GATE",

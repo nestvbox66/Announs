@@ -8,6 +8,7 @@
 
 import { FlightPhase } from "../engine/FlightEngine";
 import type { TelemetrySnapshot } from "../types/telemetry";
+import type { FlightContext } from "./FlightContext";
 import { fileLogger } from "./FileLogger";
 
 export class FlightPhaseDetector {
@@ -15,9 +16,70 @@ export class FlightPhaseDetector {
   private stability = 0;
   private readonly STABILITY_THRESHOLD = 3;
   private boardingCompleted = false;
+  // Contexto opcional (inyectado por la vista): provee flight.cruiseAltitude
+  // (SimBrief) para detectar CRUISE a la altitud real del vuelo. Sin contexto
+  // (Mock/tests/vía estática) se usa solo el fallback genérico de 25.000 ft.
+  private flightContext?: FlightContext;
 
   setBoardingCompleted(completed: boolean): void {
     this.boardingCompleted = completed;
+  }
+
+  /** Inyecta el FlightContext para la detección por altitud real de crucero. */
+  setFlightContext(ctx: FlightContext): void {
+    this.flightContext = ctx;
+  }
+
+  /**
+   * ¿Está el avión en crucero? Fuente primaria: `flight.cruiseAltitude`
+   * (SimBrief, pies) con tolerancia ±500 ft (igual que el ancla
+   * transition_to_cruise) y banda |VS| ≤ 200 fpm anti-jitter. Fallback:
+   * umbral genérico de 25.000 ft si no hay altitud de crucero. Sin efectos
+   * secundarios (apto para monitor/tests).
+   */
+  public detectCruise(snapshot: TelemetrySnapshot): boolean {
+    const altitude = snapshot.altitude ?? 0;
+    const verticalSpeed = snapshot.verticalSpeed ?? 0;
+    let cruiseAltitude: number | null = null;
+    try {
+      const raw = this.flightContext?.getFlight?.()?.cruiseAltitude;
+      const n = Number(raw);
+      if (raw !== undefined && raw !== null && !Number.isNaN(n) && n > 0) cruiseAltitude = n;
+    } catch {
+      cruiseAltitude = null;
+    }
+
+    let result = false;
+    let diff: number | string = "N/A";
+    if (cruiseAltitude !== null) {
+      diff = Math.abs(altitude - cruiseAltitude);
+      if (diff <= 500 && Math.abs(verticalSpeed) <= 200) {
+        console.log('[FlightPhaseDetector] CRUISE por cruiseAltitude:', {
+          altitude,
+          cruiseAltitude,
+          diff,
+          verticalSpeed,
+        });
+        result = true;
+      }
+    }
+    if (!result && altitude > 25000 && Math.abs(verticalSpeed) <= 200) {
+      console.log('[FlightPhaseDetector] CRUISE por umbral 25000:', {
+        altitude,
+        verticalSpeed,
+      });
+      result = true;
+    }
+    if (altitude > 10000 || cruiseAltitude !== null) {
+      console.log('[FlightPhaseDetector] Evaluando CRUISE:', {
+        altitude,
+        cruiseAltitude,
+        diff,
+        verticalSpeed,
+        result: result ? 'CRUISE' : 'NOT_CRUISE',
+      });
+    }
+    return result;
   }
 
   /**
@@ -109,6 +171,12 @@ export class FlightPhaseDetector {
     const simOnGround = snap.simOnGround;
     const atcOnParkingSpot = snap.atcOnParkingSpot;
 
+    // 1. CRUISE (prioridad alta): por altitud real de crucero (SimBrief) con
+    // fallback al umbral genérico. Va primero porque un nivelado a FL170 con
+    // VS≈0 no debe caer a GATE ni confundirse con otras fases: con altitud >
+    // 0 y cerca del FL planificado solo puede ser crucero.
+    if (this.detectCruise(snap)) return FlightPhase.CRUISE;
+
     // GATE: en tierra, parado, puertas abiertas, motores apagados, freno puesto
     if (altitude === 0 && groundspeed < 5 && !doorsClosed && !engineRunning && parkingBrake) {
       return FlightPhase.GATE;
@@ -197,24 +265,6 @@ export class FlightPhaseDetector {
     }
     if (altitude >= 500 && altitude < 35000 && verticalSpeed > 0) {
       return FlightPhase.CLIMB;
-    }
-    // CRUISE: banda de tolerancia en vez de igualdad estricta. SimConnect
-    // entrega floats con jitter (±50-200 fpm): `verticalSpeed === 0` casi nunca
-    // se cumple y el crucero caía al fallthrough GATE, con lo que el FSM jamás
-    // llegaba a CRUISE y la transición CRUISE → DESCENT era rechazada siempre.
-    // Umbral de altitud 25000 ft (cruceros regionales vuelan por debajo de FL300).
-    const absVs = Math.abs(verticalSpeed);
-    const isCruise = altitude > 25000 && absVs <= 200;
-    if (altitude > 20000) {
-      console.log('[FlightPhaseDetector] Evaluando CRUISE:', {
-        altitude,
-        verticalSpeed,
-        absVs,
-        isCruise,
-      });
-    }
-    if (isCruise) {
-      return FlightPhase.CRUISE;
     }
     if (altitude > 1000 && altitude <= 35000 && verticalSpeed < 0) {
       return FlightPhase.DESCENT;

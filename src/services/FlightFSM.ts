@@ -23,6 +23,7 @@ const VALID_TRANSITIONS: [FlightPhase, FlightPhase][] = [
 // bloqueó el avance). Sin estas aristas, el detector las rechaza y el vuelo
 // queda clavado en la fase vieja para siempre (silencio total en log).
 const RECOVERY_TRANSITIONS: [FlightPhase, FlightPhase][] = [
+  [FlightPhase.CLIMB, FlightPhase.DESCENT],
   [FlightPhase.DESCENT, FlightPhase.LANDING],
   [FlightPhase.DESCENT, FlightPhase.TAXI],
   [FlightPhase.DESCENT, FlightPhase.TAXI_IN],
