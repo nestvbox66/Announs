@@ -1633,11 +1633,22 @@ export default function DebugMonitor({
             ) : (
               <div className="space-y-2">
                 {waitConditionSteps.map((w) => (
-                  <div key={w.eventKey} className="border border-white/10 rounded-[5px] overflow-hidden bg-white/[0.02]">
-                    <div className="flex items-center justify-between px-2 py-1.5 bg-white/[0.04] border-b border-white/5">
-                      <span className="font-mono text-[11px] font-bold text-[#45AFFF]">
+                  <div
+                    key={w.eventKey}
+                    className={`border rounded-[5px] overflow-hidden ${
+                      w.isCurrent
+                        ? "border-[#43E600]/60 bg-[#43E600]/[0.06] shadow-[0_0_12px_rgba(67,230,0,0.15)]"
+                        : "border-white/10 bg-white/[0.02]"
+                    }`}
+                  >
+                    <div className={`flex items-center justify-between px-2 py-1.5 border-b border-white/5 ${w.isCurrent ? "bg-[#43E600]/10" : "bg-white/[0.04]"}`}>
+                      <span className="font-mono text-[11px] font-bold text-[#45AFFF] flex items-center gap-1.5">
+                        {w.isCurrent && (
+                          <span className="inline-flex items-center gap-1 bg-[#43E600]/20 border border-[#43E600]/50 text-[#43E600] text-[10px] px-1.5 py-0.5 rounded font-black animate-pulse">
+                            ▶ ACTUAL
+                          </span>
+                        )}
                         {w.eventKey}
-                        {w.isCurrent && <span className="ml-1 text-[#43E600]">▶</span>}
                       </span>
                       <span
                         className={`font-mono text-[11px] px-1.5 py-0.5 rounded border font-bold ${
@@ -1702,9 +1713,13 @@ export default function DebugMonitor({
             ) : (
               <div className="border border-white/10 rounded-[5px] overflow-hidden bg-white/[0.02]">
                 <div className="px-2 py-1.5 bg-white/[0.04] border-b border-white/5">
-                  <span className="font-mono text-[11px] font-bold text-[#ffb340]">
+                  <span className="font-mono text-[11px] font-bold text-[#ffb340] flex items-center gap-1.5">
+                    {blockingStep.isCurrent && (
+                      <span className="inline-flex items-center gap-1 bg-[#43E600]/20 border border-[#43E600]/50 text-[#43E600] text-[10px] px-1.5 py-0.5 rounded font-black animate-pulse">
+                        ▶ ACTUAL
+                      </span>
+                    )}
                     {blockingStep.eventKey}
-                    {blockingStep.isCurrent && <span className="ml-1 text-[#43E600]">▶</span>}
                   </span>
                 </div>
                 <div className="p-2 space-y-0.5">

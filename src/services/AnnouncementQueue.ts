@@ -113,7 +113,9 @@ export class AnnouncementQueue {
       try {
         const ann = await this.service.play(item.params);
         item.resolve(ann);
-      } catch {
+      } catch (err) {
+        console.error('[Audio] ❌ error:', { eventKey: item.params.eventKey, error: (err as Error)?.message ?? String(err) });
+        fileLogger.error('[AnnouncementQueue] playback failed', { eventKey: item.params.eventKey, error: (err as Error)?.message ?? String(err) });
         item.reject(new Error("Playback failed"));
       } finally {
         this.processingEventKey = null;

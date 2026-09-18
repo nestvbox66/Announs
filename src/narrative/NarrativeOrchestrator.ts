@@ -14,6 +14,12 @@ import { fileLogger } from "../services/FileLogger";
 // sistema (p. ej. taxi_crew_safety_brief ≈ 90 s).
 const AUDIO_TIMEOUT = 120000; // 120 segundos (2 minutos)
 
+// Red de seguridad de completion en modo normal (ver audioCompletionTimers):
+// AFTER_DELAY / AFTER_COMPLETION / IMMEDIATE avanzan al completarse audios
+// cortos; WAIT_CONDITION ya cumplido también espera su audio, con más margen.
+const AUDIO_COMPLETION_TIMEOUT_MS = 90000; // 90 segundos
+const WAIT_AUDIO_COMPLETION_TIMEOUT_MS = 300000; // 5 minutos (WAIT ya cumplido)
+
 export interface StepPendingEvent {
   step: NarrativeStep;
   index: number;
@@ -67,6 +73,13 @@ export class NarrativeOrchestrator {
   private pendingStep: NarrativeStep | null = null;
   private waitingForAudio = false;
   private manualAudioWaitTimer: ReturnType<typeof setTimeout> | null = null;
+  // Red de seguridad de completion de audio (modo normal): si un audio
+  // despachado nunca reporta completed/error, la narrativa quedaba muerta en
+  // silencio (caso real: AFTER_DELAY esperando completion eternamente).
+  // Al vencer, se avanza con warning. Solo cubre la espera POST-dispatch: los
+  // WAIT que aún no cumplen condiciones jamás llegan a executeStep y por ende
+  // nunca arman este timer (siguen esperando indefinidamente, como corresponde).
+  private audioCompletionTimers = new Map<string, { timer: ReturnType<typeof setTimeout>; epoch: number }>();
   // Época del escenario: se incrementa en cada resetManualState (cambio de fase).
   // Permite descartar "announcement completed" obsoletos de la fase anterior que
   // podrían avanzar la narrativa de la fase nueva.
@@ -186,6 +199,7 @@ export class NarrativeOrchestrator {
       this.waitingForAudio
     ) {
       console.log(`[NarrativeOrchestrator] ✅ Audio completado para: ${step.eventKey}`);
+      this.clearAudioCompletionNet(step.eventKey);
       // P1: confirmación de avance (nextStep capturado ANTES de avanzar).
       try {
         console.log('[NarrativeOrchestrator] ✅ Avanzando narrativa para transición:', {
@@ -241,6 +255,7 @@ export class NarrativeOrchestrator {
     // Si el paso opcional no tiene audio disponible, NO bloquear la fase: se
     // omite y la narrativa continúa (mismo criterio que cerrar puertas con
     // delay opcional pendiente).
+    if (step) this.clearAudioCompletionNet(step.eventKey);
     if (isOptionalWaitStep) {
       this.emit("step:skipped", {
         step,
@@ -1147,7 +1162,10 @@ export class NarrativeOrchestrator {
       phase: this.getCurrentPhase(),
       mode: this.isTestMode ? "manual" : "auto",
     });
-    this.dispatcher.dispatch(eventDefinition, this.flightContext).catch(() => {});
+    this.dispatcher.dispatch(eventDefinition, this.flightContext).catch((err) => {
+      console.error('[NarrativeOrchestrator] ❌ dispatch fallido:', { eventKey: step.eventKey, error: (err as Error)?.message ?? String(err) });
+      fileLogger.error('[NarrativeOrchestrator] dispatch fallido', { eventKey: step.eventKey, error: (err as Error)?.message ?? String(err) });
+    });
 
     console.log(
       `[NarrativeOrchestrator] Paso ejecutado ${step.eventKey} (modo: ${mode})`
@@ -1172,6 +1190,9 @@ export class NarrativeOrchestrator {
       index: this.narrativeEngine.currentIndex(),
       mode,
     } as StepExecutedEvent);
+    // Red de seguridad: si este audio nunca reporta completed/error, avanzar
+    // con warning al vencer (solo modo normal; en pruebas manda lo manual).
+    this.scheduleAudioCompletionNet(step);
   }
 
   // decision_maker === "user": el paso espera una acción del usuario.
@@ -1364,6 +1385,55 @@ export class NarrativeOrchestrator {
     }
   }
 
+  // ── Red de seguridad de completion (modo normal) ──────────────────────
+
+  /** Arma (o reemplaza) el timeout de completion para un audio despachado. */
+  private scheduleAudioCompletionNet(step: NarrativeStep): void {
+    if (this.isTestMode) return; // en pruebas manda el avance manual
+    const tr = (step as any).transition;
+    const isWait = tr === NarrativeTransition.WAIT_CONDITION;
+    const isAuto =
+      tr === NarrativeTransition.AFTER_DELAY ||
+      tr === NarrativeTransition.AFTER_COMPLETION ||
+      tr === NarrativeTransition.IMMEDIATE ||
+      isWait;
+    if (!isAuto) return;
+    this.clearAudioCompletionNet(step.eventKey);
+    const timeoutMs = isWait ? WAIT_AUDIO_COMPLETION_TIMEOUT_MS : AUDIO_COMPLETION_TIMEOUT_MS;
+    const epoch = this.scenarioEpoch;
+    const eventKey = step.eventKey;
+    console.log('[NarrativeOrchestrator] ⏱️ Red de seguridad armada:', { eventKey, timeoutMs: `${timeoutMs / 1000}s`, epoch });
+    const timer = setTimeout(() => {
+      this.audioCompletionTimers.delete(eventKey);
+      if (epoch !== this.scenarioEpoch) return; // fase cambiada: obsoleto
+      if (this.narrativeEngine.isCompleted()) return;
+      const cur = this.narrativeEngine.currentStep();
+      if (!cur || cur.eventKey !== eventKey) return; // ya se avanzó por otra vía
+      console.warn('[NarrativeOrchestrator] ⏰ Timeout de audio, avanzando con warning:', {
+        eventKey,
+        timeoutMs,
+        epoch,
+      });
+      fileLogger.warn('[NarrativeOrchestrator] Timeout de audio: avance forzado', { eventKey, timeoutMs });
+      this.advanceNarrative("audio-completion-timeout");
+    }, timeoutMs);
+    this.audioCompletionTimers.set(eventKey, { timer, epoch });
+  }
+
+  /** Desarma el timeout de completion (completó, falló, cambió de fase o re-dispatch). */
+  private clearAudioCompletionNet(eventKey?: string): void {
+    if (eventKey !== undefined) {
+      const rec = this.audioCompletionTimers.get(eventKey);
+      if (rec) {
+        clearTimeout(rec.timer);
+        this.audioCompletionTimers.delete(eventKey);
+      }
+      return;
+    }
+    for (const rec of this.audioCompletionTimers.values()) clearTimeout(rec.timer);
+    this.audioCompletionTimers.clear();
+  }
+
   private logOrchestratorState(context: string): void {
     console.log("[NarrativeOrchestrator] Estado actual:", {
       context,
@@ -1416,6 +1486,7 @@ export class NarrativeOrchestrator {
     this.waitingForAudio = false;
     this.waitingEpoch = -1;
     this.clearManualAudioWait();
+    this.clearAudioCompletionNet();
     console.log(`[NarrativeOrchestrator] Estado manual reiniciado (época ${this.scenarioEpoch})`);
     this.emit("step:clear", null);
   }
@@ -1578,6 +1649,7 @@ export class NarrativeOrchestrator {
       this.timerManager.cancel(id);
     }
     this.pendingTimers.clear();
+    this.clearAudioCompletionNet();
   }
 
   private scheduleNarrativeDelay(_step: NarrativeStep): void {

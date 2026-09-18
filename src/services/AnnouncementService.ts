@@ -95,6 +95,10 @@ export class AnnouncementService {
     console.log("[SERVICE]");
     console.log("Generating / Loading Audio");
     console.log("Event: " + eventKey);
+    // Ciclo de vida del audio (obligatorio: eventKey siempre presente).
+    console.log('[Audio] 🎬 dispatch:', { eventKey });
+    console.log('[Audio] ⏳ generating:', { eventKey });
+    fileLogger.log('[Audio] dispatch', { eventKey, flightId, languageId });
 
     const payload = {
       event_key: eventKey,
@@ -204,9 +208,13 @@ export class AnnouncementService {
           console.log("[SERVICE]");
           console.log("Audio Started");
           console.log(`[AnnouncementPlayer] 🔊 Audio iniciado para: ${eventKey}`);
+          console.log('[Audio] ▶️ playing:', { eventKey });
+          fileLogger.log('[Audio] playing', { eventKey });
           audio.play().catch((err) => {
             if (!done) {
               done = true;
+              console.error('[Audio] ❌ error:', { eventKey, error: err?.message ?? String(err) });
+              fileLogger.error('[Audio] error al reproducir', { eventKey, error: err?.message ?? String(err) });
               this.emit("playing", false);
               this.emit("generating", false);
               this.emit("error", "Error al reproducir audio");
@@ -225,6 +233,8 @@ export class AnnouncementService {
           this.emit("generating", false);
           this.emit("completed", eventKey);
           console.log(`[AnnouncementPlayer] ✅ Audio completado para: ${eventKey}`);
+          console.log('[Audio] ✅ completed:', { eventKey });
+          fileLogger.log('[Audio] completed', { eventKey });
           resolve();
         }
       });
@@ -234,6 +244,8 @@ export class AnnouncementService {
           done = true;
           this.cancelResolve = null;
           this.currentAudio = null;
+          console.error('[Audio] ❌ error:', { eventKey, error: 'Error al reproducir audio (elemento audio)' });
+          fileLogger.error('[Audio] error elemento audio', { eventKey });
           this.emit("playing", false);
           this.emit("generating", false);
           this.emit("error", "Error al reproducir audio");

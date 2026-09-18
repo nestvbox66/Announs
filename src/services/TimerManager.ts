@@ -86,7 +86,9 @@ export class TimerManager {
             eventKey: record.action.event,
             flightId: this.flightId,
             languageId: this.languageId ?? "",
-          }).catch(() => {});
+          }).catch((err) => {
+            console.error('[TimerManager] ❌ enqueue fallido:', { event: record.action.event, error: (err as Error)?.message ?? String(err) });
+          });
         }
       }
     }

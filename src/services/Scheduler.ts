@@ -823,7 +823,9 @@ export class Scheduler {
 
       const eventDef = EventCatalogService.get(action.event);
       if (eventDef) {
-        this.dispatcher.dispatch(eventDef, this.flightContext).catch(() => {});
+        this.dispatcher.dispatch(eventDef, this.flightContext).catch((err) => {
+          console.error('[Scheduler] ❌ dispatch fallido (phase rules):', { event: action.event, error: (err as Error)?.message ?? String(err) });
+        });
       }
     }
   }
@@ -1066,7 +1068,9 @@ export class Scheduler {
       this.narrativeOrchestrator.executeStep(step, def, "auto");
     } else {
       console.log('[Scheduler] 🎯 Dispatch fallback gate_crew_start_soon vía dispatcher');
-      this.dispatcher.dispatch(def, this.flightContext).catch(() => {});
+      this.dispatcher.dispatch(def, this.flightContext).catch((err) => {
+        console.error('[Scheduler] ❌ dispatch fallido (gate fallback):', { event: def.eventKey, error: (err as Error)?.message ?? String(err) });
+      });
     }
   }
 
@@ -1128,7 +1132,9 @@ export class Scheduler {
         // Fallback: intentar dispatch directo
         const fallbackDef = EventCatalogService.get("captain_special_event");
         if (fallbackDef) {
-          this.dispatcher.dispatch(fallbackDef, this.flightContext).catch(() => {});
+          this.dispatcher.dispatch(fallbackDef, this.flightContext).catch((err) => {
+            console.error('[Scheduler] ❌ dispatch fallido (special event):', { event: fallbackDef.eventKey, error: (err as Error)?.message ?? String(err) });
+          });
         }
       }
     } else {
@@ -1137,7 +1143,9 @@ export class Scheduler {
       const fallbackDef = EventCatalogService.get("captain_special_event");
       if (fallbackDef) {
         console.log("[Scheduler] 🎉 Dispatch fallback captain_special_event vía dispatcher");
-        this.dispatcher.dispatch(fallbackDef, this.flightContext).catch(() => {});
+        this.dispatcher.dispatch(fallbackDef, this.flightContext).catch((err) => {
+          console.error('[Scheduler] ❌ dispatch fallido (special event fallback):', { event: fallbackDef.eventKey, error: (err as Error)?.message ?? String(err) });
+        });
       }
     }
   }

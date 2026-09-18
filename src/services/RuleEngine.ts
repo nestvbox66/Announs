@@ -778,7 +778,15 @@ export class RuleEngine {
       const flightPhase = this.currentFlightPhase();
       const expected = String(conditions.fsm);
       const ok = String(currentState) === expected || (flightPhase !== null && flightPhase === expected);
-      if (!ok) return false;
+      if (!ok) {
+        console.log('[RuleEngine] descent_condition: puerta fsm no cumplida, omitiendo:', {
+          eventKey,
+          fsmState: currentState ?? null,
+          schedulerPhase: flightPhase,
+          required: expected,
+        });
+        return false;
+      }
     }
 
     // Sin duración requerida: evaluación directa.
