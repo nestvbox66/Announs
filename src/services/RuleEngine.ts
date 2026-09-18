@@ -4,6 +4,7 @@ import { TriggerEvaluatorFactory } from "../triggers/TriggerEvaluatorFactory";
 import { FlightContext } from "./FlightContext";
 import { NarrativeStep } from "../scenarios/narrative/NarrativeStep";
 import { secondsToHHMM } from "../utils/timeUtils";
+import { logger } from "../utils/logger";
 
 interface AnnouncementAction {
   type: "announcement";
@@ -235,7 +236,7 @@ export class RuleEngine {
     }
 
     if (hourOfDay === null) {
-      console.log("[RuleEngine] is_night_flight: sin hora de salida disponible; false", { flight: rawFlight });
+      logger.ruleEvaluation("is_night_flight: sin hora de salida disponible; false", { flight: rawFlight });
       return false;
     }
 
@@ -244,7 +245,7 @@ export class RuleEngine {
 
     // 20:00 – 06:00 (vuelo nocturno).
     const isNight = hourOfDay >= 20 || hourOfDay < 6;
-    console.log("[RuleEngine] is_night_flight:", {
+    logger.ruleEvaluation("is_night_flight:", {
       source,
       hourOfDay,
       formatted: `${String(hourOfDay).padStart(2, "0")}:00`,
@@ -274,7 +275,7 @@ export class RuleEngine {
       currentPhase = fsm?.currentState ?? fsm?.getCurrentState?.() ?? null;
     } catch {}
 
-    console.log('[RuleEngine] getCruiseProgress - estado:', {
+    logger.ruleEvaluation('getCruiseProgress - estado:', {
       totalDistanceNm: flight.totalDistanceNm,
       cruiseTimeSeconds: flight.cruiseTimeSeconds,
       cruiseEntryTime: flight.cruiseEntryTime,
@@ -288,7 +289,7 @@ export class RuleEngine {
     const phase = this.currentFlightPhase();
     if (phase !== null) {
       if (phase !== "CRUISE") {
-        console.warn('[RuleEngine] getCruiseProgress: no estamos en CRUISE', { phase });
+        logger.ruleEvaluation('getCruiseProgress: no estamos en CRUISE', { phase });
         return 0;
       }
     } else {
@@ -296,7 +297,7 @@ export class RuleEngine {
         const fsm: any = ctx.getFSM?.() ?? {};
         const current = fsm?.currentState ?? fsm?.getCurrentState?.() ?? null;
         if (current !== null && current !== "CRUISE") {
-          console.warn('[RuleEngine] getCruiseProgress: no estamos en CRUISE', { current });
+          logger.ruleEvaluation('getCruiseProgress: no estamos en CRUISE', { current });
           return 0;
         }
       } catch {}
@@ -308,14 +309,14 @@ export class RuleEngine {
       const remaining = this.getDistanceToDestination(ctx);
       if (Number.isFinite(remaining) && remaining >= 0) {
         const progress = 1 - remaining / totalNum;
-        console.log('[RuleEngine] getCruiseProgress cálculo (distancia):', {
+        logger.ruleEvaluation('getCruiseProgress cálculo (distancia):', {
           remainingNm: remaining,
           totalDistanceNm: totalNum,
           progress,
         });
         return Math.min(Math.max(progress, 0), 1);
       }
-      console.warn('[RuleEngine] getCruiseProgress: sin posición/destino para distancia', {
+      logger.ruleEvaluation('getCruiseProgress: sin posición/destino para distancia', {
         totalDistanceNm: totalNum,
       });
       return 0;
@@ -328,7 +329,7 @@ export class RuleEngine {
       flight.cruiseTimeSeconds == null || flight.cruiseEntryTime == null ||
       Number.isNaN(totalTimeNum) || Number.isNaN(entryNum) || totalTimeNum <= 0
     ) {
-      console.warn('[RuleEngine] getCruiseProgress: faltan datos', {
+      logger.ruleEvaluation('getCruiseProgress: faltan datos', {
         totalDistanceNm: flight.totalDistanceNm,
         cruiseTimeSeconds: flight.cruiseTimeSeconds,
         cruiseEntryTime: flight.cruiseEntryTime,
@@ -349,7 +350,7 @@ export class RuleEngine {
     if (elapsed < 0) elapsed += 86400;
     const progress = elapsed / total;
 
-    console.log('[RuleEngine] getCruiseProgress cálculo (tiempo, fallback):', {
+    logger.ruleEvaluation('getCruiseProgress cálculo (tiempo, fallback):', {
       elapsed,
       cruiseTimeSeconds: flight.cruiseTimeSeconds,
       progress,
@@ -545,7 +546,7 @@ export class RuleEngine {
     if (groundspeed < 1) {
       if (this.stoppedSince === null) {
         this.stoppedSince = zuluTime;
-        console.log('[RuleEngine] Avión detenido, iniciando contador:', zuluTime);
+        logger.ruleEvaluation('Avión detenido, iniciando contador:', zuluTime);
       }
       let elapsed = zuluTime - this.stoppedSince;
       if (elapsed < 0) {
@@ -557,7 +558,7 @@ export class RuleEngine {
       return elapsed;
     } else {
       if (this.stoppedSince !== null) {
-        console.log('[RuleEngine] Avión en movimiento, reseteando contador');
+        logger.ruleEvaluation('Avión en movimiento, reseteando contador');
         this.stoppedSince = null;
       }
       return 0;
@@ -609,7 +610,7 @@ export class RuleEngine {
       }
     }
     const ok = fsmOk && timeStopped > threshold;
-    console.log('[RuleEngine] Evaluando time_stopped:', {
+    logger.ruleEvaluation('Evaluando time_stopped:', {
       eventKey: step?.eventKey ?? 'time_stopped',
       groundspeed: tel.groundspeed ?? tel.ground_speed,
       timeStopped,
@@ -689,7 +690,7 @@ export class RuleEngine {
     } catch {
       tel = {};
     }
-    console.log('[RuleEngine] Evaluando all_engines_off:', {
+    logger.ruleEvaluation('Evaluando all_engines_off:', {
       eventKey: step?.eventKey ?? 'all_engines_off',
       expected,
       numberOfEngines: tel.numberOfEngines ?? tel.numEngines,
@@ -779,7 +780,7 @@ export class RuleEngine {
       const expected = String(conditions.fsm);
       const ok = String(currentState) === expected || (flightPhase !== null && flightPhase === expected);
       if (!ok) {
-        console.log('[RuleEngine] descent_condition: puerta fsm no cumplida, omitiendo:', {
+        logger.ruleEvaluation('descent_condition: puerta fsm no cumplida, omitiendo:', {
           eventKey,
           fsmState: currentState ?? null,
           schedulerPhase: flightPhase,
@@ -802,7 +803,7 @@ export class RuleEngine {
     // Condición violada → resetear ventana.
     if (!(currentVs < threshold)) {
       if (state.startedAt !== null) {
-        console.log('[RuleEngine] descent_condition reseteado:', { eventKey, currentVs, threshold });
+        logger.ruleEvaluation('descent_condition reseteado:', { eventKey, currentVs, threshold });
       }
       state.startedAt = null;
       return false;
@@ -814,7 +815,7 @@ export class RuleEngine {
     // Condición cumplida por primera vez → abrir ventana (aún no basta).
     if (state.startedAt === null) {
       state.startedAt = now;
-      console.log('[RuleEngine] descent_condition iniciado:', { eventKey, currentVs, threshold, startedAt: now });
+      logger.ruleEvaluation('descent_condition iniciado:', { eventKey, currentVs, threshold, startedAt: now });
       return false;
     }
 
@@ -823,7 +824,7 @@ export class RuleEngine {
     // salta atrás) con la ventana abierta, elapsed sale negativo y `met`
     // quedaría en false para siempre. Se rebasea la ventana al reloj actual.
     if (elapsed < 0) {
-      console.log('[RuleEngine] descent_condition: wrap de medianoche detectado, reseteando ventana:', {
+      logger.ruleEvaluation('descent_condition: wrap de medianoche detectado, reseteando ventana:', {
         eventKey,
         currentZuluTime: now,
         startedAt: state.startedAt,
@@ -833,7 +834,7 @@ export class RuleEngine {
       return false;
     }
     const met = elapsed >= durationRequired;
-    console.log('[RuleEngine] descent_condition evaluando:', {
+    logger.ruleEvaluation('descent_condition evaluando:', {
       eventKey, currentVs, threshold, elapsed, durationRequired, met,
     });
     return met;
@@ -920,7 +921,7 @@ export class RuleEngine {
       cruiseProgress >= 0.95 &&
       verticalSpeed < -500;
 
-    console.log('[RuleEngine] Evaluando transición a descenso:', {
+    logger.ruleEvaluation('Evaluando transición a descenso:', {
       currentAltitude,
       flightLevel,
       altitudeDrop,
@@ -976,7 +977,7 @@ export class RuleEngine {
    */
   public evaluateTransitionToCruise(context?: FlightContext): boolean {
     const d = this.getCruiseTransitionDetail(context);
-    console.log('[RuleEngine] Evaluando transition_to_cruise:', {
+    logger.ruleEvaluation('Evaluando transition_to_cruise:', {
       currentAltitude: d.currentAltitude,
       flightLevel: d.flightLevel,
       diff: d.diff,
@@ -1005,28 +1006,28 @@ export class RuleEngine {
       const step = stepByEvent.get(ev.eventKey);
       // One-shot guard: si el paso tiene max_once_per_flight y ya se ejecutó, no evaluar
       if (step?.restrictions?.max_once_per_flight && this.executedEvents.has(ev.eventKey)) {
-        console.log(`[RuleEngine] Skipping ${ev.eventKey}: max_once_per_flight ya ejecutado`);
+        logger.ruleEvaluation(`Skipping ${ev.eventKey}: max_once_per_flight ya ejecutado`);
         continue;
       }
       const isTriggered = step
         ? this.evaluateStep(step, context)
         : TriggerEvaluatorFactory.get(ev.triggerType).evaluate(ev, context);
 
-      console.log("[RULE ENGINE]");
-      console.log("Evaluating:");
-      console.log(ev.eventKey);
-      console.log("↓");
+      logger.ruleEvaluation("[RULE ENGINE]");
+      logger.ruleEvaluation("Evaluating:");
+      logger.ruleEvaluation(ev.eventKey);
+      logger.ruleEvaluation("↓");
       if (step) {
-        console.log("Source: NarrativeStep.scheduler_rule");
-        console.log("SchedulerRule: " + (step.scheduler_rule ?? "(none, fallback trigger)"));
+        logger.ruleEvaluation("Source: NarrativeStep.scheduler_rule");
+        logger.ruleEvaluation("SchedulerRule: " + (step.scheduler_rule ?? "(none, fallback trigger)"));
         if ((step as any).preconditions) {
-          console.log("Preconditions: " + JSON.stringify((step as any).preconditions));
+          logger.ruleEvaluation("Preconditions: " + JSON.stringify((step as any).preconditions));
         }
       } else {
-        console.log(evaluatorName(ev.triggerType));
+        logger.ruleEvaluation(evaluatorName(ev.triggerType));
       }
-      console.log("↓");
-      console.log(isTriggered ? "TRUE" : "FALSE");
+      logger.ruleEvaluation("↓");
+      logger.ruleEvaluation(isTriggered ? "TRUE" : "FALSE");
 
       if (isTriggered) {
         // NO marcar one-shot aquí: la evaluación no es ejecución. Para pasos
@@ -1053,7 +1054,7 @@ export class RuleEngine {
   // La regla de programación se lee desde el NarrativeStep, no desde el EventDefinition.
   evaluateStep(step: NarrativeStep, context: FlightContext): boolean {
     try {
-      console.log('[RuleEngine] 📦 Evaluando paso:', {
+      logger.ruleEvaluation('📦 Evaluando paso:', {
         eventKey: step.eventKey,
         hasPreconditions: !!(step as any).preconditions,
         hasSchedulerRule: !!(step as any).scheduler_rule,
@@ -1063,7 +1064,7 @@ export class RuleEngine {
     } catch {}
     // Guard one-shot
     if ((step as any).restrictions?.max_once_per_flight && this.executedEvents.has(step.eventKey)) {
-      console.log(`[RuleEngine] evaluateStep bloqueado por max_once_per_flight: ${step.eventKey}`);
+      logger.ruleEvaluation(`evaluateStep bloqueado por max_once_per_flight: ${step.eventKey}`);
       return false;
     }
 
@@ -1093,7 +1094,7 @@ export class RuleEngine {
       // Si el tipo era delay_detection, evaluatePreconditions ya decidió; respetar su resultado
       if (preconditions.type === "delay_detection") {
         const triggered = this.executedEvents.has(step.eventKey) || this.getDelayEventState(step.eventKey).triggered;
-        console.log(`[RuleEngine] Evaluando ${step.eventKey}:`, {
+        logger.ruleEvaluation(`Evaluando ${step.eventKey}:`, {
           eventKey: step.eventKey,
           isDelayed: preResult,
           triggered,
@@ -1110,23 +1111,23 @@ export class RuleEngine {
     //    mantienen el comportamiento anterior.
     const restrictions: any = (step as any).restrictions ?? {};
     if (!this.evaluateExcludeIfNight(restrictions, context)) {
-      console.log(`[RuleEngine] ${step.eventKey}: bloqueado por exclude_if_night (vuelo nocturno)`);
+      logger.ruleEvaluation(`${step.eventKey}: bloqueado por exclude_if_night (vuelo nocturno)`);
       return false;
     }
     if (!this.evaluateAircraftIsWidebody(restrictions, context)) {
-      console.log(`[RuleEngine] ${step.eventKey}: bloqueado por aircraft_is_widebody`);
+      logger.ruleEvaluation(`${step.eventKey}: bloqueado por aircraft_is_widebody`);
       return false;
     }
     if (!this.evaluateFlightDuration(restrictions, context)) {
-      console.log(`[RuleEngine] ${step.eventKey}: bloqueado por flight_duration_minutes`);
+      logger.ruleEvaluation(`${step.eventKey}: bloqueado por flight_duration_minutes`);
       return false;
     }
     if (!this.evaluateRequiresInternational(restrictions, context)) {
-      console.log(`[RuleEngine] ${step.eventKey}: bloqueado por requires_international_flight`);
+      logger.ruleEvaluation(`${step.eventKey}: bloqueado por requires_international_flight`);
       return false;
     }
     try {
-      console.log('[RuleEngine] Evaluando paso:', {
+      logger.ruleEvaluation('Evaluando paso:', {
         eventKey: step.eventKey,
         cruiseProgress: this.getCruiseProgress(context),
         isNightFlight: this.isNightNow(context),
@@ -1186,12 +1187,12 @@ export class RuleEngine {
     const catalog: any = (this.eventCatalog as any)?.get ? this.eventCatalog : EventCatalogService;
     const event: any = catalog.get(eventKey);
     if (!event) {
-      console.log(`[RuleEngine] isDelayThresholdExceeded: evento no encontrado ${eventKey}`);
+      logger.ruleEvaluation(`isDelayThresholdExceeded: evento no encontrado ${eventKey}`);
       return false;
     }
 
     if (!ctx) {
-      console.log(`[RuleEngine] isDelayThresholdExceeded: sin FlightContext para ${eventKey}`);
+      logger.ruleEvaluation(`isDelayThresholdExceeded: sin FlightContext para ${eventKey}`);
       return false;
     }
 
@@ -1218,7 +1219,7 @@ export class RuleEngine {
     let scheduledSource: string | undefined;
 
     // Log de origen de scheduledTakeoffTime (SimBrief)
-    console.log(`[RuleEngine] 📋 scheduledTakeoffTime:`, {
+    logger.ruleEvaluation(`📋 scheduledTakeoffTime:`, {
       eventKey,
       value: rawFlight.scheduledTakeoffTime ?? rawFlight.scheduled_takeoff_time ?? null,
       formatted: (() => {
@@ -1261,7 +1262,7 @@ export class RuleEngine {
     }
 
     if (currentTime == null || scheduledTime == null) {
-      console.log(`[RuleEngine] isDelayThresholdExceeded: datos insuficientes para ${eventKey}`, {
+      logger.ruleEvaluation(`isDelayThresholdExceeded: datos insuficientes para ${eventKey}`, {
         currentTime,
         scheduledTime,
         scheduledSource,
@@ -1279,7 +1280,7 @@ export class RuleEngine {
     // contra zuluTime (segundos desde medianoche).
     if (st > 86400 && st < 4102444800) {
       st = st % 86400;
-      console.log(`[RuleEngine] scheduledTakeoffTime normalizado epoch→segundos del día para ${eventKey}: ${st}`);
+      logger.ruleEvaluation(`scheduledTakeoffTime normalizado epoch→segundos del día para ${eventKey}: ${st}`);
     }
 
     // Calcular el tiempo restante hasta la salida programada
@@ -1295,7 +1296,7 @@ export class RuleEngine {
     // No marcar triggered aquí; solo al ejecutar el anuncio (markExecuted)
 
     // ── LOG DETALLADO (criterio de aceptación) ────────────────────────────────
-    console.log(`[RuleEngine] ⏱️ Evaluando demora para ${eventKey}:`, {
+    logger.ruleEvaluation(`⏱️ Evaluando demora para ${eventKey}:`, {
       // Entradas
       currentTime: {
         value: ct,
@@ -1324,7 +1325,7 @@ export class RuleEngine {
     });
 
     // Log específico por evento requerido por spec (compacto)
-    console.log(`[RuleEngine] Evaluando ${eventKey}:`, {
+    logger.ruleEvaluation(`Evaluando ${eventKey}:`, {
       eventKey,
       thresholdMs: this.getEventThreshold(eventKey, ctx),
       currentTime: ct,
@@ -1356,7 +1357,7 @@ export class RuleEngine {
     } catch {
       distanceToDest = null;
     }
-    console.log('[RuleEngine] Evaluando phase_transition:', {
+    logger.ruleEvaluation('Evaluando phase_transition:', {
       eventKey: step?.eventKey ?? 'transition_to_taxi',
       targetPhase: detail.targetPhase,
       // Campos de telemetría relevantes (incluye taxi_in: abandono de pista,
@@ -2308,7 +2309,7 @@ export class RuleEngine {
       const conditions = preconditions.conditions ?? preconditions;
       const ok = this.evaluateCruiseProgress(conditions, context);
       const { minRaw, maxRaw } = this.cruiseThresholds(conditions);
-      console.log(`[RuleEngine] Evaluando cruise_progress para ${step.eventKey}:`, {
+      logger.ruleEvaluation(`Evaluando cruise_progress para ${step.eventKey}:`, {
         eventKey: step.eventKey,
         minProgress: minRaw ?? null,
         maxRemaining: maxRaw ?? null,
@@ -2334,7 +2335,7 @@ export class RuleEngine {
       if (step.eventKey === "preflight_capt_delay_taxi") {
         try {
           const fl: any = ctx?.getFlight?.() ?? {};
-          console.log('[RuleEngine] Evaluando taxi delay:', {
+          logger.ruleEvaluation('Evaluando taxi delay:', {
             eventKey: 'preflight_capt_delay_taxi',
             phase: currentState,
             atcOnParkingSpot,
@@ -2348,7 +2349,7 @@ export class RuleEngine {
       }
 
       // ── LOG de condiciones adicionales ──────────────────────────────────────
-      console.log(`[RuleEngine] 📋 Condiciones para ${step.eventKey}:`, {
+      logger.ruleEvaluation(`📋 Condiciones para ${step.eventKey}:`, {
         fsm: currentState,
         flightPhase: this.currentFlightPhase(),
         expectedFsm: conditions.fsm,
@@ -2376,14 +2377,14 @@ export class RuleEngine {
         const currentStateOk =
           String(currentState) === expected || (flightPhase !== null && flightPhase === expected);
         if (!currentStateOk) {
-          console.log(`[RuleEngine] Precondición fsm no cumplida para ${step.eventKey}: esperado ${conditions.fsm}, actual fsm=${currentState} fase=${flightPhase ?? "—"}`);
+          logger.ruleEvaluation(`Precondición fsm no cumplida para ${step.eventKey}: esperado ${conditions.fsm}, actual fsm=${currentState} fase=${flightPhase ?? "—"}`);
           extraConditionsMet = false;
         }
       }
       if (conditions.sim_on_ground !== undefined) {
         const ok = simOnGround === conditions.sim_on_ground;
         if (!ok) {
-          console.log(`[RuleEngine] Precondición sim_on_ground no cumplida para ${step.eventKey}: esperado ${conditions.sim_on_ground}, actual ${simOnGround}`);
+          logger.ruleEvaluation(`Precondición sim_on_ground no cumplida para ${step.eventKey}: esperado ${conditions.sim_on_ground}, actual ${simOnGround}`);
           extraConditionsMet = false;
         }
       }
@@ -2391,14 +2392,14 @@ export class RuleEngine {
         const expected = conditions.atc_on_parking_spot ?? conditions.atcOnParkingSpot;
         const ok = atcOnParkingSpot === expected;
         if (!ok) {
-          console.log(`[RuleEngine] Precondición atc_on_parking_spot no cumplida para ${step.eventKey}: esperado ${expected}, actual ${atcOnParkingSpot}`);
+          logger.ruleEvaluation(`Precondición atc_on_parking_spot no cumplida para ${step.eventKey}: esperado ${expected}, actual ${atcOnParkingSpot}`);
           extraConditionsMet = false;
         }
       }
       if (conditions.ground_velocity_lt !== undefined) {
         const ok = groundspeed < conditions.ground_velocity_lt;
         if (!ok) {
-          console.log(`[RuleEngine] Precondición ground_velocity_lt no cumplida para ${step.eventKey}: ${groundspeed} >= ${conditions.ground_velocity_lt}`);
+          logger.ruleEvaluation(`Precondición ground_velocity_lt no cumplida para ${step.eventKey}: ${groundspeed} >= ${conditions.ground_velocity_lt}`);
           extraConditionsMet = false;
         }
       }
@@ -2406,14 +2407,14 @@ export class RuleEngine {
       if (conditions.groundspeed_lt !== undefined) {
         const ok = groundspeed < conditions.groundspeed_lt;
         if (!ok) {
-          console.log(`[RuleEngine] Precondición groundspeed_lt no cumplida para ${step.eventKey}: ${groundspeed} >= ${conditions.groundspeed_lt}`);
+          logger.ruleEvaluation(`Precondición groundspeed_lt no cumplida para ${step.eventKey}: ${groundspeed} >= ${conditions.groundspeed_lt}`);
           extraConditionsMet = false;
         }
       }
 
       // ── LOG resultado final ─────────────────────────────────────────────────
       const ejecutar = tiempoCondicion && extraConditionsMet;
-      console.log(`[RuleEngine] 📋 Resultado para ${step.eventKey}:`, {
+      logger.ruleEvaluation(`📋 Resultado para ${step.eventKey}:`, {
         tiempoCondicion,
         condicionesExtra: extraConditionsMet,
         ejecutar,
@@ -2467,7 +2468,7 @@ export class RuleEngine {
         const expected = String(mods.fsm);
         const fsmOk = String(currentState) === expected || (flightPhase !== null && flightPhase === expected);
         if (!fsmOk) {
-          console.log(`[RuleEngine] Precondición fsm no cumplida para ${step.eventKey}: esperado ${expected}, actual fsm=${currentState} fase=${flightPhase ?? '—'}`);
+          logger.ruleEvaluation(`Precondición fsm no cumplida para ${step.eventKey}: esperado ${expected}, actual fsm=${currentState} fase=${flightPhase ?? '—'}`);
           return false;
         }
       }
@@ -2479,7 +2480,7 @@ export class RuleEngine {
       if (mods.vertical_speed_lt !== undefined && preconditions.type !== 'descent_condition') {
         const vs = Number(telM.verticalSpeed ?? telM.vertical_speed ?? 0) || 0;
         if (!(vs < Number(mods.vertical_speed_lt))) {
-          console.log(`[RuleEngine] Precondición vertical_speed_lt no cumplida para ${step.eventKey}: actual ${vs} >= ${mods.vertical_speed_lt}`);
+          logger.ruleEvaluation(`Precondición vertical_speed_lt no cumplida para ${step.eventKey}: actual ${vs} >= ${mods.vertical_speed_lt}`);
           return false;
         }
       }
@@ -2501,7 +2502,7 @@ export class RuleEngine {
     const tel: any = ctx?.getTelemetry?.() ?? {};
     const altitude = Number(tel.altitude ?? tel.plane_altitude ?? 0) || 0;
     const result = !Number.isNaN(threshold) ? altitude <= threshold : false;
-    console.log('[RuleEngine] Evaluando altitude_below:', {
+    logger.ruleEvaluation('Evaluando altitude_below:', {
       currentAltitude: altitude,
       threshold: rawThreshold,
       result,
@@ -2715,7 +2716,7 @@ export class RuleEngine {
     try {
       const parser = new TelemetryExprParser(tokens, ctx as unknown as Record<string, boolean | number>);
       const result = parser.parse();
-      console.log("[RuleEngine] Evaluando scheduler_rule:", {
+      logger.ruleEvaluation("Evaluando scheduler_rule:", {
         rule,
         context: {
           SIM_ON_GROUND: ctx.SIM_ON_GROUND,
@@ -2740,7 +2741,7 @@ export class RuleEngine {
       });
       return result;
     } catch (err) {
-      console.warn("[RuleEngine] scheduler_rule no evaluable:", { rule, error: String(err) });
+      logger.ruleEvaluation("scheduler_rule no evaluable:", { rule, error: String(err) });
       return false;
     }
   }
@@ -2876,7 +2877,7 @@ export class RuleEngine {
           FLIGHT_LEVEL: c.FLIGHT_LEVEL,
         };
       } catch {}
-      console.log("[RuleEngine] 🔍 Evaluando scheduler_rule para:", {
+      logger.ruleEvaluation("🔍 Evaluando scheduler_rule para:", {
         eventKey: eventKey ?? "(sin eventKey)",
         rule: normalized,
         context: exprCtx,
@@ -2922,7 +2923,7 @@ export class RuleEngine {
       );
     }
 
-    console.log(`[RuleEngine] Regla de programación no reconocida: "${rule}"`);
+    logger.ruleEvaluation(`Regla de programación no reconocida: "${rule}"`);
     return false;
   }
 }

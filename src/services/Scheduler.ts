@@ -24,6 +24,7 @@ import type { TelemetrySnapshot } from "../types/telemetry";
 import { fileLogger } from "./FileLogger";
 import type { FlightStartPreferences } from "./FlightContext";
 import { ScenarioConfigService } from "./ScenarioConfigService";
+import { logger } from "../utils/logger";
 
 // Eventos de demora cuyo umbral (default_delay_ms) puede ser reparametrizado
 // en el Backoffice (tabla events) y debe reflejarse en el Desktop.
@@ -160,7 +161,7 @@ export class Scheduler {
       for (const [eventKey, ms] of Object.entries(thresholds)) {
         const existing = this.flightContext.getDelayOverride(eventKey);
         if (existing === undefined || existing !== ms) {
-          console.log(`[Scheduler] Umbral de demora ${eventKey}: ${ms}ms (${(ms / 60000).toFixed(1)} min) aplicado desde DB`);
+          logger.narrative(`[Scheduler] Umbral de demora ${eventKey}: ${ms}ms (${(ms / 60000).toFixed(1)} min) aplicado desde DB`);
           this.flightContext.setDelayOverride(eventKey, ms);
         }
       }
@@ -222,12 +223,12 @@ export class Scheduler {
     // El escenario (p. ej. BOARDING) completó todos sus pasos narrativos.
     this.narrativeOrchestrator.on("scenario:completed", () => {
       this.boardingStepsCompleted = true;
-      console.log(
+      logger.narrative(
         "[Scheduler] Escenario completado: pasos de embarque/pre-vuelo finalizados."
       );
       // Desembarque completado en AT_GATE → detener la música ambiental.
       if (this.currentPhase === "AT_GATE") {
-        console.log("[Scheduler] Desembarque completado -> deteniendo música (fade 2s)");
+        logger.narrative("[Scheduler] Desembarque completado -> deteniendo música (fade 2s)");
         this.musicController.stopMusic();
       }
       // GATE y BOARDING se controlan manualmente (botón de la UI / cierre de
@@ -265,7 +266,7 @@ export class Scheduler {
     await this.syncDelayEventThresholds();
     this.narrativeOrchestrator.setManualMode(mode === "test");
     this.flightContext.setTestMode(mode === "test");
-    console.log(`[Scheduler] Vuelo iniciado en modo: ${mode} (forceRefresh: ${this.forceScenarioRefresh})`);
+    logger.narrative(`[Scheduler] Vuelo iniciado en modo: ${mode} (forceRefresh: ${this.forceScenarioRefresh})`);
 
     // Recomponer el funcionamiento según el escenario: el primer paso de puerta
     // (gate_crew_start_soon) se dispara según su AFTER_DELAY medido desde el
@@ -285,7 +286,7 @@ export class Scheduler {
       this.flightContext.setFlightStartPreferences(preferences);
     } catch {}
     fileLogger.log('[Scheduler] ✈️ Preferencias de inicio aplicadas', preferences);
-    console.log('[Scheduler] Preferencias de inicio', preferences);
+    logger.narrative('[Scheduler] Preferencias de inicio', preferences);
     if (preferences.initialState === 'gate_engines_on' && !preferences.includeBoarding) {
       this.boardingStepsCompleted = true;
     }
@@ -318,7 +319,7 @@ export class Scheduler {
       if (s.eventKey !== "gate_crew_started") return s;
 
       if (s.transition !== NarrativeTransition.AFTER_DELAY) {
-        console.log(`[Scheduler] gate_crew_started no tiene AFTER_DELAY; ignorando delay del usuario`);
+        logger.narrative(`[Scheduler] gate_crew_started no tiene AFTER_DELAY; ignorando delay del usuario`);
         fileLogger.log('[Scheduler] gate_crew_started sin AFTER_DELAY; delay ignorado', { transition: NarrativeTransition[s.transition] });
         return s;
       }
@@ -340,7 +341,7 @@ export class Scheduler {
         s.scheduler_rule
       );
       changed = true;
-      console.log(`[Scheduler] Aplicando delay a ${s.eventKey}:`, {
+      logger.narrative(`[Scheduler] Aplicando delay a ${s.eventKey}:`, {
         stepExists: true,
         transition: NarrativeTransition[s.transition],
         userDelay: userDelayMs / 1000,
@@ -358,7 +359,7 @@ export class Scheduler {
     this.currentMode = mode;
     this.narrativeOrchestrator.setManualMode(mode === "test");
     this.flightContext.setTestMode(mode === "test");
-    console.log(`[Scheduler] Modo de ejecución: ${mode}`);
+    logger.narrative(`[Scheduler] Modo de ejecución: ${mode}`);
   }
 
   getMode(): ExecutionMode {
@@ -385,16 +386,16 @@ export class Scheduler {
     const callId = this.callId;
 
     try {
-      console.log("[SCHEDULER TRACE]");
-      console.log("action: startScenario");
-      console.log("phase: " + "n/a");
-      console.log("scenarioBefore: " + (this.currentScenario?.name ?? "null"));
-      console.log("scenarioAfter: " + name);
-      console.log("reason: ui-boarding-button");
-      console.log("callId: " + callId);
+      logger.narrative("[SCHEDULER TRACE]");
+      logger.narrative("action: startScenario");
+      logger.narrative("phase: " + "n/a");
+      logger.narrative("scenarioBefore: " + (this.currentScenario?.name ?? "null"));
+      logger.narrative("scenarioAfter: " + name);
+      logger.narrative("reason: ui-boarding-button");
+      logger.narrative("callId: " + callId);
 
       const scenarioKey = this.resolveFlightScenarioKey();
-      console.log(`[Scheduler] startScenario (modo: ${this.currentMode}, scenarioKey: ${scenarioKey})`);
+      logger.narrative(`[Scheduler] startScenario (modo: ${this.currentMode}, scenarioKey: ${scenarioKey})`);
       const scenario = await ScenarioFactory.getByName(name, scenarioKey, this.forceScenarioRefresh);
       this.switchScenario(scenario);
     } finally {
@@ -414,15 +415,15 @@ export class Scheduler {
     const callId = this.callId;
 
     try {
-      console.log("[SCHEDULER TRACE]");
-      console.log("action: startBoarding");
-      console.log("phase: " + "n/a");
-      console.log("scenarioBefore: " + (this.currentScenario?.name ?? "null"));
-      console.log("reason: ui-boarding-button");
-      console.log("callId: " + callId);
+      logger.narrative("[SCHEDULER TRACE]");
+      logger.narrative("action: startBoarding");
+      logger.narrative("phase: " + "n/a");
+      logger.narrative("scenarioBefore: " + (this.currentScenario?.name ?? "null"));
+      logger.narrative("reason: ui-boarding-button");
+      logger.narrative("callId: " + callId);
 
       const scenarioKey = this.resolveFlightScenarioKey();
-      console.log(`[Scheduler] startBoarding (modo: ${this.currentMode}, scenarioKey: ${scenarioKey}, forceRefresh: ${this.forceScenarioRefresh})`);
+      logger.narrative(`[Scheduler] startBoarding (modo: ${this.currentMode}, scenarioKey: ${scenarioKey}, forceRefresh: ${this.forceScenarioRefresh})`);
       const scenario = await ScenarioFactory.getByName("boarding", scenarioKey, this.forceScenarioRefresh);
 
       // Re-check tras el await (evita doble carga por carrera)
@@ -437,7 +438,7 @@ export class Scheduler {
       this.emitPhaseEvent(FlightPhase.BOARDING);
       this.emit("phase:changed", { phase: this.currentPhase });
       // Embarque iniciado → reproducir la música ambiental seleccionada.
-      console.log("[Scheduler] Embarque iniciado -> iniciando música ambiental");
+      logger.narrative("[Scheduler] Embarque iniciado -> iniciando música ambiental");
       void this.musicController.startMusic();
     } finally {
       this.releaseTransition();
@@ -476,13 +477,14 @@ export class Scheduler {
       "LANDING\0TAXI_TO_GATE",
     ]);
     if (recovery.has(from + "\0" + toNorm)) {
-      console.log(`[Scheduler] Transición de recuperación aceptada: ${from} → ${toNorm}`);
+      logger.narrative(`[Scheduler] Transición de recuperación aceptada: ${from} → ${toNorm}`);
       return true;
     }
     return false;
   }
 
   async enterPhase(phase: FlightPhase, source: TransitionSource = 'auto'): Promise<void> {
+    // Registro permanente de transición de fase (siempre activo).
     console.log('[Scheduler] 🔄 enterPhase llamado:', {
       phase,
       source,
@@ -534,7 +536,7 @@ export class Scheduler {
       this.clearPhaseAutoAdvance();
 
       const scenarioKey = this.resolveFlightScenarioKey();
-      console.log(
+      logger.narrative(
         `[Scheduler] Resolviendo escenario para fase ${phase} (modo: ${this.currentMode}, scenarioKey: ${scenarioKey}, forceRefresh: ${this.forceScenarioRefresh})`
       );
       const scenario = await ScenarioFactory.getForPhase(phase, scenarioKey, this.forceScenarioRefresh);
@@ -577,7 +579,7 @@ export class Scheduler {
         this.currentPhase !== "BOARDING" &&
         stepsCount === 0
       ) {
-        console.log(
+        logger.narrative(
           `[Scheduler] Fase ${this.currentPhase} sin pasos narrativos; avance automático en 5s`
         );
         this.schedulePhaseAutoAdvance(this.currentPhase, 5000);
@@ -593,13 +595,13 @@ export class Scheduler {
       // Música ambiental: se inicia en el embarque (BOARDING), en el desembarque
       // (AT_GATE) y se detiene al finalizar el vuelo (FLIGHT_COMPLETED).
       if (phase === FlightPhase.BOARDING) {
-        console.log("[Scheduler] Embarque -> iniciando música ambiental");
+        logger.narrative("[Scheduler] Embarque -> iniciando música ambiental");
         void this.musicController.startMusic();
       } else if (phase === FlightPhase.AT_GATE) {
-        console.log("[Scheduler] Desembarque (AT_GATE) -> iniciando música ambiental");
+        logger.narrative("[Scheduler] Desembarque (AT_GATE) -> iniciando música ambiental");
         void this.musicController.startMusic();
       } else if (phase === FlightPhase.FLIGHT_COMPLETED) {
-        console.log("[Scheduler] Vuelo finalizado -> deteniendo música (fade 2s)");
+        logger.narrative("[Scheduler] Vuelo finalizado -> deteniendo música (fade 2s)");
         this.musicController.stopMusic();
       }
 
@@ -610,13 +612,13 @@ export class Scheduler {
         try {
           const zuluTime = this.flightContext.getTelemetry().zuluTime;
           const cruiseTimeSeconds = this.flightContext.getFlight().cruiseTimeSeconds;
-          console.log('[Scheduler] Registrando cruiseEntryTime:', {
+          logger.narrative('[Scheduler] Registrando cruiseEntryTime:', {
             zuluTime,
             cruiseTimeSeconds,
           });
           if (typeof zuluTime === "number" && !Number.isNaN(zuluTime)) {
             this.flightContext.updateFlight({ cruiseEntryTime: zuluTime });
-            console.log("[Scheduler] cruiseEntryTime registrado:", zuluTime);
+            logger.narrative("[Scheduler] cruiseEntryTime registrado:", zuluTime);
           } else {
             console.warn("[Scheduler] cruiseEntryTime NO registrado: zuluTime sin dato", { zuluTime });
           }
@@ -629,7 +631,7 @@ export class Scheduler {
       if (phase === FlightPhase.CRUISE) {
         this.scheduleSpecialEvent();
       } else if (this.specialEventTimerId) {
-        console.log("[Scheduler] Cancelando evento especial pendiente al salir de CRUISE");
+        logger.narrative("[Scheduler] Cancelando evento especial pendiente al salir de CRUISE");
         this.clearSpecialEventTimer();
       }
     } finally {
@@ -653,10 +655,10 @@ export class Scheduler {
 
   private emitPhaseEvent(phase: FlightPhase): void {
     if (phase === FlightPhase.GATE) {
-      console.log("[Scheduler] Fase 0 (GATE) entrada -> fase:gate:entered");
+      logger.narrative("[Scheduler] Fase 0 (GATE) entrada -> fase:gate:entered");
       this.emit("phase:gate:entered", { phase: "GATE" });
     } else if (phase === FlightPhase.BOARDING) {
-      console.log("[Scheduler] Embarque iniciado -> fase:boarding:started");
+      logger.narrative("[Scheduler] Embarque iniciado -> fase:boarding:started");
       this.emit("phase:boarding:started", { phase: "BOARDING" });
     }
   }
@@ -668,21 +670,21 @@ export class Scheduler {
     const after = scenario?.name ?? "null";
     this.clearPhaseAutoAdvance();
 
-    console.log("[SCHEDULER TRACE]");
-    console.log("action: switchScenario");
-    console.log("phase: " + "n/a");
-    console.log("scenarioBefore: " + before);
-    console.log("scenarioAfter: " + after);
-    console.log("reason: scenario-switch");
-    console.log("callId: " + callId);
+    logger.narrative("[SCHEDULER TRACE]");
+    logger.narrative("action: switchScenario");
+    logger.narrative("phase: " + "n/a");
+    logger.narrative("scenarioBefore: " + before);
+    logger.narrative("scenarioAfter: " + after);
+    logger.narrative("reason: scenario-switch");
+    logger.narrative("callId: " + callId);
 
     this.currentScenario?.onExit(this.flightContext);
 
     if (this.currentScenario) {
-      console.log("[NARRATIVE]");
-      console.log("Cancelling pending transition");
-      console.log("↓");
-      console.log(this.currentScenario.name);
+      logger.narrative("[NARRATIVE]");
+      logger.narrative("Cancelling pending transition");
+      logger.narrative("↓");
+      logger.narrative(this.currentScenario.name);
       this.narrativeOrchestrator.cancelPendingTimers();
     }
 
@@ -711,7 +713,7 @@ export class Scheduler {
     this.queue.clear();
 
     if (!this.currentScenario) {
-      console.log("[Scheduler] Sin escenario para esta fase; no se ejecuta narrativa.");
+      logger.narrative("[Scheduler] Sin escenario para esta fase; no se ejecuta narrativa.");
       return;
     }
 
@@ -720,7 +722,7 @@ export class Scheduler {
     const def = this.currentScenario.definition;
 
     // Log de fase al entrar: primer paso y todos los pasos (diagnóstico)
-    console.log('[Scheduler] Entrando en fase:', {
+    logger.narrative('[Scheduler] Entrando en fase:', {
       phase: this.currentPhase,
       firstStep: def.steps[0]?.eventKey,
       allSteps: def.steps.map((s) => s.eventKey),
@@ -731,7 +733,7 @@ export class Scheduler {
     // (p.ej. preflight_capt_delay si aparece publicado aunque no se use).
     for (const s of def.steps) {
       if (s.transition === NarrativeTransition.WAIT_CONDITION) {
-        console.log(`[Scenario] Configuración WAIT_CONDITION ${s.eventKey}:`, {
+        logger.narrative(`[Scenario] Configuración WAIT_CONDITION ${s.eventKey}:`, {
           eventKey: s.eventKey,
           order: s.id,
           transition: NarrativeTransition[s.transition],
@@ -746,25 +748,25 @@ export class Scheduler {
       }
     }
 
-    console.log("[SCENARIO]");
-    console.log("");
-    console.log(def.scenario);
-    console.log("↓");
-    console.log("Definition loaded");
-    console.log("↓");
-    console.log(def.steps.length + " Narrative Steps");
-    console.log("↓");
+    logger.narrative("[SCENARIO]");
+    logger.narrative("");
+    logger.narrative(def.scenario);
+    logger.narrative("↓");
+    logger.narrative("Definition loaded");
+    logger.narrative("↓");
+    logger.narrative(def.steps.length + " Narrative Steps");
+    logger.narrative("↓");
     def.steps.forEach((step, i) => {
-      console.log("#" + step.id);
-      console.log(step.eventKey);
-      console.log("Transition: " + NarrativeTransition[step.transition]);
+      logger.narrative("#" + step.id);
+      logger.narrative(step.eventKey);
+      logger.narrative("Transition: " + NarrativeTransition[step.transition]);
       if (i < def.steps.length - 1) {
-        console.log("↓");
+        logger.narrative("↓");
       }
     });
 
     // Reiniciar narrativa al entrar en fase (evita GATE repetidos en BOARDING)
-    console.log('[NarrativeOrchestrator] Cargando fase:', {
+    logger.narrative('[NarrativeOrchestrator] Cargando fase:', {
       phase: this.currentPhase,
       firstStep: def.steps[0]?.eventKey,
       totalSteps: def.steps.length,
@@ -777,21 +779,21 @@ export class Scheduler {
     this.narrativeEngine.load(defToLoad);
     this.narrativeEngine.reset();
 
-    console.log("[NARRATIVE]");
-    console.log("Scenario loaded");
-    console.log("↓");
-    console.log("Current Step");
-    console.log("↓");
-    console.log(this.narrativeEngine.currentStep()?.eventKey);
+    logger.narrative("[NARRATIVE]");
+    logger.narrative("Scenario loaded");
+    logger.narrative("↓");
+    logger.narrative("Current Step");
+    logger.narrative("↓");
+    logger.narrative(this.narrativeEngine.currentStep()?.eventKey);
 
-    console.log("[SCHEDULER TRACE]");
-    console.log("action: switchScenario.afterLoad");
-    console.log("phase: " + "n/a");
-    console.log("scenarioBefore: " + before);
-    console.log("scenarioAfter: " + after);
-    console.log("reason: scenario-switch-completed");
-    console.log("callId: " + callId);
-    console.log("currentStepEvent: " + (this.narrativeEngine.currentStep()?.eventKey ?? "null"));
+    logger.narrative("[SCHEDULER TRACE]");
+    logger.narrative("action: switchScenario.afterLoad");
+    logger.narrative("phase: " + "n/a");
+    logger.narrative("scenarioBefore: " + before);
+    logger.narrative("scenarioAfter: " + after);
+    logger.narrative("reason: scenario-switch-completed");
+    logger.narrative("callId: " + callId);
+    logger.narrative("currentStepEvent: " + (this.narrativeEngine.currentStep()?.eventKey ?? "null"));
 
     this.narrativeOrchestrator.executeCurrentStep("scheduler:switchScenario");
   }
@@ -808,12 +810,12 @@ export class Scheduler {
     );
     for (const action of actions) {
       if (narrativeKeys.has(action.event)) {
-        console.log("[Scheduler] Skipping ruleEngine dispatch for narrative event: " + action.event);
+        logger.narrative("[Scheduler] Skipping ruleEngine dispatch for narrative event: " + action.event);
         continue;
       }
 
       if (action.type === "timer") {
-        console.log("[Scheduler] Scheduling " + action.event + " in " + action.delayMs + "ms (id=" + action.id + ")");
+        logger.narrative("[Scheduler] Scheduling " + action.event + " in " + action.delayMs + "ms (id=" + action.id + ")");
         this.timerManager.schedule({
           id: action.id,
           delayMs: action.delayMs,
@@ -893,12 +895,12 @@ export class Scheduler {
       while (!this.narrativeEngine.isCompleted()) {
         const cur = this.narrativeEngine.currentStep();
         if (!cur || !cur.optional) break;
-        console.log(`[Scheduler] Cierre de puertas: omitiendo paso opcional pendiente ${cur.eventKey} (${NarrativeTransition[cur.transition]})`);
+        logger.narrative(`[Scheduler] Cierre de puertas: omitiendo paso opcional pendiente ${cur.eventKey} (${NarrativeTransition[cur.transition]})`);
         this.narrativeEngine.onStepCompleted();
       }
       if (this.narrativeEngine.isCompleted()) {
         this.boardingStepsCompleted = true;
-        console.log("[Scheduler] BOARDING completado tras omitir opcionales, habilitando cierre");
+        logger.narrative("[Scheduler] BOARDING completado tras omitir opcionales, habilitando cierre");
       } else if (!this.narrativeEngine.hasPendingSteps()) {
         // Sin pendientes no opcionales: no bloquear indefinidamente.
         this.boardingStepsCompleted = true;
@@ -911,7 +913,7 @@ export class Scheduler {
     }
 
     this.doorsClosed = true;
-    console.log("[Scheduler] Cierre de puertas (manual) -> PRE_FLIGHT");
+    logger.narrative("[Scheduler] Cierre de puertas (manual) -> PRE_FLIGHT");
     this.musicController.stopMusic();
     // PRE_FLIGHT ahora permitido desde 'user' (botón) o 'simulator' (puertas). Usar 'user' para traza.
     void this.enterPhase(FlightPhase.PRE_FLIGHT, 'user');
@@ -932,7 +934,7 @@ export class Scheduler {
       while (!this.narrativeEngine.isCompleted()) {
         const cur = this.narrativeEngine.currentStep();
         if (!cur || !cur.optional) break;
-        console.log(`[Scheduler] notifyDoorsClosed: omitiendo opcional ${cur.eventKey} para PRE_FLIGHT`);
+        logger.narrative(`[Scheduler] notifyDoorsClosed: omitiendo opcional ${cur.eventKey} para PRE_FLIGHT`);
         this.narrativeEngine.onStepCompleted();
       }
       if (this.narrativeEngine.isCompleted() || !this.narrativeEngine.hasPendingSteps()) {
@@ -947,7 +949,7 @@ export class Scheduler {
     }
 
     this.doorsClosed = true;
-    console.log("[Scheduler] Cierre de puertas detectado desde el simulador -> PRE_FLIGHT");
+    logger.narrative("[Scheduler] Cierre de puertas detectado desde el simulador -> PRE_FLIGHT");
     fileLogger.log('[Scheduler] Cierre de puertas (simulador) -> PRE_FLIGHT', { boardingStepsCompleted: this.boardingStepsCompleted });
     this.musicController.stopMusic();
     void this.enterPhase(FlightPhase.PRE_FLIGHT, 'doors');
@@ -972,11 +974,11 @@ export class Scheduler {
     const normalized = normalizePhaseKey(phase);
     const idx = seq.findIndex((p) => normalizePhaseKey(p) === normalized);
     if (idx < 0 || idx >= seq.length - 1) {
-      console.log(`[Scheduler] Fase ${normalized} sin siguiente fase (fin de secuencia)`);
+      logger.narrative(`[Scheduler] Fase ${normalized} sin siguiente fase (fin de secuencia)`);
       return;
     }
     try {
-      console.log('[Scheduler] 🔄 Verificando finalización de fase:', {
+      logger.narrative('[Scheduler] 🔄 Verificando finalización de fase:', {
         phase: this.currentPhase,
         allStepsCompleted: this.narrativeEngine.isPhaseComplete(),
         hasPendingWaitConditions: this.narrativeEngine.hasPendingWaitConditions(),
@@ -995,7 +997,7 @@ export class Scheduler {
       }
     } catch {}
     const next = seq[idx + 1];
-    console.log(`[Scheduler] 🚗 Avance automático de fase: ${normalized} -> ${normalizePhaseKey(next)} (${source})`);
+    logger.narrative(`[Scheduler] 🚗 Avance automático de fase: ${normalized} -> ${normalizePhaseKey(next)} (${source})`);
     void this.enterPhase(next, source);
   }
 
@@ -1004,7 +1006,7 @@ export class Scheduler {
     this.clearPhaseAutoAdvance();
     this.phaseAutoAdvanceTimer = setTimeout(() => {
       this.phaseAutoAdvanceTimer = null;
-      console.log(`[Scheduler] Fallback: avanzando desde ${phase} sin escenario`);
+      logger.narrative(`[Scheduler] Fallback: avanzando desde ${phase} sin escenario`);
       this.advanceAfterNarrative(phase, 'fallback');
     }, delayMs);
   }
@@ -1031,14 +1033,14 @@ export class Scheduler {
 
     // 1. Omitir si comenzó en cabecera de pista
     if (prefs?.initialState === 'runway') {
-      console.log('[Scheduler] Omitiendo gate_crew_start_soon (inicio en pista)');
+      logger.narrative('[Scheduler] Omitiendo gate_crew_start_soon (inicio en pista)');
       fileLogger.log('[Scheduler] Omitiendo gate_crew_start_soon (inicio en pista)', { initialState: prefs.initialState });
       return;
     }
 
     // 2. Omitir si está en tierra pero no en una puerta de embarque
     if (telemetry.simOnGround === true && telemetry.atcOnParkingSpot === false) {
-      console.log('[Scheduler] Omitiendo gate_crew_start_soon (fuera de puerta)');
+      logger.narrative('[Scheduler] Omitiendo gate_crew_start_soon (fuera de puerta)');
       fileLogger.log('[Scheduler] Omitiendo gate_crew_start_soon (fuera de puerta)', {
         simOnGround: telemetry.simOnGround,
         atcOnParkingSpot: telemetry.atcOnParkingSpot,
@@ -1046,12 +1048,12 @@ export class Scheduler {
       return;
     }
 
-    console.log(`[Scheduler] ⏱️ Programando gate_crew_start_soon en ${this.GATE_ANNOUNCEMENT_DELAY / 1000} segundos`);
+    logger.narrative(`[Scheduler] ⏱️ Programando gate_crew_start_soon en ${this.GATE_ANNOUNCEMENT_DELAY / 1000} segundos`);
     fileLogger.log('[Scheduler] Programando gate_crew_start_soon', { delayMs: this.GATE_ANNOUNCEMENT_DELAY });
 
     this.gateTimer = setTimeout(() => {
       this.gateTimer = null;
-      console.log('[Scheduler] 🎯 Ejecutando gate_crew_start_soon');
+      logger.narrative('[Scheduler] 🎯 Ejecutando gate_crew_start_soon');
       fileLogger.log('[Scheduler] Ejecutando gate_crew_start_soon');
       this.triggerGateAnnouncement();
     }, this.GATE_ANNOUNCEMENT_DELAY);
@@ -1065,10 +1067,10 @@ export class Scheduler {
       return;
     }
     if (step) {
-      console.log('[Scheduler] 🎯 Disparando paso narrative gate_crew_start_soon');
+      logger.narrative('[Scheduler] 🎯 Disparando paso narrative gate_crew_start_soon');
       this.narrativeOrchestrator.executeStep(step, def, "auto");
     } else {
-      console.log('[Scheduler] 🎯 Dispatch fallback gate_crew_start_soon vía dispatcher');
+      logger.narrative('[Scheduler] 🎯 Dispatch fallback gate_crew_start_soon vía dispatcher');
       this.dispatcher.dispatch(def, this.flightContext).catch((err) => {
         console.error('[Scheduler] ❌ dispatch fallido (gate fallback):', { event: def.eventKey, error: (err as Error)?.message ?? String(err) });
       });
@@ -1089,12 +1091,12 @@ export class Scheduler {
 
     // Solo si está habilitado y hay texto
     if (!flight?.specialEventEnabled || !flight?.specialEvent || flight.specialEvent.trim() === "") {
-      console.log("[Scheduler] Evento especial no habilitado o sin texto");
+      logger.narrative("[Scheduler] Evento especial no habilitado o sin texto");
       return;
     }
 
-    console.log(`[Scheduler] ⏱️ Programando evento especial en ${this.SPECIAL_EVENT_DELAY / 1000} segundos`);
-    console.log(`[Scheduler] 📝 Texto: "${flight.specialEvent}"`);
+    logger.narrative(`[Scheduler] ⏱️ Programando evento especial en ${this.SPECIAL_EVENT_DELAY / 1000} segundos`);
+    logger.narrative(`[Scheduler] 📝 Texto: "${flight.specialEvent}"`);
 
     // Cancelar timer previo si existe
     this.clearSpecialEventTimer();
@@ -1107,7 +1109,7 @@ export class Scheduler {
       event: "captain_special_event",
       onFire: () => {
         this.specialEventTimerId = null;
-        console.log("[Scheduler] 🎉 Ejecutando evento especial");
+        logger.narrative("[Scheduler] 🎉 Ejecutando evento especial");
         this.triggerSpecialEvent();
       },
     });
@@ -1120,13 +1122,13 @@ export class Scheduler {
       return;
     }
 
-    console.log("[Scheduler] 🎉 Ejecutando evento especial con texto:", flight.specialEvent);
+    logger.narrative("[Scheduler] 🎉 Ejecutando evento especial con texto:", flight.specialEvent);
 
     const step = this.narrativeEngine.findStepByEventKey("captain_special_event");
     if (step) {
       const def = EventCatalogService.get(step.eventKey);
       if (def) {
-        console.log("[Scheduler] 🎉 Disparando paso narrative captain_special_event");
+        logger.narrative("[Scheduler] 🎉 Disparando paso narrative captain_special_event");
         this.narrativeOrchestrator.executeStep(step, def, "auto");
       } else {
         console.warn("[Scheduler] Evento especial definición no encontrada en catálogo para:", step.eventKey);
@@ -1143,7 +1145,7 @@ export class Scheduler {
       // Fallback: dispatch directo si el escenario no contiene el paso pero el catálogo sí
       const fallbackDef = EventCatalogService.get("captain_special_event");
       if (fallbackDef) {
-        console.log("[Scheduler] 🎉 Dispatch fallback captain_special_event vía dispatcher");
+        logger.narrative("[Scheduler] 🎉 Dispatch fallback captain_special_event vía dispatcher");
         this.dispatcher.dispatch(fallbackDef, this.flightContext).catch((err) => {
           console.error('[Scheduler] ❌ dispatch fallido (special event fallback):', { event: fallbackDef.eventKey, error: (err as Error)?.message ?? String(err) });
         });

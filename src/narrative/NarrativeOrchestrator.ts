@@ -8,6 +8,7 @@ import { NarrativeStep } from "../scenarios/narrative/NarrativeStep";
 import { NarrativeTransition } from "../scenarios/narrative/NarrativeTransition";
 import { EventDefinition } from "../events/types";
 import { fileLogger } from "../services/FileLogger";
+import { logger } from "../utils/logger";
 
 // Tiempo máximo de espera por la finalización del audio de un paso antes de
 // avanzar la narrativa. Es un safety net; debe cubrir el audio más largo del
@@ -114,7 +115,7 @@ export class NarrativeOrchestrator {
 
     // El paso WAIT_CONDITION debe esperar indefinidamente hasta que se cumpla
     // la condición o el usuario intervenga manualmente. No hay timeout automático.
-    console.log('[NarrativeOrchestrator] ✅ Timeout de transición revertido. Los pasos WAIT_CONDITION esperan indefinidamente.');
+    logger.narrative('[NarrativeOrchestrator] ✅ Timeout de transición revertido. Los pasos WAIT_CONDITION esperan indefinidamente.');
   }
 
   on(event: string, callback: (payload: any) => void): () => void {
@@ -144,43 +145,48 @@ export class NarrativeOrchestrator {
 
     const step = this.narrativeEngine.currentStep();
     if (!step) {
-      console.log("[NARRATIVE TRACE]");
-      console.log("action: handleAnnouncementCompleted");
-      console.log("executionId: " + this.execCounter);
-      console.log("scenario: " + this.narrativeEngine.getScenarioName());
-      console.log("stepIndex: " + this.narrativeEngine.currentIndex());
-      console.log("event: null");
-      console.log("transition: null");
-      console.log("reason: no-active-step");
-      console.log("completedEventKey: " + (completedEventKey ?? "undefined"));
-      console.log("[NARRATIVE]");
-      console.log("No active step");
-      console.log("Ignoring completion");
+      logger.narrative("[NARRATIVE TRACE]");
+      logger.narrative("action: handleAnnouncementCompleted");
+      logger.narrative("executionId: " + this.execCounter);
+      logger.narrative("scenario: " + this.narrativeEngine.getScenarioName());
+      logger.narrative("stepIndex: " + this.narrativeEngine.currentIndex());
+      logger.narrative("event: null");
+      logger.narrative("transition: null");
+      logger.narrative("reason: no-active-step");
+      logger.narrative("completedEventKey: " + (completedEventKey ?? "undefined"));
+      logger.narrative("[NARRATIVE]");
+      logger.narrative("No active step");
+      logger.narrative("Ignoring completion");
       return;
     }
 
-    console.log("[NARRATIVE TRACE]");
-    console.log("action: handleAnnouncementCompleted");
-    console.log("executionId: " + this.execCounter);
-    console.log("scenario: " + this.narrativeEngine.getScenarioName());
-    console.log("stepIndex: " + this.narrativeEngine.currentIndex());
-    console.log("event: " + step.eventKey);
-    console.log("transition: " + NarrativeTransition[step.transition]);
-    console.log("reason: completed-event");
-    console.log("completedEventKey: " + (completedEventKey ?? "undefined"));
+    logger.narrative("[NARRATIVE TRACE]");
+    logger.narrative("action: handleAnnouncementCompleted");
+    logger.narrative("executionId: " + this.execCounter);
+    logger.narrative("scenario: " + this.narrativeEngine.getScenarioName());
+    logger.narrative("stepIndex: " + this.narrativeEngine.currentIndex());
+    logger.narrative("event: " + step.eventKey);
+    logger.narrative("transition: " + NarrativeTransition[step.transition]);
+    logger.narrative("reason: completed-event");
+    logger.narrative("completedEventKey: " + (completedEventKey ?? "undefined"));
 
-    console.log("[NARRATIVE]");
-    console.log("Completed event received");
-    console.log("Event: " + (completedEventKey ?? "(unknown)"));
-    console.log("Current Step: " + step.eventKey);
+    logger.narrative("[NARRATIVE]");
+    logger.narrative("Completed event received");
+    logger.narrative("Event: " + (completedEventKey ?? "(unknown)"));
+    logger.narrative("Current Step: " + step.eventKey);
 
     if (completedEventKey && completedEventKey !== step.eventKey) {
-      console.log("Match: NO");
-      console.log("Ignoring completion");
+      logger.narrative("Match: NO");
+      logger.narrative("Ignoring completion");
       return;
     }
 
-    console.log("Match: YES");
+    logger.narrative("Match: YES");
+
+    // Registro focalizado PERMANENTE: avance real de la narrativa.
+    logger.audio(`✅ Paso completado: ${step.eventKey}`, {
+      nextStep: this.narrativeEngine.getNextStep()?.eventKey ?? null,
+    });
 
     // Bajo la semántica actual, AFTER_DELAY ya se reprodujo (su delay fue
     // PREVIO a la reproducción); al completarse el audio se avanza al siguiente.
@@ -198,11 +204,11 @@ export class NarrativeOrchestrator {
       step.transition === NarrativeTransition.IMMEDIATE ||
       this.waitingForAudio
     ) {
-      console.log(`[NarrativeOrchestrator] ✅ Audio completado para: ${step.eventKey}`);
+      logger.narrative(`[NarrativeOrchestrator] ✅ Audio completado para: ${step.eventKey}`);
       this.clearAudioCompletionNet(step.eventKey);
       // P1: confirmación de avance (nextStep capturado ANTES de avanzar).
       try {
-        console.log('[NarrativeOrchestrator] ✅ Avanzando narrativa para transición:', {
+        logger.narrative('[NarrativeOrchestrator] ✅ Avanzando narrativa para transición:', {
           eventKey: step.eventKey,
           transition: NarrativeTransition[step.transition],
           nextStep: this.narrativeEngine.getNextStep()?.eventKey ?? null,
@@ -210,7 +216,7 @@ export class NarrativeOrchestrator {
       } catch {}
       // Log de auditoría WAIT_CONDITION
       if (step.transition === NarrativeTransition.WAIT_CONDITION) {
-        console.log('[NarrativeEngine] Estado del paso:', {
+        logger.narrative('[NarrativeEngine] Estado del paso:', {
           eventKey: step.eventKey,
           isCompleted: this.narrativeEngine.isStepCompleted(step.eventKey),
           currentIndex: this.narrativeEngine.currentIndex(),
@@ -278,46 +284,46 @@ export class NarrativeOrchestrator {
 
     // Guard (Stage 18D): a completed scenario must never execute another step.
     if (this.narrativeEngine.isCompleted()) {
-      console.log("[NARRATIVE TRACE]");
-      console.log("action: executeCurrentStep");
-      console.log("executionId: " + executionId);
-      console.log("scenario: " + this.narrativeEngine.getScenarioName());
-      console.log("stepIndex: " + this.narrativeEngine.currentIndex());
-      console.log("event: null");
-      console.log("transition: null");
-      console.log("reason: scenario-completed-guard");
+      logger.narrative("[NARRATIVE TRACE]");
+      logger.narrative("action: executeCurrentStep");
+      logger.narrative("executionId: " + executionId);
+      logger.narrative("scenario: " + this.narrativeEngine.getScenarioName());
+      logger.narrative("stepIndex: " + this.narrativeEngine.currentIndex());
+      logger.narrative("event: null");
+      logger.narrative("transition: null");
+      logger.narrative("reason: scenario-completed-guard");
       return;
     }
 
     const step = this.narrativeEngine.currentStep();
     if (!step) {
-      console.log("[NARRATIVE TRACE]");
-      console.log("action: executeCurrentStep");
-      console.log("executionId: " + executionId);
-      console.log("scenario: " + this.narrativeEngine.getScenarioName());
-      console.log("stepIndex: " + this.narrativeEngine.currentIndex());
-      console.log("event: null");
-      console.log("transition: null");
-      console.log("reason: " + (reason ?? "unknown"));
+      logger.narrative("[NARRATIVE TRACE]");
+      logger.narrative("action: executeCurrentStep");
+      logger.narrative("executionId: " + executionId);
+      logger.narrative("scenario: " + this.narrativeEngine.getScenarioName());
+      logger.narrative("stepIndex: " + this.narrativeEngine.currentIndex());
+      logger.narrative("event: null");
+      logger.narrative("transition: null");
+      logger.narrative("reason: " + (reason ?? "unknown"));
       return;
     }
 
-    console.log("[NARRATIVE TRACE]");
-    console.log("action: executeCurrentStep");
-    console.log("executionId: " + executionId);
-    console.log("scenario: " + this.narrativeEngine.getScenarioName());
-    console.log("stepIndex: " + this.narrativeEngine.currentIndex());
-    console.log("event: " + step.eventKey);
-    console.log("transition: " + NarrativeTransition[step.transition]);
-    console.log("reason: " + (reason ?? "unknown"));
+    logger.narrative("[NARRATIVE TRACE]");
+    logger.narrative("action: executeCurrentStep");
+    logger.narrative("executionId: " + executionId);
+    logger.narrative("scenario: " + this.narrativeEngine.getScenarioName());
+    logger.narrative("stepIndex: " + this.narrativeEngine.currentIndex());
+    logger.narrative("event: " + step.eventKey);
+    logger.narrative("transition: " + NarrativeTransition[step.transition]);
+    logger.narrative("reason: " + (reason ?? "unknown"));
 
-    console.log(
+    logger.narrative(
       `[NarrativeOrchestrator] Ejecutando paso ${step.eventKey} (modo: ${
         this.isTestMode ? "pruebas" : "normal"
       })`
     );
 
-    console.log("[NarrativeOrchestrator] Evaluando paso:", {
+    logger.narrative("[NarrativeOrchestrator] Evaluando paso:", {
       eventKey: step.eventKey,
       decision_maker: step.decision_maker,
       detection_strategy: step.detection_strategy,
@@ -326,7 +332,7 @@ export class NarrativeOrchestrator {
 
     // One-shot guard: max_once_per_flight — si ya se disparó, saltar al siguiente paso
     if ((step as any).restrictions?.max_once_per_flight && this.narrativeEngine.hasFired(step.eventKey)) {
-      console.log(`[NarrativeOrchestrator] Skipping ${step.eventKey}: max_once_per_flight ya disparado`);
+      logger.narrative(`[NarrativeOrchestrator] Skipping ${step.eventKey}: max_once_per_flight ya disparado`);
       fileLogger.log('[NarrativeOrchestrator] max_once_per_flight skip', { eventKey: step.eventKey });
       this.advanceNarrative("max_once_per_flight");
       return;
@@ -346,7 +352,7 @@ export class NarrativeOrchestrator {
         isNight = false;
       }
       if (!isNight) {
-        console.log(`[NarrativeOrchestrator] 🌙 Omitiendo ${step.eventKey}: requiere vuelo nocturno y es de día`);
+        logger.narrative(`[NarrativeOrchestrator] 🌙 Omitiendo ${step.eventKey}: requiere vuelo nocturno y es de día`);
         fileLogger.log('[NarrativeOrchestrator] Paso diurno omitido (requiere noche)', { eventKey: step.eventKey });
         this.emit("step:skipped", {
           step,
@@ -366,7 +372,7 @@ export class NarrativeOrchestrator {
     }
 
     if (!force && this.isTestMode) {
-      console.log(
+      logger.narrative(
         `[NarrativeOrchestrator] Paso automático en modo pruebas: ${step.eventKey}`
       );
     }
@@ -375,30 +381,30 @@ export class NarrativeOrchestrator {
     // En modo pruebas no se valida el productor: los pasos manuales esperan y
     // los automáticos se ejecutan directamente.
     if (!force && !this.isTestMode && step.producers && step.producers.length > 0 && !step.producers.includes(this.currentProducer)) {
-      console.log(`[NarrativeOrchestrator] Productor ${this.currentProducer} no permitido para este paso`);
-      console.log("[NARRATIVE TRACE]");
-      console.log("action: skipStep");
-      console.log("executionId: " + executionId);
-      console.log("scenario: " + this.narrativeEngine.getScenarioName());
-      console.log("stepIndex: " + this.narrativeEngine.currentIndex());
-      console.log("event: " + step.eventKey);
-      console.log("transition: " + NarrativeTransition[step.transition]);
-      console.log("reason: producer-not-allowed");
+      logger.narrative(`[NarrativeOrchestrator] Productor ${this.currentProducer} no permitido para este paso`);
+      logger.narrative("[NARRATIVE TRACE]");
+      logger.narrative("action: skipStep");
+      logger.narrative("executionId: " + executionId);
+      logger.narrative("scenario: " + this.narrativeEngine.getScenarioName());
+      logger.narrative("stepIndex: " + this.narrativeEngine.currentIndex());
+      logger.narrative("event: " + step.eventKey);
+      logger.narrative("transition: " + NarrativeTransition[step.transition]);
+      logger.narrative("reason: producer-not-allowed");
       return;
     }
 
-    console.log("[NARRATIVE]");
-    console.log("Step activated");
-    console.log("↓");
-    console.log(step.eventKey);
-    console.log("↓");
-    console.log("Transition: " + NarrativeTransition[step.transition]);
+    logger.narrative("[NARRATIVE]");
+    logger.narrative("Step activated");
+    logger.narrative("↓");
+    logger.narrative(step.eventKey);
+    logger.narrative("↓");
+    logger.narrative("Transition: " + NarrativeTransition[step.transition]);
     if (step.delayMs !== undefined) {
-      console.log("Delay: " + step.delayMs + "ms");
+      logger.narrative("Delay: " + step.delayMs + "ms");
     }
-    console.log("↓");
-    console.log("Resolving EventDefinition");
-    console.log("↓");
+    logger.narrative("↓");
+    logger.narrative("Resolving EventDefinition");
+    logger.narrative("↓");
 
     // Ancla de transición (p. ej. transition_to_taxi): WAIT_CONDITION bloqueante
     // normalmente SIN audio en el catálogo. Debe evaluarse ANTES de exigir
@@ -418,7 +424,7 @@ export class NarrativeOrchestrator {
     }
     if (!force && this.isPhaseTransitionWaitStep(step)) {
       const shouldExecute = this.evaluatePhaseTransitionStep(step);
-      console.log('[NarrativeOrchestrator] ¿Es phase_transition?:', {
+      logger.narrative('[NarrativeOrchestrator] ¿Es phase_transition?:', {
         eventKey: step.eventKey,
         transition: NarrativeTransition[step.transition],
         preconditionsType: (step as any).preconditions?.type ?? null,
@@ -440,7 +446,7 @@ export class NarrativeOrchestrator {
         return;
       }
       if (!this.eventCatalog.get(step.eventKey)) {
-        console.log(`[NarrativeOrchestrator] ✅ Ancla ${step.eventKey}: condiciones cumplidas, completando sin audio`);
+        logger.narrative(`[NarrativeOrchestrator] ✅ Ancla ${step.eventKey}: condiciones cumplidas, completando sin audio`);
         this.advanceNarrative("phase-transition-met");
         return;
       }
@@ -453,14 +459,14 @@ export class NarrativeOrchestrator {
       console.warn(
         `[NarrativeOrchestrator] Evento ${step.eventKey} no existe en el catálogo; se omite el paso`
       );
-      console.log("[NARRATIVE TRACE]");
-      console.log("action: skipStep");
-      console.log("executionId: " + executionId);
-      console.log("scenario: " + this.narrativeEngine.getScenarioName());
-      console.log("stepIndex: " + this.narrativeEngine.currentIndex());
-      console.log("event: " + step.eventKey);
-      console.log("transition: " + NarrativeTransition[step.transition]);
-      console.log("reason: event-not-in-catalog");
+      logger.narrative("[NARRATIVE TRACE]");
+      logger.narrative("action: skipStep");
+      logger.narrative("executionId: " + executionId);
+      logger.narrative("scenario: " + this.narrativeEngine.getScenarioName());
+      logger.narrative("stepIndex: " + this.narrativeEngine.currentIndex());
+      logger.narrative("event: " + step.eventKey);
+      logger.narrative("transition: " + NarrativeTransition[step.transition]);
+      logger.narrative("reason: event-not-in-catalog");
 
       this.advanceNarrative("event-not-in-catalog");
       return;
@@ -468,23 +474,23 @@ export class NarrativeOrchestrator {
 
     // Stage 19B: decide EXECUTE vs SKIP based on the enabledSwitch config.
     if (!this.isStepEnabled(eventDefinition)) {
-      console.log("[NARRATIVE]");
-      console.log("Event disabled");
-      console.log("↓");
-      console.log(step.eventKey);
-      console.log("↓");
-      console.log("enabledSwitch: " + (eventDefinition.enabledSwitch ?? "(none)"));
-      console.log("Config: " + this.switchConfigValue(eventDefinition.enabledSwitch));
-      console.log("↓");
-      console.log("Skipping");
-      console.log("[NARRATIVE TRACE]");
-      console.log("action: skipStep");
-      console.log("executionId: " + executionId);
-      console.log("scenario: " + this.narrativeEngine.getScenarioName());
-      console.log("stepIndex: " + this.narrativeEngine.currentIndex());
-      console.log("event: " + step.eventKey);
-      console.log("transition: " + NarrativeTransition[step.transition]);
-      console.log("reason: step-disabled");
+      logger.narrative("[NARRATIVE]");
+      logger.narrative("Event disabled");
+      logger.narrative("↓");
+      logger.narrative(step.eventKey);
+      logger.narrative("↓");
+      logger.narrative("enabledSwitch: " + (eventDefinition.enabledSwitch ?? "(none)"));
+      logger.narrative("Config: " + this.switchConfigValue(eventDefinition.enabledSwitch));
+      logger.narrative("↓");
+      logger.narrative("Skipping");
+      logger.narrative("[NARRATIVE TRACE]");
+      logger.narrative("action: skipStep");
+      logger.narrative("executionId: " + executionId);
+      logger.narrative("scenario: " + this.narrativeEngine.getScenarioName());
+      logger.narrative("stepIndex: " + this.narrativeEngine.currentIndex());
+      logger.narrative("event: " + step.eventKey);
+      logger.narrative("transition: " + NarrativeTransition[step.transition]);
+      logger.narrative("reason: step-disabled");
 
       this.advanceNarrative("step-disabled");
       return;
@@ -496,7 +502,7 @@ export class NarrativeOrchestrator {
     // fase). `force` (avance manual explícito) sí lo permite.
     if (!force && this.shouldSkipUnconfiguredSpecialEvent(step)) {
       const flight: any = this.flightContext?.getFlight?.() ?? {};
-      console.log(`[NarrativeOrchestrator] ⏩ Omitiendo ${step.eventKey}: evento especial no configurado por el usuario (specialEventEnabled=${String(flight?.specialEventEnabled ?? false)}, texto=${flight?.specialEvent ? "presente" : "vacío"})`);
+      logger.narrative(`[NarrativeOrchestrator] ⏩ Omitiendo ${step.eventKey}: evento especial no configurado por el usuario (specialEventEnabled=${String(flight?.specialEventEnabled ?? false)}, texto=${flight?.specialEvent ? "presente" : "vacío"})`);
       fileLogger.log('[NarrativeOrchestrator] Evento especial no configurado, paso omitido', {
         eventKey: step.eventKey,
         optional: step.optional,
@@ -511,14 +517,14 @@ export class NarrativeOrchestrator {
       return;
     }
 
-    console.log("[NARRATIVE]");
-    console.log("Event enabled");
-    console.log("↓");
-    console.log(step.eventKey);
-    console.log("↓");
-    console.log("enabledSwitch: " + (eventDefinition.enabledSwitch ?? "(none)"));
-    console.log("Config: " + this.switchConfigValue(eventDefinition.enabledSwitch));
-    console.log("↓");
+    logger.narrative("[NARRATIVE]");
+    logger.narrative("Event enabled");
+    logger.narrative("↓");
+    logger.narrative(step.eventKey);
+    logger.narrative("↓");
+    logger.narrative("enabledSwitch: " + (eventDefinition.enabledSwitch ?? "(none)"));
+    logger.narrative("Config: " + this.switchConfigValue(eventDefinition.enabledSwitch));
+    logger.narrative("↓");
 
     this.handleStepActivation(step, eventDefinition, force);
   }
@@ -599,7 +605,7 @@ export class NarrativeOrchestrator {
     const result =
       pre?.type === "phase_transition" ||
       (typeof step.eventKey === "string" && step.eventKey.startsWith("transition_to_"));
-    console.log('[NarrativeOrchestrator] isPhaseTransitionWaitStep:', {
+    logger.narrative('[NarrativeOrchestrator] isPhaseTransitionWaitStep:', {
       eventKey: step.eventKey,
       transition: NarrativeTransition[(step as any).transition],
       preconditionsType: pre?.type ?? null,
@@ -627,7 +633,7 @@ export class NarrativeOrchestrator {
    */
   private logWaitConditionEvaluation(step: NarrativeStep, result: boolean): void {
     try {
-      console.log('[NarrativeOrchestrator] 🔍 Evaluando WAIT_CONDITION:', {
+      logger.narrative('[NarrativeOrchestrator] 🔍 Evaluando WAIT_CONDITION:', {
         eventKey: step.eventKey,
         transition: NarrativeTransition[step.transition],
         preconditions: (step as any).preconditions ?? null,
@@ -737,7 +743,7 @@ export class NarrativeOrchestrator {
       while (!engine.isCompleted() && engine.currentIndex() < anchorIdx) {
         const cur = engine.currentStep();
         if (!cur || !cur.optional) return false;
-        console.log(`[NarrativeOrchestrator] ⏩ Omitiendo opcional ${cur.eventKey}: ancla ${anchor.eventKey} ya cumplida`);
+        logger.narrative(`[NarrativeOrchestrator] ⏩ Omitiendo opcional ${cur.eventKey}: ancla ${anchor.eventKey} ya cumplida`);
         this.emit("step:skipped", { step: cur, index: engine.currentIndex() } as StepSkippedEvent);
         engine.onStepCompleted();
       }
@@ -786,7 +792,7 @@ export class NarrativeOrchestrator {
     if (this.pendingTimers.has(id)) return;
     this.pendingTimers.add(id);
     const delayMs = 2000;
-    console.log(`[NarrativeOrchestrator] WAIT_CONDITION ${step.eventKey} no cumple precondiciones, re-evaluando en ${delayMs}ms`);
+    logger.polling(`[NarrativeOrchestrator] WAIT_CONDITION ${step.eventKey} no cumple precondiciones, re-evaluando en ${delayMs}ms`);
     this.timerManager.schedule({
       id,
       delayMs,
@@ -797,7 +803,7 @@ export class NarrativeOrchestrator {
         const cur = this.narrativeEngine.currentStep();
         if (!cur || cur.eventKey !== step.eventKey) return;
         if (this.narrativeEngine.isCompleted()) return;
-        console.log(`[NarrativeOrchestrator] Re-evaluando WAIT_CONDITION ${step.eventKey}`);
+        logger.polling(`[NarrativeOrchestrator] Re-evaluando WAIT_CONDITION ${step.eventKey}`);
         this.executeCurrentStep(`wait-poll:${step.eventKey}`);
       },
     });
@@ -827,7 +833,7 @@ export class NarrativeOrchestrator {
         const fl: any = ctx?.getFlight?.() ?? {};
         const fsmInfo: any = ctx?.getFSM?.() ?? {};
         const overrideMs = ctx?.getDelayOverride?.(step.eventKey) ?? null;
-        console.log(`[NarrativeOrchestrator] WAIT_CONDITION evaluado ${step.eventKey}: ${shouldExecute ? "TRUE" : "FALSE"}`, {
+        logger.narrative(`[NarrativeOrchestrator] WAIT_CONDITION evaluado ${step.eventKey}: ${shouldExecute ? "TRUE" : "FALSE"}`, {
           eventKey: step.eventKey,
           optional: step.optional,
           phase: fsmInfo?.currentState ?? fsmInfo?.getCurrentState?.() ?? null,
@@ -874,7 +880,7 @@ export class NarrativeOrchestrator {
       try {
         const ctx: any = this.flightContext;
         const tel: any = ctx?.getTelemetry?.() ?? {};
-        console.log('[NarrativeOrchestrator] Evaluando fase:', {
+        logger.narrative('[NarrativeOrchestrator] Evaluando fase:', {
           phase: this.getCurrentPhase(),
           currentStep: step.eventKey,
           transition: NarrativeTransition[step.transition],
@@ -882,7 +888,7 @@ export class NarrativeOrchestrator {
           optional: step.optional,
           isCompleted: this.narrativeEngine.isStepCompleted(step.eventKey),
         });
-        console.log(`[NarrativeOrchestrator] WAIT_CONDITION phase_transition evaluado ${step.eventKey}: ${shouldExecute ? "TRUE" : "FALSE"}`, {
+        logger.narrative(`[NarrativeOrchestrator] WAIT_CONDITION phase_transition evaluado ${step.eventKey}: ${shouldExecute ? "TRUE" : "FALSE"}`, {
           eventKey: step.eventKey,
           optional: step.optional,
           simOnGround: tel.simOnGround ?? null,
@@ -916,7 +922,7 @@ export class NarrativeOrchestrator {
     if (step.transition === NarrativeTransition.WAIT_CONDITION) {
       const shouldExecute = this.evaluateGenericWaitCondition(step);
       this.logWaitConditionEvaluation(step, shouldExecute);
-      console.log(`[NarrativeOrchestrator] WAIT_CONDITION genérico evaluado ${step.eventKey}: ${shouldExecute ? "TRUE" : "FALSE"}`, {
+      logger.narrative(`[NarrativeOrchestrator] WAIT_CONDITION genérico evaluado ${step.eventKey}: ${shouldExecute ? "TRUE" : "FALSE"}`, {
         eventKey: step.eventKey,
         optional: step.optional,
         preconditions: (step as any).preconditions ?? null,
@@ -930,7 +936,7 @@ export class NarrativeOrchestrator {
         // (Un diurno excluido de noche se omite: esperar el alba bloquearía
         // la fase en vuelos cortos; en vuelos largos diurnos se ejecuta.)
         if (step.optional && (this.isDefinitivelyInapplicable(step) || this.isRestrictedOut(step))) {
-          console.log(`[NarrativeOrchestrator] ⏩ Omitiendo ${step.eventKey}: opcional no aplicable/excluido en este vuelo`);
+          logger.narrative(`[NarrativeOrchestrator] ⏩ Omitiendo ${step.eventKey}: opcional no aplicable/excluido en este vuelo`);
           fileLogger.log('[NarrativeOrchestrator] Paso opcional no aplicable omitido', { eventKey: step.eventKey });
           this.emit("step:skipped", {
             step,
@@ -1010,12 +1016,12 @@ export class NarrativeOrchestrator {
     if (this.pendingTimers.has(id)) return;
     this.pendingTimers.add(id);
 
-    console.log("[NARRATIVE]");
-    console.log("AFTER_DELAY: retrasando reproducción");
-    console.log("↓");
-    console.log(step.eventKey);
-    console.log("↓");
-    console.log(delayMs + "ms");
+    logger.narrative("[NARRATIVE]");
+    logger.narrative("AFTER_DELAY: retrasando reproducción");
+    logger.narrative("↓");
+    logger.narrative(step.eventKey);
+    logger.narrative("↓");
+    logger.narrative(delayMs + "ms");
 
     this.timerManager.schedule({
       id,
@@ -1054,7 +1060,7 @@ export class NarrativeOrchestrator {
       const ctx: any = this.flightContext;
       const tel: any = ctx?.getTelemetry?.() ?? {};
       const fl: any = ctx?.getFlight?.() ?? {};
-      console.log(`[NarrativeOrchestrator] 🔍 executeStep llamado para ${step.eventKey}:`, {
+      logger.narrative(`[NarrativeOrchestrator] 🔍 executeStep llamado para ${step.eventKey}:`, {
         caller: new Error().stack,
         transition: NarrativeTransition[(step as any).transition],
         eventKey: step.eventKey,
@@ -1084,7 +1090,7 @@ export class NarrativeOrchestrator {
         this.scheduleWaitConditionPoll(step, eventDefinition);
         return;
       }
-      console.log(`[NarrativeOrchestrator] ✅ WAIT_CONDITION ${step.eventKey}: condición cumplida, procede el dispatch`);
+      logger.narrative(`[NarrativeOrchestrator] ✅ WAIT_CONDITION ${step.eventKey}: condición cumplida, procede el dispatch`);
     }
 
     // ── GUARD definitivo para phase_transition: sin telemetría cumplida no hay
@@ -1097,7 +1103,7 @@ export class NarrativeOrchestrator {
         this.scheduleWaitConditionPoll(step, eventDefinition);
         return;
       }
-      console.log(`[NarrativeOrchestrator] ✅ WAIT_CONDITION phase_transition ${step.eventKey}: condición cumplida, procede el dispatch`);
+      logger.narrative(`[NarrativeOrchestrator] ✅ WAIT_CONDITION phase_transition ${step.eventKey}: condición cumplida, procede el dispatch`);
     }
 
     // ── GUARD P0-2 (defensa): nunca dispatchear el evento especial sin
@@ -1107,7 +1113,7 @@ export class NarrativeOrchestrator {
     if (isGenericWaitStep && mode !== "manual" && this.shouldSkipUnconfiguredSpecialEvent(step)) {
       const cur = this.narrativeEngine.currentStep();
       if (cur && cur.eventKey === step.eventKey) {
-        console.log(`[NarrativeOrchestrator] ⏩ Omitiendo ${step.eventKey} en executeStep: evento especial no configurado`);
+        logger.narrative(`[NarrativeOrchestrator] ⏩ Omitiendo ${step.eventKey} en executeStep: evento especial no configurado`);
         fileLogger.log('[NarrativeOrchestrator] Evento especial no configurado (executeStep), paso omitido', { eventKey: step.eventKey });
         this.emit("step:skipped", {
           step,
@@ -1129,7 +1135,7 @@ export class NarrativeOrchestrator {
         const cur = this.narrativeEngine.currentStep();
         const isCurrent = !!cur && cur.eventKey === step.eventKey;
         if (step.optional && (this.isDefinitivelyInapplicable(step) || this.isRestrictedOut(step)) && isCurrent) {
-          console.log(`[NarrativeOrchestrator] ⏩ Omitiendo ${step.eventKey} en executeStep: opcional definitivamente no aplicable`);
+          logger.narrative(`[NarrativeOrchestrator] ⏩ Omitiendo ${step.eventKey} en executeStep: opcional definitivamente no aplicable`);
           fileLogger.log('[NarrativeOrchestrator] Paso opcional no aplicable omitido (executeStep)', { eventKey: step.eventKey });
           this.emit("step:skipped", {
             step,
@@ -1144,14 +1150,14 @@ export class NarrativeOrchestrator {
         if (isCurrent) this.scheduleWaitConditionPoll(step, eventDefinition);
         return;
       }
-      console.log(`[NarrativeOrchestrator] ✅ WAIT_CONDITION genérico ${step.eventKey}: condición cumplida, procede el dispatch`);
+      logger.narrative(`[NarrativeOrchestrator] ✅ WAIT_CONDITION genérico ${step.eventKey}: condición cumplida, procede el dispatch`);
     }
 
-    console.log("[NARRATIVE]");
-    console.log("Dispatching");
+    logger.narrative("[NARRATIVE]");
+    logger.narrative("Dispatching");
     // Log de trazabilidad: preparación del evento que va a la cola de anuncios
     // → AnnouncementService → Edge Function audio-get.
-    console.log("[NarrativeOrchestrator] Preparando evento para Edge Function:", {
+    logger.narrative("[NarrativeOrchestrator] Preparando evento para Edge Function:", {
       eventKey: step.eventKey,
       transition: NarrativeTransition[step.transition],
       isPreRecorded: (eventDefinition as any).preRecorded === true,
@@ -1167,7 +1173,7 @@ export class NarrativeOrchestrator {
       fileLogger.error('[NarrativeOrchestrator] dispatch fallido', { eventKey: step.eventKey, error: (err as Error)?.message ?? String(err) });
     });
 
-    console.log(
+    logger.narrative(
       `[NarrativeOrchestrator] Paso ejecutado ${step.eventKey} (modo: ${mode})`
     );
 
@@ -1175,14 +1181,14 @@ export class NarrativeOrchestrator {
     // (incluye WAIT_CONDITION). Aquí solo se loguea el estado para auditoría y se
     // deja el onStepCompleted diferido al completar el audio, evitando doble avance.
     if (step.transition === NarrativeTransition.WAIT_CONDITION) {
-      console.log('[NarrativeEngine] Estado del paso:', {
+      logger.narrative('[NarrativeEngine] Estado del paso:', {
         eventKey: step.eventKey,
         isCompleted: this.narrativeEngine.isStepCompleted(step.eventKey),
         currentIndex: this.narrativeEngine.currentIndex(),
         totalSteps: this.narrativeEngine.getTotalSteps(),
         nextStep: (this.narrativeEngine as any).definition?.steps?.[this.narrativeEngine.currentIndex() + 1]?.eventKey ?? null,
       });
-      console.log(`[NarrativeOrchestrator] WAIT_CONDITION ${step.eventKey} ejecutado, esperando handleAnnouncementCompleted para avanzar`);
+      logger.narrative(`[NarrativeOrchestrator] WAIT_CONDITION ${step.eventKey} ejecutado, esperando handleAnnouncementCompleted para avanzar`);
     }
 
     this.emit("step:executed", {
@@ -1190,6 +1196,12 @@ export class NarrativeOrchestrator {
       index: this.narrativeEngine.currentIndex(),
       mode,
     } as StepExecutedEvent);
+    // Registro focalizado PERMANENTE: un paso ejecutado (disparo de audio).
+    // Los polls que no ejecutan no loguean: el log vuelve a ser legible.
+    logger.audio(`🎯 Paso ejecutado: ${step.eventKey}`, {
+      transition: NarrativeTransition[(step as any).transition],
+      mode,
+    });
     // Red de seguridad: si este audio nunca reporta completed/error, avanzar
     // con warning al vencer (solo modo normal; en pruebas manda lo manual).
     this.scheduleAudioCompletionNet(step);
@@ -1198,13 +1210,13 @@ export class NarrativeOrchestrator {
   // decision_maker === "user": el paso espera una acción del usuario.
   private waitForUserAction(step: NarrativeStep): void {
     this.pendingUserSteps.add(step.eventKey);
-    console.log("[NarrativeOrchestrator] Esperando acción del usuario para el paso: " + step.eventKey);
+    logger.narrative("[NarrativeOrchestrator] Esperando acción del usuario para el paso: " + step.eventKey);
   }
 
   // detection_strategy === "manual": el paso solo se ejecuta por acción manual.
   private registerManualStep(step: NarrativeStep): void {
     this.pendingUserSteps.add(step.eventKey);
-    console.log("[NarrativeOrchestrator] Paso manual pendiente de activación: " + step.eventKey);
+    logger.narrative("[NarrativeOrchestrator] Paso manual pendiente de activación: " + step.eventKey);
   }
 
   // detection_strategy === "event_listener" / "callback": espera un evento externo.
@@ -1232,7 +1244,7 @@ export class NarrativeOrchestrator {
   private registerCallback(step: NarrativeStep, eventDefinition: EventDefinition, strategy = "event_listener"): void {
     const hasEmitter = this.hasRegisteredEmitter(step.eventKey);
     const action = hasEmitter ? 'esperando' : (step.optional && !this.isTestMode ? 'saltando' : 'esperando');
-    console.log('[NarrativeOrchestrator] Evento event_listener:', {
+    logger.narrative('[NarrativeOrchestrator] Evento event_listener:', {
       eventKey: step.eventKey,
       strategy,
       optional: step.optional,
@@ -1243,7 +1255,7 @@ export class NarrativeOrchestrator {
     // captain_special_event sin texto configurado, cuyo timer nunca se
     // programa). En modo pruebas se espera (avance manual disponible).
     if (!hasEmitter && step.optional && !this.isTestMode) {
-      console.log(`[NarrativeOrchestrator] ⏩ Omitiendo ${step.eventKey}: opcional con ${strategy} sin emisor registrado`);
+      logger.narrative(`[NarrativeOrchestrator] ⏩ Omitiendo ${step.eventKey}: opcional con ${strategy} sin emisor registrado`);
       fileLogger.log('[NarrativeOrchestrator] Paso opcional sin emisor omitido', { eventKey: step.eventKey, strategy });
       this.emit("step:skipped", {
         step,
@@ -1253,7 +1265,7 @@ export class NarrativeOrchestrator {
       return;
     }
     this.pendingExternalSteps.add(step.eventKey);
-    console.log("[NarrativeOrchestrator] Esperando evento externo para el paso: " + step.eventKey);
+    logger.narrative("[NarrativeOrchestrator] Esperando evento externo para el paso: " + step.eventKey);
   }
 
   setCurrentProducer(producer: string): void {
@@ -1262,7 +1274,7 @@ export class NarrativeOrchestrator {
 
   setTestMode(enabled: boolean): void {
     this.isTestMode = enabled;
-    console.log(
+    logger.narrative(
       `[NarrativeOrchestrator] Modo de ejecución: ${enabled ? "pruebas (manual)" : "normal"}`
     );
   }
@@ -1282,13 +1294,13 @@ export class NarrativeOrchestrator {
   // Confirma un paso que esperaba acción del usuario y lo ejecuta.
   confirmUserStep(stepKey: string): void {
     if (!this.pendingUserSteps.delete(stepKey)) {
-      console.log("[NarrativeOrchestrator] Paso " + stepKey + " no estaba esperando acción del usuario");
+      logger.narrative("[NarrativeOrchestrator] Paso " + stepKey + " no estaba esperando acción del usuario");
       return;
     }
     if (this.pendingStep?.eventKey === stepKey) {
       this.pendingStep = null;
     }
-    console.log("[NarrativeOrchestrator] Acción del usuario confirmada para el paso: " + stepKey);
+    logger.narrative("[NarrativeOrchestrator] Acción del usuario confirmada para el paso: " + stepKey);
     this.executeCurrentStep("user-confirmed", true);
   }
 
@@ -1315,7 +1327,7 @@ export class NarrativeOrchestrator {
     this.pendingUserSteps.delete(stepKey);
     this.pendingExternalSteps.delete(stepKey);
 
-    console.log(
+    logger.narrative(
       `[NarrativeOrchestrator] Avance manual: ejecutando paso ${step.eventKey}`
     );
 
@@ -1356,10 +1368,10 @@ export class NarrativeOrchestrator {
     this.clearManualAudioWait();
     this.waitingForAudio = true;
     this.waitingEpoch = this.scenarioEpoch;
-    console.log(
+    logger.narrative(
       `[NarrativeOrchestrator] ⏳ Esperando finalización de audio para: ${stepKey}`
     );
-    console.log(
+    logger.narrative(
       `[NarrativeOrchestrator] ⏱️ Esperando audio, timeout: ${AUDIO_TIMEOUT / 1000} segundos`
     );
 
@@ -1402,7 +1414,7 @@ export class NarrativeOrchestrator {
     const timeoutMs = isWait ? WAIT_AUDIO_COMPLETION_TIMEOUT_MS : AUDIO_COMPLETION_TIMEOUT_MS;
     const epoch = this.scenarioEpoch;
     const eventKey = step.eventKey;
-    console.log('[NarrativeOrchestrator] ⏱️ Red de seguridad armada:', { eventKey, timeoutMs: `${timeoutMs / 1000}s`, epoch });
+    logger.narrative('[NarrativeOrchestrator] ⏱️ Red de seguridad armada:', { eventKey, timeoutMs: `${timeoutMs / 1000}s`, epoch });
     const timer = setTimeout(() => {
       this.audioCompletionTimers.delete(eventKey);
       if (epoch !== this.scenarioEpoch) return; // fase cambiada: obsoleto
@@ -1435,7 +1447,7 @@ export class NarrativeOrchestrator {
   }
 
   private logOrchestratorState(context: string): void {
-    console.log("[NarrativeOrchestrator] Estado actual:", {
+    logger.narrative("[NarrativeOrchestrator] Estado actual:", {
       context,
       isManualMode: this.isTestMode,
       pendingStep: this.pendingStep?.eventKey ?? null,
@@ -1463,7 +1475,7 @@ export class NarrativeOrchestrator {
     this.pendingStep = null;
     this.pendingUserSteps.delete(step.eventKey);
 
-    console.log(`[NarrativeOrchestrator] Paso omitido: ${step.eventKey}`);
+    logger.narrative(`[NarrativeOrchestrator] Paso omitido: ${step.eventKey}`);
     this.emit("step:skipped", {
       step,
       index: this.narrativeEngine.currentIndex(),
@@ -1487,7 +1499,7 @@ export class NarrativeOrchestrator {
     this.waitingEpoch = -1;
     this.clearManualAudioWait();
     this.clearAudioCompletionNet();
-    console.log(`[NarrativeOrchestrator] Estado manual reiniciado (época ${this.scenarioEpoch})`);
+    logger.narrative(`[NarrativeOrchestrator] Estado manual reiniciado (época ${this.scenarioEpoch})`);
     this.emit("step:clear", null);
   }
 
@@ -1500,7 +1512,7 @@ export class NarrativeOrchestrator {
     this.pendingUserSteps.add(step.eventKey);
     this.pendingExternalSteps.delete(step.eventKey);
 
-    console.log(
+    logger.narrative(
       `[NarrativeOrchestrator] Paso manual en espera: ${step.eventKey} (executionId: ${executionId})`
     );
 
@@ -1514,10 +1526,10 @@ export class NarrativeOrchestrator {
   // Notifica un evento externo (FlightController / callback) para pasos en espera.
   notifyExternalEvent(stepKey: string): void {
     if (!this.pendingExternalSteps.delete(stepKey)) {
-      console.log("[NarrativeOrchestrator] Paso " + stepKey + " no estaba esperando evento externo");
+      logger.narrative("[NarrativeOrchestrator] Paso " + stepKey + " no estaba esperando evento externo");
       return;
     }
-    console.log("[NarrativeOrchestrator] Evento externo recibido para el paso: " + stepKey);
+    logger.narrative("[NarrativeOrchestrator] Evento externo recibido para el paso: " + stepKey);
     this.executeCurrentStep("external-event", true);
   }
 
@@ -1560,7 +1572,14 @@ export class NarrativeOrchestrator {
     try {
       const engine: any = this.ruleEngine;
       if (engine && typeof engine.evaluateStep === "function") {
-        return engine.evaluateStep(step, this.flightContext) === true;
+        const result = engine.evaluateStep(step, this.flightContext) === true;
+        // Evaluación concisa por ciclo (desactivada por defecto; ver flags).
+        logger.ruleEvaluation(`Evaluando ${step.eventKey}`, {
+          type: (step as any).preconditions?.type ?? null,
+          conditions: (step as any).preconditions?.conditions ?? null,
+          result,
+        });
+        return result;
       }
     } catch (e) {
       console.warn(`[NarrativeOrchestrator] evaluateGenericWaitCondition error for ${step.eventKey}`, e);
@@ -1636,14 +1655,14 @@ export class NarrativeOrchestrator {
   }
 
   cancelPendingTimers(): void {
-    console.log("[NARRATIVE TRACE]");
-    console.log("action: cancelPendingTimers");
-    console.log("executionId: " + this.execCounter);
-    console.log("scenario: " + this.narrativeEngine.getScenarioName());
-    console.log("stepIndex: " + this.narrativeEngine.currentIndex());
-    console.log("event: " + (this.narrativeEngine.currentStep()?.eventKey ?? "null"));
-    console.log("transition: " + (this.narrativeEngine.currentStep() ? NarrativeTransition[this.narrativeEngine.currentStep()!.transition] : "null"));
-    console.log("reason: pending-timers-cleared");
+    logger.narrative("[NARRATIVE TRACE]");
+    logger.polling("action: cancelPendingTimers");
+    logger.narrative("executionId: " + this.execCounter);
+    logger.narrative("scenario: " + this.narrativeEngine.getScenarioName());
+    logger.narrative("stepIndex: " + this.narrativeEngine.currentIndex());
+    logger.narrative("event: " + (this.narrativeEngine.currentStep()?.eventKey ?? "null"));
+    logger.narrative("transition: " + (this.narrativeEngine.currentStep() ? NarrativeTransition[this.narrativeEngine.currentStep()!.transition] : "null"));
+    logger.polling("reason: pending-timers-cleared");
 
     for (const id of this.pendingTimers) {
       this.timerManager.cancel(id);
@@ -1671,14 +1690,14 @@ export class NarrativeOrchestrator {
     this.waitingForAudio = false;
     this.clearManualAudioWait();
 
-    console.log("[NARRATIVE TRACE]");
-    console.log("action: advanceNarrative");
-    console.log("executionId: " + this.execCounter);
-    console.log("scenario: " + this.narrativeEngine.getScenarioName());
-    console.log("stepIndex: " + this.narrativeEngine.currentIndex());
-    console.log("event: " + (this.narrativeEngine.currentStep()?.eventKey ?? "null"));
-    console.log("transition: " + (this.narrativeEngine.currentStep() ? NarrativeTransition[this.narrativeEngine.currentStep()!.transition] : "null"));
-    console.log("reason: " + (reason ?? "unknown"));
+    logger.narrative("[NARRATIVE TRACE]");
+    logger.narrative("action: advanceNarrative");
+    logger.narrative("executionId: " + this.execCounter);
+    logger.narrative("scenario: " + this.narrativeEngine.getScenarioName());
+    logger.narrative("stepIndex: " + this.narrativeEngine.currentIndex());
+    logger.narrative("event: " + (this.narrativeEngine.currentStep()?.eventKey ?? "null"));
+    logger.narrative("transition: " + (this.narrativeEngine.currentStep() ? NarrativeTransition[this.narrativeEngine.currentStep()!.transition] : "null"));
+    logger.narrative("reason: " + (reason ?? "unknown"));
 
     // Traza del ancla: clasificar el completado según la vía. Solo
     // "phase-transition-met" pasó por evaluación TRUE; el resto completa
@@ -1702,14 +1721,14 @@ export class NarrativeOrchestrator {
     // Guard (Stage 18D): once the scenario is completed, there is no
     // currentStep anymore. Never re-execute the last step after completion.
     if (this.narrativeEngine.isCompleted()) {
-      console.log("[NARRATIVE TRACE]");
-      console.log("action: advanceNarrative");
-      console.log("executionId: " + this.execCounter);
-      console.log("scenario: " + this.narrativeEngine.getScenarioName());
-      console.log("stepIndex: " + this.narrativeEngine.currentIndex());
-      console.log("event: null");
-      console.log("transition: null");
-      console.log("reason: scenario-completed-guard");
+      logger.narrative("[NARRATIVE TRACE]");
+      logger.narrative("action: advanceNarrative");
+      logger.narrative("executionId: " + this.execCounter);
+      logger.narrative("scenario: " + this.narrativeEngine.getScenarioName());
+      logger.narrative("stepIndex: " + this.narrativeEngine.currentIndex());
+      logger.narrative("event: null");
+      logger.narrative("transition: null");
+      logger.narrative("reason: scenario-completed-guard");
 
       this.pendingStep = null;
       this.emit("scenario:completed", {
@@ -1721,9 +1740,9 @@ export class NarrativeOrchestrator {
     const step = this.narrativeEngine.currentStep();
     if (!step) return;
 
-    console.log("Next Step");
-    console.log("↓");
-    console.log(step.eventKey);
+    logger.narrative("Next Step");
+    logger.narrative("↓");
+    logger.narrative(step.eventKey);
 
     this.executeCurrentStep(reason);
   }

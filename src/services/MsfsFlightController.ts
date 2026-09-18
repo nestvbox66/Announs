@@ -16,6 +16,7 @@ import { fileLogger } from "./FileLogger";
 // (VueloActualView) usa para hacer fallback a MockFlightController.
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { logger } from "../utils/logger";
 
 // Detectar si estamos en entorno Tauri (evaluado en cada llamada)
 function isTauriEnv(): boolean {
@@ -118,7 +119,7 @@ export function mapSimVarsToTelemetry(simVars: Record<string, any>): TelemetrySn
   // backend Rust (path vivo: snapshot Rust → evento Tauri `telemetry`).
   // NOTA: esta función hoy no es el path vivo (solo definición; el backend
   // emite TelemetrySnapshot directo). Se mantiene por compatibilidad/tests.
-  console.log('[MsfsFlightController] seatbelt raw value:', {
+  logger.telemetry('seatbelt raw value:', {
     simVarName: 'SEATBELT_SWITCH',
     rawValue: simVars['SEATBELT_SWITCH'],
     mappedTo: simVars['SEATBELT_SWITCH'] === 1,
@@ -127,7 +128,7 @@ export function mapSimVarsToTelemetry(simVars: Record<string, any>): TelemetrySn
   // la app usa PLANE ALTITUDE (verdadera MSL); el panel muestra INDICATED
   // (baro). Con QNH ≠ STD o atmósfera no ISA difieren cientos de pies: normal.
   // Conclusión: NO cambiar de SimVar; la tolerancia ±500 ft lo absorbe.
-  console.log('[MsfsFlightController] Altitude vars:', {
+  logger.telemetry('Altitude vars:', {
     PLANE_ALTITUDE: simVars['PLANE ALTITUDE'] ?? simVars['PLANE_ALTITUDE'],
     INDICATED_ALTITUDE: simVars['INDICATED ALTITUDE'] ?? simVars['INDICATED_ALTITUDE'],
     PRESSURE_ALTITUDE: simVars['PRESSURE ALTITUDE'] ?? simVars['PRESSURE_ALTITUDE'],
@@ -217,12 +218,12 @@ export class MsfsFlightController implements FlightController {
   }
 
   private async doConnect(): Promise<void> {
-    console.log('[MsfsFlightController] 🔍 INICIO de conexión');
+    logger.telemetry('🔍 INICIO de conexión');
     fileLogger.log('[MsfsFlightController] 🔍 INICIO de conexión');
-    console.log('[MsfsFlightController] 📡 Verificando entorno Tauri...');
+    logger.telemetry('📡 Verificando entorno Tauri...');
 
     const runningInTauri = isTauri();
-    console.log('[MsfsFlightController] 📡 isTauri:', runningInTauri);
+    logger.telemetry('📡 isTauri:', runningInTauri);
     fileLogger.log('[MsfsFlightController] 📡 isTauri', { isTauri: runningInTauri });
 
     if (!runningInTauri) {
@@ -232,29 +233,28 @@ export class MsfsFlightController implements FlightController {
     }
 
     try {
-      console.log('[MsfsFlightController] 📡 Llamando a simconnect_connect...');
+      logger.telemetry('📡 Llamando a simconnect_connect...');
       fileLogger.log('[MsfsFlightController] 📡 Llamando a simconnect_connect...');
       const result = await invokeFn("simconnect_connect");
-      console.log('[MsfsFlightController] ✅ simconnect_connect resultado:', result);
+      logger.telemetry('✅ simconnect_connect resultado:', result);
       fileLogger.log('[MsfsFlightController] ✅ simconnect_connect resultado', { result });
 
       this.connected = true;
       this.lastTelemetryAt = Date.now();
-      console.log('[MsfsFlightController] ✅ Conectado a SimConnect');
+      logger.telemetry('✅ Conectado a SimConnect');
       fileLogger.log('[MsfsFlightController] ✅ Conectado a SimConnect');
 
-      console.log('[MsfsFlightController] 📡 Configurando listener de telemetría...');
+      logger.telemetry('📡 Configurando listener de telemetría...');
       this.unlistenFn = await listenFn("telemetry", (event: any) => {
-        console.log('[MsfsFlightController] 📡 Telemetría recibida:', event.payload);
+        logger.telemetry('📡 Telemetría recibida:', event.payload);
         const snap = event.payload as TelemetrySnapshot;
-        fileLogger.log('[MsfsFlightController] 📡 Telemetría recibida', { snap });
         this.lastTelemetryAt = Date.now();
         this.telemetry = snap;
         this.onTelemetry(snap);
       });
-      console.log('[MsfsFlightController] ✅ Listener configurado');
+      logger.telemetry('✅ Listener configurado');
 
-      console.log('[MsfsFlightController] 📡 Iniciando polling...');
+      logger.telemetry('📡 Iniciando polling...');
       this.pollInterval = window.setInterval(async () => {
         if (this.connected) {
           try {
@@ -271,7 +271,7 @@ export class MsfsFlightController implements FlightController {
           }
         }
       }, 100);
-      console.log('[MsfsFlightController] ✅ Polling iniciado');
+      logger.telemetry('✅ Polling iniciado');
 
       this.startWatchdog();
     } catch (error) {
@@ -287,7 +287,7 @@ export class MsfsFlightController implements FlightController {
     this.stopWatchdog();
     this.clearListeners();
     void invokeFn("simconnect_disconnect").catch(() => {});
-    console.log('[MsfsFlightController] Desconectado de MSFS');
+    logger.telemetry('Desconectado de MSFS');
   }
 
   private clearListeners(): void {
@@ -342,7 +342,7 @@ export class MsfsFlightController implements FlightController {
 
     try {
       await this.doConnect();
-      console.log('[MsfsFlightController] ✅ Reconexión exitosa');
+      logger.telemetry('✅ Reconexión exitosa');
       fileLogger.log('[MsfsFlightController] Reconexión exitosa');
     } catch (e) {
       console.warn('[MsfsFlightController] ❌ Reconexión falló (se reintentará)', e);

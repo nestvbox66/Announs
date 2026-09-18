@@ -10,6 +10,7 @@ import { FlightPhase } from "../engine/FlightEngine";
 import type { TelemetrySnapshot } from "../types/telemetry";
 import type { FlightContext } from "./FlightContext";
 import { fileLogger } from "./FileLogger";
+import { logger } from "../utils/logger";
 
 export class FlightPhaseDetector {
   private lastPhase: FlightPhase | null = null;
@@ -60,7 +61,7 @@ export class FlightPhaseDetector {
   private saneElapsed(now: number, startedAt: number, key: string): number {
     let elapsed = now - startedAt;
     if (elapsed < 0 || elapsed > 86400) {
-      console.log(`[FlightPhaseDetector] ${key}: salto de reloj detectado, rebaseando ventana:`, {
+      logger.phaseDetector(`${key}: salto de reloj detectado, rebaseando ventana:`, {
         now,
         startedAt,
         elapsed,
@@ -95,7 +96,7 @@ export class FlightPhaseDetector {
     if (cruiseAltitude !== null) {
       diff = Math.abs(altitude - cruiseAltitude);
       if (diff <= 500 && Math.abs(verticalSpeed) <= FlightPhaseDetector.CRUISE_VS_BAND) {
-        console.log('[FlightPhaseDetector] CRUISE por cruiseAltitude:', {
+        logger.phaseDetector('CRUISE por cruiseAltitude:', {
           altitude,
           cruiseAltitude,
           diff,
@@ -105,7 +106,7 @@ export class FlightPhaseDetector {
       }
     }
     if (!instant && altitude > 25000 && Math.abs(verticalSpeed) <= FlightPhaseDetector.CRUISE_VS_BAND) {
-      console.log('[FlightPhaseDetector] CRUISE por umbral 25000:', {
+      logger.phaseDetector('CRUISE por umbral 25000:', {
         altitude,
         verticalSpeed,
       });
@@ -115,11 +116,11 @@ export class FlightPhaseDetector {
     const now = this.windowClockS(snapshot);
     if (!instant) {
       if (this.cruiseWindow.startedAt !== null) {
-        console.log('[FlightPhaseDetector] CRUISE reseteado:', { altitude, verticalSpeed });
+        logger.phaseDetector('CRUISE reseteado:', { altitude, verticalSpeed });
       }
       this.cruiseWindow = { startedAt: null, announced: false };
       if (altitude > 10000 || cruiseAltitude !== null) {
-        console.log('[FlightPhaseDetector] Evaluando CRUISE:', {
+        logger.phaseDetector('Evaluando CRUISE:', {
           altitude,
           cruiseAltitude,
           diff,
@@ -131,7 +132,7 @@ export class FlightPhaseDetector {
     }
     if (this.cruiseWindow.startedAt === null) {
       this.cruiseWindow = { startedAt: now, announced: false };
-      console.log('[FlightPhaseDetector] CRUISE iniciado:', { altitude, verticalSpeed, startedAt: now });
+      logger.phaseDetector('CRUISE iniciado:', { altitude, verticalSpeed, startedAt: now });
       return false;
     }
     const elapsed = this.saneElapsed(now, this.cruiseWindow.startedAt, 'CRUISE');
@@ -142,10 +143,10 @@ export class FlightPhaseDetector {
     const met = elapsed >= FlightPhaseDetector.CRUISE_WINDOW_S;
     if (met && !this.cruiseWindow.announced) {
       this.cruiseWindow.announced = true;
-      console.log('[FlightPhaseDetector] CRUISE confirmado:', { altitude, verticalSpeed, elapsed });
+      logger.phaseDetector('CRUISE confirmado:', { altitude, verticalSpeed, elapsed });
     }
     if (altitude > 10000 || cruiseAltitude !== null) {
-      console.log('[FlightPhaseDetector] Evaluando CRUISE:', {
+      logger.phaseDetector('Evaluando CRUISE:', {
         altitude,
         cruiseAltitude,
         diff,
@@ -170,7 +171,7 @@ export class FlightPhaseDetector {
     const now = this.windowClockS(snapshot);
     if (!instant) {
       if (this.descentWindow.startedAt !== null) {
-        console.log('[FlightPhaseDetector] DESCENT reseteado:', {
+        logger.phaseDetector('DESCENT reseteado:', {
           altitude,
           verticalSpeed,
           elapsed: now - (this.descentWindow.startedAt ?? now),
@@ -181,7 +182,7 @@ export class FlightPhaseDetector {
     }
     if (this.descentWindow.startedAt === null) {
       this.descentWindow = { startedAt: now, announced: false };
-      console.log('[FlightPhaseDetector] DESCENT iniciado:', { altitude, verticalSpeed, startedAt: now });
+      logger.phaseDetector('DESCENT iniciado:', { altitude, verticalSpeed, startedAt: now });
       return false;
     }
     const elapsed = this.saneElapsed(now, this.descentWindow.startedAt, 'DESCENT');
@@ -192,7 +193,7 @@ export class FlightPhaseDetector {
     const met = elapsed >= FlightPhaseDetector.DESCENT_WINDOW_S;
     if (met && !this.descentWindow.announced) {
       this.descentWindow.announced = true;
-      console.log('[FlightPhaseDetector] DESCENT confirmado:', { altitude, verticalSpeed, elapsed });
+      logger.phaseDetector('DESCENT confirmado:', { altitude, verticalSpeed, elapsed });
     }
     return met;
   }
@@ -371,7 +372,7 @@ export class FlightPhaseDetector {
         isOnGround && isMoving && isParkingBrakeOff && isNotAtParkingSpot && allEnginesRunning;
       const detectedPhase = allConditionsMet ? FlightPhase.TAXI : FlightPhase.PRE_FLIGHT;
       const raw: any = snap;
-      console.log('[PhaseDetector] 🔍 Evaluando transición a TAXI:', {
+      logger.phaseDetector('🔍 Evaluando transición a TAXI:', {
         // Condiciones individuales
         isOnGround,
         isMoving,
@@ -396,7 +397,7 @@ export class FlightPhaseDetector {
         detectedPhase,
       });
       if (allConditionsMet) {
-        console.log('[PhaseDetector] 🔄 Cambio de fase detectado:', {
+        logger.phaseDetector('🔄 Cambio de fase detectado:', {
           from: this.lastPhase,
           to: FlightPhase.TAXI,
           reason: 'Condiciones de TAXI cumplidas',
