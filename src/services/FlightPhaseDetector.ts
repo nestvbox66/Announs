@@ -21,6 +21,17 @@ export class FlightPhaseDetector {
   // (Mock/tests/vía estática) se usa solo el fallback genérico de 25.000 ft.
   private flightContext?: FlightContext;
 
+  // Ventanas de histéresis por reloj (no por ticks): un dip de ruido de 0.3s
+  // jamás debe proponer cambio de fase. CRUISE 5s, DESCENT 15s.
+  private cruiseWindow: { startedAt: number | null; announced: boolean } = { startedAt: null, announced: false };
+  private descentWindow: { startedAt: number | null; announced: boolean } = { startedAt: null, announced: false };
+  private static readonly CRUISE_VS_BAND = 200;
+  private static readonly CRUISE_WINDOW_S = 5;
+  private static readonly DESCENT_VS_THRESHOLD = -500;
+  private static readonly DESCENT_WINDOW_S = 15;
+  private static readonly DESCENT_ALT_CAP = 35000;
+  private static readonly DESCENT_ALT_FLOOR = 1000;
+
   setBoardingCompleted(completed: boolean): void {
     this.boardingCompleted = completed;
   }
@@ -31,11 +42,41 @@ export class FlightPhaseDetector {
   }
 
   /**
-   * ¿Está el avión en crucero? Fuente primaria: `flight.cruiseAltitude`
+   * Reloj de ventanas en segundos: zuluTime del sim si es válido (> 0), si no
+   * reloj de pared. Nunca null (la pared siempre avanza).
+   */
+  private windowClockS(snapshot: TelemetrySnapshot): number {
+    const z = Number((snapshot as any).zuluTime ?? (snapshot as any).zulu_time ?? NaN);
+    if (!Number.isNaN(z) && z > 0) return z;
+    return Date.now() / 1000;
+  }
+
+  /**
+   * Rebasa una ventana al reloj actual si el elapsed es imposible (wrap de
+   * medianoche con zulu, o salto atrás / cambio de fuente del reloj). Un
+   * elapsed absurdo nunca debe dejar la ventana clavada ni dispararla.
+   * Retorna el elapsed saneado (< 0 nunca).
+   */
+  private saneElapsed(now: number, startedAt: number, key: string): number {
+    let elapsed = now - startedAt;
+    if (elapsed < 0 || elapsed > 86400) {
+      console.log(`[FlightPhaseDetector] ${key}: salto de reloj detectado, rebaseando ventana:`, {
+        now,
+        startedAt,
+        elapsed,
+      });
+      return -1; // señal: rebasear
+    }
+    return elapsed;
+  }
+
+  /**
+   * ¿Está el avión en crucero SOSTENIDO? Fuente primaria: `flight.cruiseAltitude`
    * (SimBrief, pies) con tolerancia ±500 ft (igual que el ancla
    * transition_to_cruise) y banda |VS| ≤ 200 fpm anti-jitter. Fallback:
-   * umbral genérico de 25.000 ft si no hay altitud de crucero. Sin efectos
-   * secundarios (apto para monitor/tests).
+   * umbral genérico de 25.000 ft si no hay altitud de crucero. La condición
+   * instantánea debe mantenerse 5s por reloj antes de proponer CRUISE.
+   * Sin efectos secundarios salvo el avance de su propia ventana.
    */
   public detectCruise(snapshot: TelemetrySnapshot): boolean {
     const altitude = snapshot.altitude ?? 0;
@@ -49,26 +90,59 @@ export class FlightPhaseDetector {
       cruiseAltitude = null;
     }
 
-    let result = false;
+    let instant = false;
     let diff: number | string = "N/A";
     if (cruiseAltitude !== null) {
       diff = Math.abs(altitude - cruiseAltitude);
-      if (diff <= 500 && Math.abs(verticalSpeed) <= 200) {
+      if (diff <= 500 && Math.abs(verticalSpeed) <= FlightPhaseDetector.CRUISE_VS_BAND) {
         console.log('[FlightPhaseDetector] CRUISE por cruiseAltitude:', {
           altitude,
           cruiseAltitude,
           diff,
           verticalSpeed,
         });
-        result = true;
+        instant = true;
       }
     }
-    if (!result && altitude > 25000 && Math.abs(verticalSpeed) <= 200) {
+    if (!instant && altitude > 25000 && Math.abs(verticalSpeed) <= FlightPhaseDetector.CRUISE_VS_BAND) {
       console.log('[FlightPhaseDetector] CRUISE por umbral 25000:', {
         altitude,
         verticalSpeed,
       });
-      result = true;
+      instant = true;
+    }
+
+    const now = this.windowClockS(snapshot);
+    if (!instant) {
+      if (this.cruiseWindow.startedAt !== null) {
+        console.log('[FlightPhaseDetector] CRUISE reseteado:', { altitude, verticalSpeed });
+      }
+      this.cruiseWindow = { startedAt: null, announced: false };
+      if (altitude > 10000 || cruiseAltitude !== null) {
+        console.log('[FlightPhaseDetector] Evaluando CRUISE:', {
+          altitude,
+          cruiseAltitude,
+          diff,
+          verticalSpeed,
+          result: 'NOT_CRUISE',
+        });
+      }
+      return false;
+    }
+    if (this.cruiseWindow.startedAt === null) {
+      this.cruiseWindow = { startedAt: now, announced: false };
+      console.log('[FlightPhaseDetector] CRUISE iniciado:', { altitude, verticalSpeed, startedAt: now });
+      return false;
+    }
+    const elapsed = this.saneElapsed(now, this.cruiseWindow.startedAt, 'CRUISE');
+    if (elapsed < 0) {
+      this.cruiseWindow = { startedAt: now, announced: false };
+      return false;
+    }
+    const met = elapsed >= FlightPhaseDetector.CRUISE_WINDOW_S;
+    if (met && !this.cruiseWindow.announced) {
+      this.cruiseWindow.announced = true;
+      console.log('[FlightPhaseDetector] CRUISE confirmado:', { altitude, verticalSpeed, elapsed });
     }
     if (altitude > 10000 || cruiseAltitude !== null) {
       console.log('[FlightPhaseDetector] Evaluando CRUISE:', {
@@ -76,10 +150,86 @@ export class FlightPhaseDetector {
         cruiseAltitude,
         diff,
         verticalSpeed,
-        result: result ? 'CRUISE' : 'NOT_CRUISE',
+        result: met ? 'CRUISE' : 'NOT_CRUISE',
       });
     }
-    return result;
+    return met;
+  }
+
+  /**
+   * ¿Descenso SOSTENIDO? 1000 < alt < 35000 con VS < −500 durante 15s por
+   * reloj. Un dip de ruido de 0.3s abre la ventana pero jamás la cierra.
+   */
+  public detectDescent(snapshot: TelemetrySnapshot): boolean {
+    const altitude = snapshot.altitude ?? 0;
+    const verticalSpeed = snapshot.verticalSpeed ?? 0;
+    const instant =
+      altitude > FlightPhaseDetector.DESCENT_ALT_FLOOR &&
+      altitude < FlightPhaseDetector.DESCENT_ALT_CAP &&
+      verticalSpeed < FlightPhaseDetector.DESCENT_VS_THRESHOLD;
+    const now = this.windowClockS(snapshot);
+    if (!instant) {
+      if (this.descentWindow.startedAt !== null) {
+        console.log('[FlightPhaseDetector] DESCENT reseteado:', {
+          altitude,
+          verticalSpeed,
+          elapsed: now - (this.descentWindow.startedAt ?? now),
+        });
+      }
+      this.descentWindow = { startedAt: null, announced: false };
+      return false;
+    }
+    if (this.descentWindow.startedAt === null) {
+      this.descentWindow = { startedAt: now, announced: false };
+      console.log('[FlightPhaseDetector] DESCENT iniciado:', { altitude, verticalSpeed, startedAt: now });
+      return false;
+    }
+    const elapsed = this.saneElapsed(now, this.descentWindow.startedAt, 'DESCENT');
+    if (elapsed < 0) {
+      this.descentWindow = { startedAt: now, announced: false };
+      return false;
+    }
+    const met = elapsed >= FlightPhaseDetector.DESCENT_WINDOW_S;
+    if (met && !this.descentWindow.announced) {
+      this.descentWindow.announced = true;
+      console.log('[FlightPhaseDetector] DESCENT confirmado:', { altitude, verticalSpeed, elapsed });
+    }
+    return met;
+  }
+
+  /**
+   * Instantánea PURA (sin efectos) de las ventanas para el monitor.
+   * `snap` parcial con {altitude, verticalSpeed, zuluTime} (p. ej. desde la
+   * telemetría del contexto); el elapsed usa el mismo reloj que el detector.
+   */
+  public getHysteresisSnapshot(snap?: { altitude?: unknown; verticalSpeed?: unknown; zuluTime?: unknown }): {
+    cruise: { requiredS: number; elapsedS: number | null; stable: boolean };
+    descent: { requiredS: number; elapsedS: number | null; stable: boolean };
+  } {
+    const now = this.windowClockS({
+      altitude: 0,
+      verticalSpeed: 0,
+      zuluTime: (snap as any)?.zuluTime ?? (snap as any)?.zulu_time ?? NaN,
+    } as unknown as TelemetrySnapshot);
+    const elapsedOf = (startedAt: number | null): number | null => {
+      if (startedAt === null) return null;
+      const e = now - startedAt;
+      return e < 0 || e > 86400 ? 0 : e;
+    };
+    const cElapsed = elapsedOf(this.cruiseWindow.startedAt);
+    const dElapsed = elapsedOf(this.descentWindow.startedAt);
+    return {
+      cruise: {
+        requiredS: FlightPhaseDetector.CRUISE_WINDOW_S,
+        elapsedS: cElapsed,
+        stable: cElapsed !== null && cElapsed >= FlightPhaseDetector.CRUISE_WINDOW_S,
+      },
+      descent: {
+        requiredS: FlightPhaseDetector.DESCENT_WINDOW_S,
+        elapsedS: dElapsed,
+        stable: dElapsed !== null && dElapsed >= FlightPhaseDetector.DESCENT_WINDOW_S,
+      },
+    };
   }
 
   /**
@@ -114,8 +264,11 @@ export class FlightPhaseDetector {
   }
 
   /**
-   * Detección inmediata sin histéresis (usada por Mock y tests).
-   * Mantiene compatibilidad con código existente.
+   * Detección inmediata SIN ventanas sostenidas (vía estática). Útil como
+   * lectura puntual, pero NO propone CRUISE/DESCENT: esas fases exigen
+   * confirmación por reloj y un detector fresco nunca la acumula. Para el
+   * flujo vivo (con histéresis real) usar la instancia + `detectPhase`.
+   * Actualmente sin llamadas en src (compatibilidad histórica).
    */
   static detectPhase(snap: TelemetrySnapshot): FlightPhase {
     return FlightPhaseDetector.computePhaseStatic(snap);
@@ -175,7 +328,13 @@ export class FlightPhaseDetector {
     // fallback al umbral genérico. Va primero porque un nivelado a FL170 con
     // VS≈0 no debe caer a GATE ni confundirse con otras fases: con altitud >
     // 0 y cerca del FL planificado solo puede ser crucero.
+    // La condición debe sostenerse 5s por reloj (ventana anti-ruido).
     if (this.detectCruise(snap)) return FlightPhase.CRUISE;
+
+    // 2. DESCENT con histéresis real: VS < −500 sostenido 15s por reloj.
+    // Sin esto, un dip de ruido de 0.3s proponía DESCENT y el FSM saltaba
+    // fases (p. ej. CLIMB → DESCENT) abandonando la narrativa.
+    if (this.detectDescent(snap)) return FlightPhase.DESCENT;
 
     // GATE: en tierra, parado, puertas abiertas, motores apagados, freno puesto
     if (altitude === 0 && groundspeed < 5 && !doorsClosed && !engineRunning && parkingBrake) {
@@ -266,9 +425,9 @@ export class FlightPhaseDetector {
     if (altitude >= 500 && altitude < 35000 && verticalSpeed > 0) {
       return FlightPhase.CLIMB;
     }
-    if (altitude > 1000 && altitude <= 35000 && verticalSpeed < 0) {
-      return FlightPhase.DESCENT;
-    }
+    // NOTA: el DESCENT instantáneo (alt/vs directo) se eliminó a propósito:
+    // ahora lo gobierna detectDescent() con ventana de 15s. Dejar la condición
+    // vieja aquí anularía la histéresis (un dip de 0.3s volvería a proponerla).
     if (altitude <= 1000 && altitude > 0 && groundspeed > 50) {
       return FlightPhase.APPROACH;
     }
@@ -296,9 +455,12 @@ export class FlightPhaseDetector {
     return FlightPhaseDetector.computePhaseStatic(snap);
   }
 
+  /** Limpia histéresis de salida + ventanas por reloj (nuevo vuelo). */
   reset(): void {
     this.lastPhase = null;
     this.stability = 0;
     this.boardingCompleted = false;
+    this.cruiseWindow = { startedAt: null, announced: false };
+    this.descentWindow = { startedAt: null, announced: false };
   }
 }

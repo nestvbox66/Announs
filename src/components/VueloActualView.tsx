@@ -5322,6 +5322,7 @@ export default function VueloActualView({
         })()}
         scheduler={schedulerRef.current}
         ruleEngine={ruleEngineRef.current}
+        phaseDetector={phaseDetectorRef.current}
         lastEventVariables={lastEventVars}
       />
 

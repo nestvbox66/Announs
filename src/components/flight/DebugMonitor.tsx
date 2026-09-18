@@ -10,6 +10,7 @@ import React, { useEffect, useState, useMemo, useRef } from "react";
 import { X, Clock, Activity, Plane, FileText, Layers, Variable, Timer, AlertTriangle, MoonStar, GitBranch } from "lucide-react";
 import { FlightContext } from "../../services/FlightContext";
 import type { FlightController } from "../../services/FlightController";
+import type { FlightPhaseDetector } from "../../services/FlightPhaseDetector";
 import { NarrativeEngine } from "../../narrative/NarrativeEngine";
 import { Scheduler } from "../../services/Scheduler";
 import { EventCatalogService } from "../../events/EventCatalogService";
@@ -235,6 +236,8 @@ export interface DebugMonitorProps {
   narrativeEngine?: NarrativeEngine | null;
   scheduler?: Scheduler | null;
   ruleEngine?: RuleEngine | null;
+  /** Detector de fases (ventanas de histéresis por reloj) */
+  phaseDetector?: FlightPhaseDetector | null;
   /** Variables resueltas del último evento (opcional, si el caller las provee) */
   lastEventVariables?: Record<string, unknown> | null;
 }
@@ -247,6 +250,7 @@ export default function DebugMonitor({
   narrativeEngine,
   scheduler,
   ruleEngine,
+  phaseDetector,
   lastEventVariables,
 }: DebugMonitorProps) {
   const [tick, setTick] = useState(0);
@@ -326,6 +330,23 @@ export default function DebugMonitor({
     }
   }, [narrativeEngine, scheduler, tick]);
 
+  // ── Histéresis del detector (ventanas por reloj, lectura pura) ──────────
+  const hysteresis = useMemo(() => {
+    void tick;
+    try {
+      if (!phaseDetector || typeof phaseDetector.getHysteresisSnapshot !== "function") return null;
+      const tel = (snapshot?.telemetry ?? {}) as Record<string, unknown>;
+      return phaseDetector.getHysteresisSnapshot({
+        altitude: tel?.altitude,
+        verticalSpeed: (tel as any)?.verticalSpeed ?? (tel as any)?.vertical_speed,
+        zuluTime: (tel as any)?.zuluTime ?? (tel as any)?.zulu_time,
+      });
+    } catch {
+      return null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tick, phaseDetector, snapshot]);
+
   const telemetry = (snapshot?.telemetry ?? {}) as Record<string, unknown>;
   // Solo mostrar variables activas (filtrar null/undefined de campos comentados en TelemetryData)
   const activeTelemetry = useMemo(() => {
@@ -333,8 +354,7 @@ export default function DebugMonitor({
     return Object.fromEntries(entries) as Record<string, unknown>;
   }, [telemetry]);
   const flight = (snapshot?.flight ?? {}) as Record<string, unknown>;
-  const simbrief = (snapshot?.simbrief ?? null) as Record<string, unknown> | null;
-  const fsm = snapshot?.fsm as Record<string, unknown> | undefined;
+  const simbrief = (snapshot?.simbrief ?? null) as Record<string, unknown> | null;  const fsm = snapshot?.fsm as Record<string, unknown> | undefined;
   const announcement = snapshot?.announcement as Record<string, unknown> | undefined;
 
   // Variables de eventos resueltas: prefer lastEventVariables, sino construir
@@ -1451,6 +1471,45 @@ export default function DebugMonitor({
           </Section>
 
           {/* Transición a CRUISE */}
+
+          {/* Histéresis del detector (ventanas por reloj) */}
+          <Section title="🔄 Histéresis del Detector" icon={Timer} count={2} defaultOpen={true}>
+            <div className="text-[10px] font-mono text-white/30 px-2 pb-1.5 mb-1 border-b border-white/5">
+              Ventanas sostenidas por reloj (no por ticks) · actualización 1s
+            </div>
+            {!hysteresis ? (
+              <div className="text-[11px] font-mono text-white/30 italic px-2 py-2">
+                Sin detector disponible
+              </div>
+            ) : (
+              <div className="space-y-0.5">
+                <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                  <span className="font-mono text-[11px] text-white/60">CRUISE (5s)</span>
+                  <span className="font-mono text-[11px] text-[#45AFFF]">
+                    {hysteresis.cruise.stable ? (
+                      <>✅ estable <span className="text-white/40">({hysteresis.cruise.requiredS}s)</span></>
+                    ) : hysteresis.cruise.elapsedS !== null ? (
+                      <>⏳ <span className="text-white/40">{hysteresis.cruise.elapsedS.toFixed(0)}s / {hysteresis.cruise.requiredS}s</span></>
+                    ) : (
+                      <span className="text-white/30 italic">—</span>
+                    )}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                  <span className="font-mono text-[11px] text-white/60">DESCENT (15s)</span>
+                  <span className="font-mono text-[11px] text-[#45AFFF]">
+                    {hysteresis.descent.stable ? (
+                      <>✅ estable <span className="text-white/40">({hysteresis.descent.requiredS}s)</span></>
+                    ) : hysteresis.descent.elapsedS !== null ? (
+                      <>⏳ <span className="text-white/40">{hysteresis.descent.elapsedS.toFixed(0)}s / {hysteresis.descent.requiredS}s</span></>
+                    ) : (
+                      <span className="text-white/30 italic">—</span>
+                    )}
+                  </span>
+                </div>
+              </div>
+            )}
+          </Section>
 
           {/* Transición a CRUISE */}
           <Section title="✈️ Transición a CRUISE" icon={Plane} count={3} defaultOpen={true}>
