@@ -436,7 +436,7 @@ export class NarrativeOrchestrator {
       if (!shouldExecute) {
         // Línea permanente: el gate temprano también puede retener el paso en
         // silencio (si pasara, handleStepActivation re-evalúa y loguea ahí).
-        this.logWaitEval(step, shouldExecute);
+        this.logWaitEval(step, shouldExecute, 'phase');
         this.recordAnchor(step, 'bloqueado', gateOrigin, true, false);
         // Adelantamiento: un transversal opcional no cumplido (p. ej.
         // common_crew_seatbelt) no debe retener un ancla posterior ya cumplida
@@ -651,13 +651,14 @@ export class NarrativeOrchestrator {
 
   /**
    * Línea PERMANENTE por evaluación del paso actual (una cada ~2s): eventKey +
-   * resultado + familia de compuerta. Es lo único que permite distinguir "se
-   * evaluó y dio false" de "no se evaluó" sin activar flags de debug.
+   * resultado + familia de compuerta + VÍA de evaluación (delay|phase|generic).
+   * Es lo único que permite distinguir "se evaluó y dio false" de "no se
+   * evaluó" sin activar flags de debug.
    */
-  private logWaitEval(step: NarrativeStep, result: boolean): void {
+  private logWaitEval(step: NarrativeStep, result: boolean, via?: string): void {
     const line =
       `[NarrativeOrchestrator] Eval ${step.eventKey} ` +
-      `[${(step as any).preconditions?.type ?? 'sin-type'}]: ${result ? 'TRUE' : 'FALSE'}`;
+      `[${(step as any).preconditions?.type ?? 'sin-type'}|${via ?? '?'}]: ${result ? 'TRUE' : 'FALSE'}`;
     console.log(line);
     try {
       fileLogger.log(line, { eventKey: step.eventKey });
@@ -789,6 +790,13 @@ export class NarrativeOrchestrator {
     if ((step as any).transition !== NarrativeTransition.WAIT_CONDITION) return false;
     const pre: any = (step as any).preconditions;
     if (pre?.type === "delay_detection") return true;
+    // Un type explícito no-delay nunca es demora, aunque sus conditions usen
+    // claves de firma (fsm, sim_on_ground, ...): esas claves ya no son
+    // exclusivas de demora (p. ej. descent_condition con puerta fsm). Sin este
+    // gate, esos pasos quedaban secuestrados por la vía de demora —que falla
+    // cerrado al no haber threshold para su key— y su evaluador real jamás
+    // corría (caso descent_crew_upcoming_actions, 2026-09-19).
+    if (pre?.type) return false;
     // Evento de demora conocido (por nombre) aunque llegue sin type
     if (NarrativeOrchestrator.DELAY_DETECTION_EVENTS.has(step.eventKey)) return true;
     // Firma de demora en conditions (cubre cualquier evento que en el escenario
@@ -844,7 +852,7 @@ export class NarrativeOrchestrator {
     if (this.isDelayDetectionWaitStep(step)) {
       const shouldExecute = this.evaluateWaitCondition(step);
       this.logWaitConditionEvaluation(step, shouldExecute);
-      this.logWaitEval(step, shouldExecute);
+      this.logWaitEval(step, shouldExecute, 'delay');
       // Log de diagnóstico: insumos exactos usados por RuleEngine (mismas fuentes que el monitor)
       try {
         const ctx: any = this.flightContext;
@@ -896,7 +904,7 @@ export class NarrativeOrchestrator {
       const shouldExecute = this.evaluatePhaseTransitionStep(step);
       this.recordAnchor(step, 'evaluando', 'handleStepActivation', true, shouldExecute);
       this.logWaitConditionEvaluation(step, shouldExecute);
-      this.logWaitEval(step, shouldExecute);
+      this.logWaitEval(step, shouldExecute, 'phase');
       try {
         const ctx: any = this.flightContext;
         const tel: any = ctx?.getTelemetry?.() ?? {};
@@ -942,7 +950,7 @@ export class NarrativeOrchestrator {
     if (step.transition === NarrativeTransition.WAIT_CONDITION) {
       const shouldExecute = this.evaluateGenericWaitCondition(step);
       this.logWaitConditionEvaluation(step, shouldExecute);
-      this.logWaitEval(step, shouldExecute);
+      this.logWaitEval(step, shouldExecute, 'generic');
       logger.narrative(`[NarrativeOrchestrator] WAIT_CONDITION genérico evaluado ${step.eventKey}: ${shouldExecute ? "TRUE" : "FALSE"}`, {
         eventKey: step.eventKey,
         optional: step.optional,
