@@ -17,7 +17,6 @@
  * Los logs permanentes (audio, fases, errores) siempre activos.
  */
 
-import { debugFlags } from "../config";
 import { fileLogger } from "../services/FileLogger";
 
 declare global {
@@ -26,6 +25,58 @@ declare global {
     debugFlags?: Record<string, boolean>;
   }
 }
+
+/**
+ * Valores iniciales de los flags desde el entorno (requieren recompilar).
+ * OJO: acceso literal `import.meta.env.VITE_*` a propósito — es el único
+ * patrón que Vite reemplaza estáticamente. Un helper genérico tipo
+ * `(import.meta as any)?.env` ROMPE el reemplazo y deja al browser sin env
+ * (incidente 2026-09-19: provider caído a "mock", sin Supabase). El try/catch
+ * cubre runtimes sin import.meta (tests/node), donde todo queda en false.
+ */
+function envDefault(name: string): boolean {
+  try {
+    const v =
+      name === "VITE_DEBUG_TELEMETRY"
+        ? (import.meta.env.VITE_DEBUG_TELEMETRY as string | undefined)
+        : name === "VITE_DEBUG_RULE_EVALUATION"
+          ? (import.meta.env.VITE_DEBUG_RULE_EVALUATION as string | undefined)
+          : name === "VITE_DEBUG_POLLING"
+            ? (import.meta.env.VITE_DEBUG_POLLING as string | undefined)
+            : name === "VITE_DEBUG_CRUISE_PROGRESS"
+              ? (import.meta.env.VITE_DEBUG_CRUISE_PROGRESS as string | undefined)
+              : name === "VITE_DEBUG_PHASE_DETECTOR"
+                ? (import.meta.env.VITE_DEBUG_PHASE_DETECTOR as string | undefined)
+                : name === "VITE_DEBUG_NARRATIVE_ENGINE"
+                  ? (import.meta.env.VITE_DEBUG_NARRATIVE_ENGINE as string | undefined)
+                  : undefined;
+    return v === "true";
+  } catch {
+    return false;
+  }
+}
+
+const FLAG_KEYS = [
+  "telemetry",
+  "ruleEvaluation",
+  "polling",
+  "cruiseProgress",
+  "phaseDetector",
+  "narrativeEngine",
+] as const;
+
+const ENV_BY_FLAG: Record<(typeof FLAG_KEYS)[number], string> = {
+  telemetry: "VITE_DEBUG_TELEMETRY",
+  ruleEvaluation: "VITE_DEBUG_RULE_EVALUATION",
+  polling: "VITE_DEBUG_POLLING",
+  cruiseProgress: "VITE_DEBUG_CRUISE_PROGRESS",
+  phaseDetector: "VITE_DEBUG_PHASE_DETECTOR",
+  narrativeEngine: "VITE_DEBUG_NARRATIVE_ENGINE",
+};
+
+// Defaults calculados UNA vez (son constantes de build).
+const ENV_DEFAULTS: Record<string, boolean> = {};
+for (const k of FLAG_KEYS) ENV_DEFAULTS[k] = envDefault(ENV_BY_FLAG[k]);
 
 function liveFlags(): Record<string, boolean> {
   try {
@@ -37,12 +88,12 @@ function liveFlags(): Record<string, boolean> {
     // window primero (consola del navegador), globalThis como fallback (tests).
     const override = w && typeof w === "object" ? w : g?.debugFlags;
     if (override && typeof override === "object") {
-      return { ...debugFlags, ...(override as Record<string, boolean>) };
+      return { ...ENV_DEFAULTS, ...(override as Record<string, boolean>) };
     }
   } catch {
-    /* sin window (tests): defaults de config */
+    /* sin window (tests): defaults de entorno */
   }
-  return { ...debugFlags };
+  return { ...ENV_DEFAULTS };
 }
 
 function fmt(v: unknown): string {
@@ -65,8 +116,9 @@ function enabled(key: string): boolean {
 
 // Exponer para toggle en caliente desde la consola (una sola vez).
 try {
-  if (typeof window !== "undefined" && !(window as unknown as { debugFlags?: unknown }).debugFlags) {
-    (window as unknown as { debugFlags: Record<string, boolean> }).debugFlags = { ...debugFlags };
+  if (typeof window !== "undefined") {
+    const w = window as unknown as { debugFlags?: Record<string, boolean> };
+    if (!w.debugFlags) w.debugFlags = liveFlags();
     console.log(
       "[Announs] Debug de logs: usá window.debugFlags para activar (telemetry, ruleEvaluation, polling, cruiseProgress, phaseDetector, narrativeEngine)"
     );
