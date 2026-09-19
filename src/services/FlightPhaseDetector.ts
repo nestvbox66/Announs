@@ -17,6 +17,10 @@ export class FlightPhaseDetector {
   private stability = 0;
   private readonly STABILITY_THRESHOLD = 3;
   private boardingCompleted = false;
+  // Última fase CONFIRMADA (la que detectPhase realmente devolvió, no el
+  // tracking transitorio de lastPhase). Se usa para el mapeo direccional
+  // TAXI vs TAXI_IN: debe reflejar de dónde venimos de forma estable.
+  private lastStablePhase: FlightPhase | null = null;
   // Contexto opcional (inyectado por la vista): provee flight.cruiseAltitude
   // (SimBrief) para detectar CRUISE a la altitud real del vuelo. Sin contexto
   // (Mock/tests/vía estática) se usa solo el fallback genérico de 25.000 ft.
@@ -254,6 +258,7 @@ export class FlightPhaseDetector {
     if (detected === this.lastPhase) {
       this.stability++;
       if (this.stability >= this.STABILITY_THRESHOLD) {
+        this.lastStablePhase = detected;
         return detected;
       }
     } else {
@@ -361,6 +366,21 @@ export class FlightPhaseDetector {
     //
     // Si esa telemetría no está disponible (compat Mock / providers parciales)
     // se mantiene la detección anterior (altura 0 + puertas cerradas + motor 1).
+    // Mapeo direccional: el mismo rodaje en tierra significa cosas opuestas
+    // según de dónde venimos. Si la última fase estable fue de llegada
+    // (DESCENT/APPROACH/LANDING), el rollout va a TAXI_IN (el Scheduler lo
+    // normaliza a TAXI_TO_GATE: bienvenida destino, permanecer sentado). Si
+    // venimos de salida, a TAXI (escenario de departure). Sin esto, al
+    // aterrizar se recargaba TAXI desde el paso 1 y sonaba el safety demo de
+    // salida (incidente 2026-09-19).
+    // TAXI_IN está en el set a propósito (auto-sostenido): una vez confirmado
+    // el rodaje de llegada, las siguientes evaluaciones deben seguir diciendo
+    // TAXI_IN. Sin esto, la primera confirmación contaminaría lastStablePhase
+    // y la salida fliparía a TAXI, reintroduciendo el bug con 1s de retraso.
+    const ARRIVAL_PHASES = [FlightPhase.DESCENT, FlightPhase.APPROACH, FlightPhase.LANDING, FlightPhase.TAXI_IN];
+    const taxiPhase = ARRIVAL_PHASES.includes(this.lastStablePhase as FlightPhase)
+      ? FlightPhase.TAXI_IN
+      : FlightPhase.TAXI;
     const hasAdvancedGroundData = simOnGround !== undefined && atcOnParkingSpot !== undefined;
     if (hasAdvancedGroundData) {
       const isOnGround = simOnGround === true;
@@ -370,7 +390,7 @@ export class FlightPhaseDetector {
       const allEnginesRunning = FlightPhaseDetector.allEnginesRunning(snap);
       const allConditionsMet =
         isOnGround && isMoving && isParkingBrakeOff && isNotAtParkingSpot && allEnginesRunning;
-      const detectedPhase = allConditionsMet ? FlightPhase.TAXI : FlightPhase.PRE_FLIGHT;
+      const detectedPhase = allConditionsMet ? taxiPhase : FlightPhase.PRE_FLIGHT;
       const raw: any = snap;
       logger.phaseDetector('🔍 Evaluando transición a TAXI:', {
         // Condiciones individuales
@@ -399,8 +419,10 @@ export class FlightPhaseDetector {
       if (allConditionsMet) {
         logger.phaseDetector('🔄 Cambio de fase detectado:', {
           from: this.lastPhase,
-          to: FlightPhase.TAXI,
-          reason: 'Condiciones de TAXI cumplidas',
+          to: taxiPhase,
+          reason: taxiPhase === FlightPhase.TAXI_IN
+            ? 'Rollout post-aterrizaje: TAXI_IN (llegada), no TAXI (salida)'
+            : 'Condiciones de TAXI cumplidas',
           conditions: {
             isOnGround,
             isMoving,
@@ -409,7 +431,7 @@ export class FlightPhaseDetector {
             allEnginesRunning,
           },
         });
-        return FlightPhase.TAXI;
+        return taxiPhase;
       }
     } else if (
       altitude === 0 &&
@@ -418,7 +440,7 @@ export class FlightPhaseDetector {
       engineRunning &&
       !parkingBrake
     ) {
-      return FlightPhase.TAXI;
+      return taxiPhase;
     }
     if (altitude > 0 && altitude < 500 && groundspeed > 50) {
       return FlightPhase.TAKEOFF;
@@ -459,6 +481,7 @@ export class FlightPhaseDetector {
   /** Limpia histéresis de salida + ventanas por reloj (nuevo vuelo). */
   reset(): void {
     this.lastPhase = null;
+    this.lastStablePhase = null;
     this.stability = 0;
     this.boardingCompleted = false;
     this.cruiseWindow = { startedAt: null, announced: false };
