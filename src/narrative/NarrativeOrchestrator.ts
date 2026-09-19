@@ -434,6 +434,9 @@ export class NarrativeOrchestrator {
       const gateOrigin = reason?.startsWith("wait-poll:") ? "polling" : "executeCurrentStep";
       this.recordAnchor(step, 'evaluando', gateOrigin, true, shouldExecute);
       if (!shouldExecute) {
+        // Línea permanente: el gate temprano también puede retener el paso en
+        // silencio (si pasara, handleStepActivation re-evalúa y loguea ahí).
+        this.logWaitEval(step, shouldExecute);
         this.recordAnchor(step, 'bloqueado', gateOrigin, true, false);
         // Adelantamiento: un transversal opcional no cumplido (p. ej.
         // common_crew_seatbelt) no debe retener un ancla posterior ya cumplida
@@ -646,6 +649,21 @@ export class NarrativeOrchestrator {
     } catch {}
   }
 
+  /**
+   * Línea PERMANENTE por evaluación del paso actual (una cada ~2s): eventKey +
+   * resultado + familia de compuerta. Es lo único que permite distinguir "se
+   * evaluó y dio false" de "no se evaluó" sin activar flags de debug.
+   */
+  private logWaitEval(step: NarrativeStep, result: boolean): void {
+    const line =
+      `[NarrativeOrchestrator] Eval ${step.eventKey} ` +
+      `[${(step as any).preconditions?.type ?? 'sin-type'}]: ${result ? 'TRUE' : 'FALSE'}`;
+    console.log(line);
+    try {
+      fileLogger.log(line, { eventKey: step.eventKey });
+    } catch {}
+  }
+
   private anchorTrace: AnchorTraceEntry[] = [];
   private static readonly ANCHOR_EVENT_KEY = "transition_to_taxi";
   private static readonly ANCHOR_TRACE_MAX = 20;
@@ -826,6 +844,7 @@ export class NarrativeOrchestrator {
     if (this.isDelayDetectionWaitStep(step)) {
       const shouldExecute = this.evaluateWaitCondition(step);
       this.logWaitConditionEvaluation(step, shouldExecute);
+      this.logWaitEval(step, shouldExecute);
       // Log de diagnóstico: insumos exactos usados por RuleEngine (mismas fuentes que el monitor)
       try {
         const ctx: any = this.flightContext;
@@ -877,6 +896,7 @@ export class NarrativeOrchestrator {
       const shouldExecute = this.evaluatePhaseTransitionStep(step);
       this.recordAnchor(step, 'evaluando', 'handleStepActivation', true, shouldExecute);
       this.logWaitConditionEvaluation(step, shouldExecute);
+      this.logWaitEval(step, shouldExecute);
       try {
         const ctx: any = this.flightContext;
         const tel: any = ctx?.getTelemetry?.() ?? {};
@@ -922,6 +942,7 @@ export class NarrativeOrchestrator {
     if (step.transition === NarrativeTransition.WAIT_CONDITION) {
       const shouldExecute = this.evaluateGenericWaitCondition(step);
       this.logWaitConditionEvaluation(step, shouldExecute);
+      this.logWaitEval(step, shouldExecute);
       logger.narrative(`[NarrativeOrchestrator] WAIT_CONDITION genérico evaluado ${step.eventKey}: ${shouldExecute ? "TRUE" : "FALSE"}`, {
         eventKey: step.eventKey,
         optional: step.optional,
