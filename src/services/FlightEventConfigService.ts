@@ -17,6 +17,7 @@ import {
   NORMAL_SCENARIO_KEY,
   EventSwitchValue,
   isEventSwitchValue,
+  isConfigurableEvent,
   toDbSwitchValue,
 } from "./eventConfigConstants";
 
@@ -126,6 +127,8 @@ export class FlightEventConfigService {
 
     for (const [key, value] of Object.entries(config)) {
       if (!isEventSwitchValue(value)) continue;
+      // Las anclas de transición de fase no son configurables: nunca persistir.
+      if (!isConfigurableEvent(key)) continue;
       // La DB guarda en minúsculas (off/pack/ia) — restricciones CHECK.
       const normalized = toDbSwitchValue(value);
       console.log("[FlightEventConfigService] Guardando switch:", {

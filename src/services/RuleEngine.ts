@@ -1531,6 +1531,24 @@ export class RuleEngine {
       const alt = Number(altitude) || 0;
       items.push({ key: 'altitude_lt', label: `ALTITUDE < ${threshold} ft`, ok: alt < threshold, value: `${Number.isInteger(alt) ? alt : alt.toFixed(1)} ft` });
     }
+    // ── Altura AGL por radioaltímetro (transition_to_climb) ─────────────
+    // RADIO HEIGHT solo es válida bajo ~2500 ft AGL (0 = fuera de rango). Por
+    // eso `radio_height_gt` exige lectura válida > 0 (nunca dispara en crucero
+    // por falta de dato) y `radio_height_lt` también (0 no significa "bajo").
+    // Permite puertas independientes de la elevación del aeropuerto
+    // (incidente 2026-09-20: campo a 1950 ft MSL).
+    if (has('radio_height_gt') || has('radioHeightGt')) {
+      const threshold = Number(conds.radio_height_gt ?? conds.radioHeightGt) || 0;
+      const rh = Number(tel.radioHeight ?? tel.radio_height ?? 0) || 0;
+      const ok = rh > 0 && rh > threshold;
+      items.push({ key: 'radio_height_gt', label: `RADIO HEIGHT > ${threshold} ft`, ok, value: rh > 0 ? `${Number.isInteger(rh) ? rh : rh.toFixed(1)} ft` : 'sin dato (fuera de rango)' });
+    }
+    if (has('radio_height_lt') || has('radioHeightLt')) {
+      const threshold = Number(conds.radio_height_lt ?? conds.radioHeightLt) || 0;
+      const rh = Number(tel.radioHeight ?? tel.radio_height ?? 0) || 0;
+      const ok = rh > 0 && rh < threshold;
+      items.push({ key: 'radio_height_lt', label: `RADIO HEIGHT < ${threshold} ft`, ok, value: rh > 0 ? `${Number.isInteger(rh) ? rh : rh.toFixed(1)} ft` : 'sin dato (fuera de rango)' });
+    }
     // ── Tren de aterrizaje (transition_to_landing) ──────────────────────
     // Sin esta clave, `transition_to_landing` (conditions {gear_down:true,
     // target_phase:"LANDING"}) no reconocía ninguna condición, caía a la
@@ -2368,6 +2386,14 @@ export class RuleEngine {
 
     if (preconditions.type === "delay_detection") {
       const conditions = preconditions.conditions || {};
+      // Si la config trae time_stopped_gt, la demora relevante es el tiempo
+      // detenido (p. ej. taxitogate_crew_delay_apologies en TAXI_TO_GATE), NO
+      // la demora sobre el itinerario. Sin esta delegación, el evento se
+      // ejecutaba por estar "tarde" respecto a la salida programada aunque el
+      // avión nunca se hubiera detenido (incidente 2026-09-20).
+      if (conditions.time_stopped_gt !== undefined || conditions.timeStoppedGt !== undefined) {
+        return this.evaluateTimeStopped(conditions, step, context);
+      }
       const ctx: any = context ?? this.flightContext;
       const tel: any = ctx?.getTelemetry?.() ?? {};
       const fsmInfo: any = ctx?.getFSM?.() ?? {};

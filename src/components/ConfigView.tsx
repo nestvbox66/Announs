@@ -18,6 +18,7 @@ import {
   EVENT_CONFIG_FLAVOR_KEY,
   NORMAL_SCENARIO_KEY,
   EventSwitchValue,
+  isConfigurableEvent,
   isEventSwitchValue,
   toUiSwitchValue,
 } from "../services/eventConfigConstants";
@@ -774,7 +775,7 @@ export default function ConfigView({
         const loaded = configResult.data ?? {};
         const switchMap: Record<string, EventSwitchValue> = {};
         for (const [key, value] of Object.entries(loaded)) {
-          if (isEventSwitchValue(value)) {
+          if (isEventSwitchValue(value) && isConfigurableEvent(key)) {
             switchMap[key] = value;
           }
         }

@@ -96,6 +96,36 @@ export const EVENT_CONFIG_FLAVOR_KEY = "announcement_flavor";
 /** Clave especial que persiste el sound pack activo de un vuelo. */
 export const EVENT_CONFIG_PACKAGE_KEY = "packages_location";
 
+/**
+ * Eventos de transición de fase: anclas internas del motor, NO configurables
+ * por el usuario (no se pueden apagar). Se excluyen de la pantalla de
+ * configuración de eventos.
+ */
+export const NON_CONFIGURABLE_EVENT_KEYS: ReadonlySet<string> = new Set([
+  "transition_to_taxi",
+  "transition_to_takeoff",
+  "transition_to_climb",
+  "transition_to_cruise",
+  "manual_transition_to_cruise",
+  "transition_to_descent",
+  "transition_to_landing",
+  "transition_to_taxi_in",
+  "transition_to_at_gate",
+]);
+
+/**
+ * ¿El evento debe mostrarse en la configuración de eventos del usuario?
+ * Falso para las anclas de transición (lista explícita + cualquier
+ * `transition_to_*` futuro).
+ */
+export function isConfigurableEvent(eventKey: string | null | undefined): boolean {
+  if (!eventKey) return true;
+  return !(
+    NON_CONFIGURABLE_EVENT_KEYS.has(eventKey) ||
+    eventKey.startsWith("transition_to_")
+  );
+}
+
 export function isEventSwitchValue(value: string | null | undefined): value is EventSwitchValue {
   return value === "OFF" || value === "PACK" || value === "IA";
 }

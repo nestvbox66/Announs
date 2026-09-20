@@ -346,6 +346,17 @@ export class FlightPhaseDetector {
     const engineRunning = snap.engineRunning ?? false;
     const simOnGround = snap.simOnGround;
     const atcOnParkingSpot = snap.atcOnParkingSpot;
+    // AGL por radioaltímetro (válido < ~2500 ft; 0 = fuera de rango).
+    // Imprescindible en aeropuertos con elevación: la altitud MSL nunca es 0
+    // en tierra y los umbrales MSL (0/500/1000) dejan de significar "tierra".
+    const radioHeight = Number((snap as any).radioHeight ?? (snap as any).radio_height ?? NaN);
+    const aglValid = Number.isFinite(radioHeight) && radioHeight > 0;
+    const aglFt = aglValid ? radioHeight : NaN;
+    // Tierra/aire: priorizar la señal física (válida a cualquier elevación);
+    // sin ella, conservar el criterio legacy MSL==0 (Mock / providers
+    // parciales, siempre a nivel del mar).
+    const isOnGround = simOnGround === true || (simOnGround === undefined && altitude === 0);
+    const isAirborne = simOnGround === false;
 
     // 1. CRUISE (prioridad alta): por altitud real de crucero (SimBrief) con
     // fallback al umbral genérico. Va primero porque un nivelado a FL170 con
@@ -359,15 +370,17 @@ export class FlightPhaseDetector {
     // fases (p. ej. CLIMB → DESCENT) abandonando la narrativa.
     if (this.detectDescent(snap)) return FlightPhase.DESCENT;
 
-    // GATE: en tierra, parado, puertas abiertas, motores apagados, freno puesto
-    if (altitude === 0 && groundspeed < 5 && !doorsClosed && !engineRunning && parkingBrake) {
+    // GATE: en tierra, parado, puertas abiertas, motores apagados, freno puesto.
+    // `isOnGround` (señal física o MSL==0) para no fallar en aeropuertos con
+    // elevación (incidente 2026-09-20: campo a 1950 ft).
+    if (isOnGround && groundspeed < 5 && !doorsClosed && !engineRunning && parkingBrake) {
       return FlightPhase.GATE;
     }
-    if (altitude === 0 && !doorsClosed && !engineRunning) {
+    if (isOnGround && !doorsClosed && !engineRunning) {
       return FlightPhase.BOARDING;
     }
     // PRE_FLIGHT: en tierra, parado, puertas cerradas, motores encendidos, freno puesto
-    if (altitude === 0 && groundspeed < 5 && doorsClosed && engineRunning && parkingBrake) {
+    if (isOnGround && groundspeed < 5 && doorsClosed && engineRunning && parkingBrake) {
       return FlightPhase.PRE_FLIGHT;
     }
 
@@ -446,7 +459,7 @@ export class FlightPhaseDetector {
         return taxiPhase;
       }
     } else if (
-      altitude === 0 &&
+      isOnGround &&
       groundspeed > 5 &&
       doorsClosed &&
       engineRunning &&
@@ -454,32 +467,47 @@ export class FlightPhaseDetector {
     ) {
       return taxiPhase;
     }
-    // TAKEOFF exige NO estar descendiendo (VS >= -100). Sin este gate, la
-    // condición alt<500 && gs>50 disparaba durante la aproximación final y la
-    // rodadura (mismo rango de altitud/velocidad), proponiendo TAKEOFF encima
-    // de APPROACH y contaminando la provenance del rodaje (incidente
-    // 2026-09-20). En el despegue real el VS es >= 0 (rodadura/rotación).
-    if (altitude > 0 && altitude < 500 && groundspeed > 50 && verticalSpeed >= -100) {
+    // TAKEOFF (AGL-aware): ascenso inicial apenas en el aire (AGL < 500). El
+    // criterio MSL anterior (alt 0-500) nunca se cumplía en aeropuertos con
+    // elevación y el detector saltaba directo a CLIMB (incidente 2026-09-20).
+    // El ascenso inicial exige VS > 100 para no confundir el flare (VS≈0 o
+    // negativo) con un despegue. En tierra el rodaje lo sigue gobernando TAXI.
+    const initialClimb = isAirborne
+      ? aglValid && aglFt < 500 && groundspeed > 50 && verticalSpeed > 100
+      : altitude > 0 && altitude < 500 && groundspeed > 50 && verticalSpeed >= -100;
+    if (initialClimb) {
       return FlightPhase.TAKEOFF;
     }
-    if (altitude >= 500 && altitude < 35000 && verticalSpeed > 0) {
+    // Ascenso: exige NO estar en tierra cuando la señal existe (evita CLIMB en
+    // plataforma en aeropuertos con elevación) y AGL > 500 cuando el
+    // radioaltímetro es válido. Sin señal de tierra (Mock) se conserva el
+    // criterio legacy MSL.
+    const climbing =
+      verticalSpeed > 0 &&
+      !isOnGround &&
+      (isAirborne ? !aglValid || aglFt > 500 : altitude >= 500 && altitude < 35000);
+    if (climbing) {
       return FlightPhase.CLIMB;
     }
     // NOTA: el DESCENT instantáneo (alt/vs directo) se eliminó a propósito:
     // ahora lo gobierna detectDescent() con ventana de 15s. Dejar la condición
     // vieja aquí anularía la histéresis (un dip de 0.3s volvería a proponerla).
-    if (altitude <= 1000 && altitude > 0 && groundspeed > 50) {
+    // APPROACH/LANDING con techo AGL cuando el radioaltímetro es válido (no
+    // dependen de la elevación del destino). Sin AGL, fallback MSL legacy.
+    const approachAlt = aglValid ? aglFt <= 1000 : altitude <= 1000 && altitude > 0;
+    if (approachAlt && altitude > 0 && groundspeed > 50) {
       return FlightPhase.APPROACH;
     }
     // LANDING: ajustado a <100 y 5<groundspeed<50 para evitar saltos con TAXI
-    if (altitude < 100 && groundspeed < 50 && groundspeed > 5) {
+    const landingAlt = aglValid ? aglFt < 100 : altitude < 100;
+    if (landingAlt && groundspeed < 50 && groundspeed > 5) {
       return FlightPhase.LANDING;
     }
     // TAXI_TO_GATE: solo en tierra y muy lento
-    if (altitude === 0 && groundspeed < 20) {
+    if (isOnGround && groundspeed < 20) {
       return FlightPhase.TAXI_IN;
     }
-    if (altitude === 0 && parkingBrake && doorsClosed) {
+    if (isOnGround && parkingBrake && doorsClosed) {
       return FlightPhase.AT_GATE;
     }
 

@@ -5,6 +5,45 @@ Todas las modificaciones notables de este proyecto se documentarán en este arch
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/),
 y este proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0-alpha] - 2026-09-20
+
+### Añadido
+- Tracking de vuelo: grabación en memoria del recorrido con downsampling por
+  delta (rumbo > 2°, altitud > 500 ft, velocidad > 20 kt, forzado cada 60 s),
+  hitos de despegue/toque, empaquetado GeoJSON `LineString` y persistencia en
+  `flight_paths` + resumen (`air_time`, `distance_nm`, `departure_time`,
+  `arrival_time`, `departure_date`) en `flights` al cerrar el vuelo (AT_GATE o
+  botón Finalizar). Incluye trazas `[FLUSH_DEBUG]` y buffer conservado ante
+  fallos (reintentable).
+- Detalle de vuelo rediseñado en el User HUB: cabecera (vuelo/aerolínea/
+  aeronave + foto), panel de ruta (ICAOs, nombres, horas, distancia), mapa
+  interactivo del track (Leaflet) y gráfico Velocidad+Altitud vs. tiempo
+  (Recharts, doble eje Y).
+- Historial de vuelos recientes con datos reales de Supabase (`flights` del
+  usuario, ordenado por `created_at DESC`): columnas Aerolínea, N° de Vuelo,
+  Ruta, Fecha y Hora, Duración y Valoración (placeholder); loading, vacío y
+  error con reintento; navegación al detalle por `flight_id`.
+
+### Cambiado
+- Pantallas de configuración de eventos (Vuelo Actual y Backoffice local):
+  los anclas de transición de fase ya no se listan ni se persisten como
+  opciones configurables por el usuario.
+- Versión visible en el sidebar: muestra la versión real del build en vez del
+  mock `v.0.1.0`.
+- Detector de fases `simOnGround`/AGL-aware: fases de tierra, `TAKEOFF`,
+  `CLIMB`, `APPROACH` y `LANDING` independientes de la elevación del
+  aeropuerto (corrige CLIMB prematuro en campos elevados).
+- Soporte `radio_height_gt/lt` en precondiciones `phase_transition`.
+- Rama `delay_detection` con `time_stopped_gt` delega a `evaluateTimeStopped`
+  (corrige `taxitogate_crew_delay_apologies` disparado por itinerario).
+
+### Corregido
+- Formato de tiempos al cierre del vuelo: `departure_time`/`arrival_time`
+  (`time`) y `departure_date` (`date`) en UTC, en vez de ISO completo que
+  Postgres rechazaba con `22007`.
+- (Backend, repo edge functions, ya desplegado) alias `TAXI_IN → TAXI_TO_GATE`
+  y `FLIGHT_COMPLETED → AT_GATE` en `scenarios-active`.
+
 ## [0.7.0-alpha] - 2026-09-20
 
 ### Añadido

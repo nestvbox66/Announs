@@ -50,6 +50,10 @@ export interface VueloReciente {
   puntuacion: number; // score 4500 XP
   duracion: string; // "1h 15m"
   aerolinea: string; // "Aerolíneas Argentinas"
+  /** flight_id de Supabase cuando la fila viene de datos reales. */
+  flightId?: string;
+  /** true si fpm/satisfacción/XP aún no están calculados (placeholders). */
+  isPlaceholderStats?: boolean;
 }
 
 export interface Logro {

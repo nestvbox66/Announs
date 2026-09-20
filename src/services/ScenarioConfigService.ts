@@ -15,6 +15,7 @@ import {
   NORMAL_SCENARIO_KEY,
   SCENARIO_DESIGNER_PHASES,
   scenarioPhaseLabel,
+  isConfigurableEvent,
 } from "./eventConfigConstants";
 
 export interface ScenarioOption {
@@ -203,12 +204,14 @@ export class ScenarioConfigService {
 
       const phases: ScenarioPhaseConfig[] = phasesRaw.map((phase) => {
         const phaseName = phase.name || scenarioPhaseLabel(phase.key);
-        const events = (phase.steps ?? []).map((step): ScenarioEventConfig => ({
-          eventKey: step.event_key,
-          displayName: step.display_name || step.event_key,
-          description: null,
-          speakerRole: step.speaker_role ?? null,
-        }));
+        const events = (phase.steps ?? [])
+          .filter((step) => isConfigurableEvent(step.event_key))
+          .map((step): ScenarioEventConfig => ({
+            eventKey: step.event_key,
+            displayName: step.display_name || step.event_key,
+            description: null,
+            speakerRole: step.speaker_role ?? null,
+          }));
         return { key: phase.key, name: phaseName, events };
       });
 
@@ -287,12 +290,14 @@ export class ScenarioConfigService {
       const phase = result.data.phase;
       const name = phase.name || scenarioPhaseLabel(phaseKey);
 
-      const events: ScenarioEventConfig[] = (phase.steps ?? []).map((step: any) => ({
-        eventKey: step.event?.key ?? step.event_key,
-        displayName: step.event?.display_name || step.event?.key || step.event_key,
-        description: null,
-        speakerRole: step.event?.speaker_role ?? null,
-      }));
+      const events: ScenarioEventConfig[] = (phase.steps ?? [])
+        .filter((step: any) => isConfigurableEvent(step.event?.key ?? step.event_key))
+        .map((step: any) => ({
+          eventKey: step.event?.key ?? step.event_key,
+          displayName: step.event?.display_name || step.event?.key || step.event_key,
+          description: null,
+          speakerRole: step.event?.speaker_role ?? null,
+        }));
 
       return { key: phaseKey, name, events };
     } catch {

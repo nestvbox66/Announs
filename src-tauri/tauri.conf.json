@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Announs",
-  "version": "0.7.0-alpha",
+  "version": "0.8.0-alpha",
   "identifier": "com.tauri.dev",
   "build": {
     "frontendDist": "../dist",

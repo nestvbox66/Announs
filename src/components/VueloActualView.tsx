@@ -69,6 +69,8 @@ import { EventCatalogService } from "../events/EventCatalogService";
 import { UserEventDefaultsService } from "../services/UserEventDefaultsService";
 import { FlightEventConfigService } from "../services/FlightEventConfigService";
 import { ScenarioConfigService } from "../services/ScenarioConfigService";
+import { FlightPathRecorder } from "../services/FlightPathRecorder";
+import { FlightPathService } from "../services/FlightPathService";
 import { BoardingMusicService, BoardingMusicTrack } from "../services/BoardingMusicService";
 import { musicController, RANDOM_MUSIC_ID } from "../services/MusicController";
 import { fileLogger } from "../services/FileLogger";
@@ -81,7 +83,7 @@ import type {
   ScenarioEventConfig,
   ScenarioOption,
 } from "../services/ScenarioConfigService";
-import { EVENT_CONFIG_FLAVOR_KEY, EVENT_CONFIG_PACKAGE_KEY, NORMAL_SCENARIO_KEY, EventSwitchValue, isEventSwitchValue } from "../services/eventConfigConstants";
+import { EVENT_CONFIG_FLAVOR_KEY, EVENT_CONFIG_PACKAGE_KEY, NORMAL_SCENARIO_KEY, EventSwitchValue, isConfigurableEvent, isEventSwitchValue } from "../services/eventConfigConstants";
 import {
   StepPendingEvent,
   StepExecutedEvent,
@@ -564,6 +566,13 @@ export default function VueloActualView({
   const lastDetectedPhaseRef = useRef<FlightPhase | null>(null);
   const phaseDetectorRef = useRef<FlightPhaseDetector | null>(null);
   if (!phaseDetectorRef.current) phaseDetectorRef.current = new FlightPhaseDetector();
+  // Recorrido del vuelo activo (downsampling por delta). El buffer se vacía
+  // recién tras un guardado exitoso en `flight_paths`.
+  const flightPathRecorderRef = useRef<FlightPathRecorder | null>(null);
+  if (!flightPathRecorderRef.current) flightPathRecorderRef.current = new FlightPathRecorder();
+  // `flightId` como ref para leerlo desde el bucle de telemetría y los handlers
+  // sin depender de closures con estado obsoleto.
+  const flightIdRef = useRef<string | null>(null);
   // El detector necesita flight.cruiseAltitude (SimBrief) para detectar CRUISE
   // a la altitud real del vuelo (p. ej. FL170) en vez del umbral fijo 25000.
   // flightContextRef es estable (misma instancia), basta con inyectarlo una vez.
@@ -578,6 +587,25 @@ export default function VueloActualView({
     controller.onTelemetry = (snap) => {
       ctx.updateTelemetry(snap);
       scheduler.notifyTelemetry(snap);
+
+      // Registro del recorrido (downsampling por delta): de cada muestra de
+      // telemetría solo se persiste en memoria un punto si cambió el rumbo,
+      // la altitud o la velocidad, o si pasó el tiempo máximo sin registrar.
+      try {
+        flightPathRecorderRef.current?.record(
+          {
+            latitude: snap.latitude,
+            longitude: snap.longitude,
+            altitude: snap.altitude,
+            groundspeed: snap.groundspeed,
+            heading: snap.heading,
+            simOnGround: snap.simOnGround,
+          },
+          scheduler.getCurrentPhase()
+        );
+      } catch (err) {
+        console.warn("[VueloActualView] Error registrando punto de recorrido:", err);
+      }
 
       // Transición automática vía detector con histéresis (evita saltos por ruido)
       // Sincronizar boardingCompleted para PRE_FLIGHT (evita transición temprana)
@@ -816,6 +844,189 @@ export default function VueloActualView({
     onStateChangeRef.current = onStateChange;
   });
 
+  // Mantener `flightIdRef` sincronizado con el estado (lo leen el bucle de
+  // telemetría y los handlers de guardado del recorrido).
+  useEffect(() => {
+    flightIdRef.current = flightId;
+  }, [flightId]);
+
+  /**
+   * Cierre del vuelo: calcula el resumen (air_time despegue→toque, distancia
+   * Haversine del historial, horas de salida/llegada), lo persiste con UPDATE
+   * en `public.flights` y vuelca el GeoJSON en `public.flight_paths`.
+   *
+   * Blindaje:
+   *  - Toda la operación va en try/catch: ante cualquier fallo se loguea el
+   *    error COMPLETO y el buffer NO se limpia (reintentable).
+   *  - El buffer en memoria solo se limpia si TODO se guardó exitosamente.
+   *  - Los flushes concurrentes (AT_GATE + botón) se serializan en cadena para
+   *    que no se pisen entre sí ni dupliquen el INSERT.
+   *  - El `flight_id` se captura al inicio (ref + fallback a FlightContext)
+   *    para que un desmontaje/limpieza de estado no lo invalide mid-flight.
+   */
+  const flushChainRef = useRef<Promise<void>>(Promise.resolve());
+  const lastFlushErrorRef = useRef<string | null>(null);
+
+  const flushFlightPath = (reason: string): Promise<void> => {
+    const run = async (): Promise<void> => {
+      const tag = `[FLUSH_DEBUG:${reason}]`;
+      console.log(`${tag} inicio`, { reason, at: new Date().toISOString() });
+      fileLogger.log(`${tag} inicio`, { reason });
+
+      // 1) Resolver flight_id (ref sincronizada con el estado + fallback).
+      const recorder = flightPathRecorderRef.current;
+      let id = flightIdRef.current;
+      let idSource = "flightIdRef";
+      if (!id) {
+        try {
+          id = flightContextRef.current?.getFlight()?.flightId ?? null;
+          if (id) idSource = "flightContext.flightId";
+        } catch {
+          // ignorar: se reporta abajo como faltante
+        }
+      }
+      console.log(`${tag} flight_id`, { flightId: id, source: idSource });
+      if (!recorder) {
+        const msg = `${tag} ABORTADO: sin recorder en memoria`;
+        console.warn(msg);
+        fileLogger.warn(msg, { reason });
+        return;
+      }
+      if (!id || typeof id !== "string" || id.trim() === "") {
+        const msg =
+          `${tag} ABORTADO: flight_id ausente o inválido. ` +
+          `Sin flight_id no hay UPDATE en flights ni INSERT en flight_paths. ` +
+          `Causa probable: el vuelo se inició sin despacho importado (sin fila en flights).`;
+        console.warn(msg, { flightIdRef: flightIdRef.current });
+        fileLogger.warn(msg, { reason, flightIdRef: flightIdRef.current });
+        lastFlushErrorRef.current = "missing-flight-id";
+        return;
+      }
+
+      // 2) Estado del buffer.
+      const pointCount = recorder.getPointCount();
+      console.log(`${tag} buffer`, {
+        points: pointCount,
+        recording: recorder.isRecording(),
+        phase: recorder.getPhase(),
+        scenario: recorder.getScenarioKey(),
+      });
+      if (pointCount === 0) {
+        console.log(`${tag} sin puntos: nada que persistir, se resetea el recorder`);
+        fileLogger.log(`${tag} sin puntos`, { reason });
+        recorder.reset();
+        return;
+      }
+
+      // 3) Resumen calculado desde el recorder. Los tiempos viajan como epoch
+      // ms y el servicio los formatea a `time`/`date` (UTC); el log muestra
+      // ambos formatos para verificar contra el esquema real.
+      const feature = recorder.toGeoJSON(id);
+      const takeoffMs = recorder.getTakeoffMs();
+      const touchdownMs = recorder.getTouchdownMs();
+      const airMinutes = recorder.getAirMinutes();
+      const distanceNm = recorder.getDistanceNm();
+      console.log(`${tag} resumen`, {
+        flightId: id,
+        points: feature.properties.point_count,
+        phase: feature.properties.flight_phase,
+        airMinutes,
+        distanceNm,
+        takeoffMs,
+        touchdownMs,
+        takeoffIso: takeoffMs ? new Date(takeoffMs).toISOString() : null,
+        touchdownIso: touchdownMs ? new Date(touchdownMs).toISOString() : null,
+      });
+      fileLogger.log(`${tag} resumen`, {
+        flightId: id,
+        points: feature.properties.point_count,
+        airMinutes,
+        distanceNm,
+        takeoffMs,
+        touchdownMs,
+      });
+
+      try {
+        // 4) UPDATE en flights con el payload exacto.
+        const summaryPayload = {
+          airTimeMin: airMinutes,
+          distanceNm,
+          departureMs: takeoffMs,
+          arrivalMs: touchdownMs,
+        };
+        console.log(`${tag} UPDATE flights → payload`, { flightId: id, ...summaryPayload });
+        fileLogger.log(`${tag} UPDATE flights`, { flightId: id, ...summaryPayload });
+        const summaryResult = await FlightPathService.updateFlightSummary(id, summaryPayload);
+        console.log(`${tag} UPDATE flights ← resultado`, {
+          success: summaryResult.success,
+          error: summaryResult.success ? null : summaryResult.error,
+        });
+        if (!summaryResult.success) {
+          throw new Error(`UPDATE flights falló: ${summaryResult.error ?? "error desconocido"}`);
+        }
+
+        // 5) INSERT en flight_paths con el payload exacto.
+        console.log(`${tag} INSERT flight_paths → payload`, {
+          flightId: id,
+          path_data: feature,
+        });
+        fileLogger.log(`${tag} INSERT flight_paths`, {
+          flightId: id,
+          points: feature.properties.point_count,
+          phase: feature.properties.flight_phase,
+        });
+        const pathResult = await FlightPathService.saveFlightPath(id, feature);
+        console.log(`${tag} INSERT flight_paths ← resultado`, {
+          success: pathResult.success,
+          error: pathResult.success ? null : pathResult.error,
+        });
+        if (!pathResult.success) {
+          throw new Error(`INSERT flight_paths falló: ${pathResult.error ?? "error desconocido"}`);
+        }
+
+        // 6) Todo persistido → liberar el buffer en memoria.
+        recorder.reset();
+        lastFlushErrorRef.current = null;
+        console.log(`${tag} ✅ OK: vuelo cerrado y buffer liberado`);
+        fileLogger.log(`${tag} OK`, { reason, points: feature.properties.point_count });
+      } catch (err) {
+        // Blindaje: el buffer se conserva para reintentar; nunca se limpia en fallo.
+        const full = err instanceof Error
+          ? { name: err.name, message: err.message, stack: err.stack }
+          : { value: String(err) };
+        console.error(`${tag} ❌ FALLO (buffer conservado, reintentable):`, full);
+        fileLogger.warn(`${tag} FALLO (buffer conservado)`, { reason, ...full });
+        lastFlushErrorRef.current = full.message ?? String(err);
+        if (String(full.message ?? "").includes("row-level security")) {
+          const hint =
+            `${tag} pista RLS: Supabase rechazó la escritura. ` +
+            `Revisá las policies de INSERT/UPDATE en flight_paths y flights para el rol authenticated.`;
+          console.warn(hint);
+          fileLogger.warn(hint, { reason });
+        }
+      }
+    };
+
+    // Serializar: cada disparo espera al anterior sin pisarlo.
+    const chained = flushChainRef.current.then(run, run);
+    flushChainRef.current = chained.catch(() => {});
+    return chained;
+  };
+
+  // Botón "Finalizar Vuelo": persiste el recorrido y recién después resetea la
+  // UI. El `await` garantiza que onResetSimulation (que puede desmontar /
+  // limpiar estado) NUNCA corre antes de que Supabase responda.
+  const handleFinalizarVuelo = async (): Promise<void> => {
+    console.log("[FLUSH_DEBUG:finalizar-vuelo] botón Finalizar pulsado; esperando flush antes del reset");
+    fileLogger.log("[FLUSH_DEBUG:finalizar-vuelo] botón pulsado");
+    try {
+      await flushFlightPath("finalizar-vuelo");
+    } finally {
+      console.log("[FLUSH_DEBUG:finalizar-vuelo] flush terminado (ok o fallo); reseteando UI");
+      onResetSimulation();
+    }
+  };
+
   // Subscribe to Scheduler phase events (Fase 0 GATE -> BOARDING flow)
   useEffect(() => {
     const scheduler = schedulerRef.current;
@@ -846,6 +1057,14 @@ export default function VueloActualView({
       setCurrentSubStage(mapped.subStage);
       if (mapped.state !== FlightState.NoIniciado && mapped.state !== currentStateRef.current) {
         onStateChangeRef.current(mapped.state);
+      }
+      // Gatillo automático: al llegar a AT_GATE se persiste el recorrido.
+      // Se loguea el disparo SIEMPRE (aunque el flush decida no-op) para que
+      // un trigger que nunca llega sea visible en consola.
+      if (phase === "AT_GATE") {
+        console.log("[FLUSH_DEBUG:at_gate] trigger AT_GATE detectado; disparando flush");
+        fileLogger.log("[FLUSH_DEBUG:at_gate] trigger AT_GATE detectado", { phase });
+        void flushFlightPath("at_gate");
       }
     });
 
@@ -1483,7 +1702,7 @@ export default function VueloActualView({
 
       const switchMap: Record<string, EventSwitchValue> = {};
       for (const [key, value] of Object.entries(merged)) {
-        if (isEventSwitchValue(value)) {
+        if (isEventSwitchValue(value) && isConfigurableEvent(key)) {
           switchMap[key] = value;
         }
       }
@@ -1794,6 +2013,11 @@ export default function VueloActualView({
       lastDetectedPhaseRef.current = null;
 
       await schedulerRef.current?.startFlight(mode);
+      // Arrancar el registro del recorrido para este vuelo (limpia buffer previo).
+      flightPathRecorderRef.current?.start({
+        phase: schedulerRef.current?.getCurrentPhase() ?? null,
+        scenarioKey: selectedScenarioKey,
+      });
       // Scheduler.startFlight resincroniza los umbrales de demora desde la DB
       // (events.default_delay_ms); se re-aplican los delays elegidos por el usuario
       // en los sliders de "Configurar Eventos" para que se usen en el vuelo.
@@ -3318,7 +3542,7 @@ export default function VueloActualView({
               currentSubStage === "Plataforma" ? (
                 <button 
                   id="header-btn-finalizar-vuelo"
-                  onClick={onResetSimulation}
+                  onClick={() => { void handleFinalizarVuelo(); }}
                   className="bg-[#43E600] text-black font-mono font-black px-4 py-2 rounded-[5px] text-xs hover:bg-[#3bcc00] transition-all flex items-center justify-center gap-1.5 cursor-pointer h-9 shrink-0 shadow-[0_0_15px_rgba(67,230,0,0.35)] hover:scale-[1.01] active:scale-[0.99]"
                 >
                   <CheckCircle className="w-3.5 h-3.5" />
@@ -5262,7 +5486,7 @@ export default function VueloActualView({
             <div className="mt-6 pt-4 border-t border-white/15 flex justify-end">
               <button
                 id="btn-reiniciar-sim"
-                onClick={onResetSimulation}
+                onClick={() => { void handleFinalizarVuelo(); }}
                 className="bg-[#43E600] text-black font-bold font-mono px-5 py-2.5 rounded-[5px] text-xs hover:bg-[#34b600] transition-all cursor-pointer flex items-center gap-1.5"
               >
                 🔄 CARGAR NUEVO DESPACHO (REINICIAR RUTA)

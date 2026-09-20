@@ -20,10 +20,8 @@ import {
   BarChart3,
   BookOpen,
   User,
-  ArrowLeft,
   Users,
   Calendar,
-  Plane,
   Map,
   Lock,
   LogIn,
@@ -34,8 +32,8 @@ import {
 import { VueloReciente, Logro } from "../types";
 import PassportView from "./PassportView";
 import AccountView from "./AccountView";
-import TelemetryView from "./TelemetryView";
-import RouteMapView from "./RouteMapView";
+import FlightDetailView from "./flight/FlightDetailView";
+import { FlightHistoryService, FlightHistoryEntry } from "../services/FlightHistoryService";
 
 interface HubViewProps {
   vuelos: VueloReciente[];
@@ -57,7 +55,11 @@ export default function HubView({
   const { t, i18n } = useTranslation();
   const [subView, setSubView] = useState<"overview" | "stats" | "passport" | "account">("overview");
   const [selectedFlight, setSelectedFlight] = useState<VueloReciente | null>(null);
-  const [flightReportTab, setFlightReportTab] = useState<"overview" | "telemetry">("overview");
+  // Historial real desde Supabase (`public.flights` del usuario autenticado).
+  const [recentFlights, setRecentFlights] = useState<FlightHistoryEntry[] | null>(null);
+  const [flightsLoading, setFlightsLoading] = useState(false);
+  const [flightsError, setFlightsError] = useState<string | null>(null);
+  const [historyReloadKey, setHistoryReloadKey] = useState(0);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -98,23 +100,62 @@ export default function HubView({
     return () => { cancelled = true; };
   }, [isLoggedIn]);
 
-  const getAircraftByFlight = (codigo: string, aerolinea: string) => {
-    const code = (codigo || "").toUpperCase();
-    const aero = (aerolinea || "").toLowerCase();
-    if (code.includes("G3") || aero.includes("gol")) {
-      return "Boeing 737 MAX 8 - B38M";
+  // Historial de vuelos recientes: datos reales del usuario autenticado.
+  useEffect(() => {
+    if (!isLoggedIn) {
+      setRecentFlights(null);
+      setFlightsError(null);
+      setFlightsLoading(false);
+      return;
     }
-    if (code.includes("LA") || aero.includes("latam")) {
-      return "Airbus A320neo - A20N";
-    }
-    if (code.includes("WJ") || aero.includes("smart")) {
-      return "Airbus A321neo - A21N";
-    }
-    if (code.includes("FB") || aero.includes("bondi")) {
-      return "Boeing 737 800 - B738";
-    }
-    return "Boeing 737 800 - B738";
-  };
+    let cancelled = false;
+    const loadHistory = async () => {
+      setFlightsLoading(true);
+      setFlightsError(null);
+      const result = await FlightHistoryService.loadRecentFlights();
+      if (cancelled) return;
+      if (result.success) {
+        setRecentFlights(result.data ?? []);
+      } else {
+        setFlightsError(result.error ?? "No se pudo cargar el historial.");
+        setRecentFlights(null);
+      }
+      setFlightsLoading(false);
+    };
+    void loadHistory();
+    return () => { cancelled = true; };
+  }, [isLoggedIn, historyReloadKey]);
+
+  /**
+   * Filas de la tabla: datos reales cuando la consulta terminó, mocks de la
+   * prop solo como respaldo previo a la primera carga. Cada fila real lleva su
+   * `flight_id` y marca de stats pendientes para el detalle.
+   */
+  const tableRows: VueloReciente[] = (() => {
+    if (recentFlights === null) return vuelos;
+    return recentFlights.map((entry) => ({
+      id: entry.flightId,
+      flightId: entry.flightId,
+      codigo: entry.flightNumber,
+      origen: entry.departIcao,
+      origenCiudad: entry.departCity,
+      destino: entry.arriveIcao,
+      destinoCiudad: entry.arriveCity,
+      fecha: entry.departLabel,
+      fpmLanding: 0,
+      satisfaccionMedia: 0,
+      puntuacion: 0,
+      duracion: entry.durationLabel,
+      aerolinea: entry.airline,
+      isPlaceholderStats: true,
+    }));
+  })();
+  const historyLoaded = recentFlights !== null;
+
+  // Render Full Screen Flight Detail view if selected
+  if (selectedFlight) {
+    return <FlightDetailView flight={selectedFlight} onBack={() => setSelectedFlight(null)} />;
+  }
 
   // Let's map country flags or stamps for the passport stamp representation
   const countryStamps: { [key: string]: { flag: string; city: string; stampColor: string } } = {
@@ -181,248 +222,6 @@ export default function HubView({
       </div>
     );
   };
-
-  // Render Full Screen Flight Detail view if selected
-  if (selectedFlight) {
-    const valoracion = (selectedFlight.satisfaccionMedia / 10).toFixed(1);
-    let landingColor = "text-[#43E600]";
-    if (Math.abs(selectedFlight.fpmLanding) >= 200) {
-      landingColor = "text-[#E600D2]";
-    } else if (Math.abs(selectedFlight.fpmLanding) >= 150) {
-      landingColor = "text-[#E68B00]";
-    }
-
-    const routeDetails = (() => {
-      const code = selectedFlight.codigo;
-      if (code === "AR1842") {
-        return {
-          orgName: "Aeroparque Jorge Newbery",
-          destName: "Ambrosio Taravella Intl",
-          depTime: "14:15",
-          arrTime: "15:25",
-          dist: "348 NM",
-          dur: "1H 10M"
-        };
-      }
-      if (code === "LA2411") {
-        return {
-          orgName: "Ministro Pistarini Intl",
-          destName: "Arturo Merino Benítez Intl",
-          depTime: "10:30",
-          arrTime: "12:25",
-          dist: "625 NM",
-          dur: "1H 55M"
-        };
-      }
-      if (code === "G3 7453") {
-        return {
-          orgName: "Guarulhos International",
-          destName: "Aeroparque Jorge Newbery",
-          depTime: "08:15",
-          arrTime: "11:00",
-          dist: "915 NM",
-          dur: "2H 45M"
-        };
-      }
-      return {
-        orgName: "Aeroparque Jorge Newbery",
-        destName: "Salgado Filho Intl",
-        depTime: "00:15",
-        arrTime: "02:12",
-        dist: "546 NM",
-        dur: "1H 57M"
-      };
-    })();
-
-    return (
-      <div id="flight-detail-view" className="space-y-6 animate-fadeIn">
-        {/* Top Button / Action Bar of Flight Detail */}
-        <div className="flex items-center justify-between border-b border-[#3B7EB2]/50 pb-4">
-          <div className="flex items-center gap-3">
-            <button
-              id="details-back-button"
-              onClick={() => {
-                setSelectedFlight(null);
-                setFlightReportTab("overview");
-              }}
-              className="bg-[#2C6591]/50 border border-white/20 hover:bg-[#45AFFF]/15 text-white p-2 rounded-[5px] transition-all cursor-pointer flex items-center justify-center"
-              title="Volver"
-            >
-              <ArrowLeft className="w-5 h-5 text-[#45AFFF]" />
-            </button>
-            <div>
-              <div className="text-xs text-[#45AFFF]/60 font-mono tracking-widest uppercase mb-0.5">DETALLE DE REGISTRO</div>
-              <h1 className="font-display font-extrabold text-2xl tracking-tight text-[#45AFFF] uppercase flex items-center gap-2">
-                REPORTE DE VUELO: {selectedFlight.codigo}
-              </h1>
-            </div>
-          </div>
-        </div>
-
-        {/* Content detail container */}
-        <div id="flight-detail-info-card" className="bg-[#2C6591]/20 border border-white/20 rounded-[5px] p-6 space-y-6 shadow-md">
-          {/* Header row containing airline logo container & beautiful direct route map style columns */}
-          <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 pb-6 border-b border-white/10 items-stretch">
-            {/* 1. Large prominent airline badge box */}
-            <div className="lg:col-span-1 bg-[#00172e]/85 border border-[#3B7EB2]/40 rounded-[5px] p-5 flex flex-col items-center justify-center text-center space-y-3 min-h-[140px] relative overflow-hidden group">
-              <div className="absolute top-0 right-0 w-8 h-8 bg-white/5 rounded-bl-full pointer-events-none"></div>
-              {(() => {
-                const isAR = selectedFlight.aerolinea.toLowerCase().includes("argentinas");
-                const isFB = selectedFlight.aerolinea.toLowerCase().includes("bondi");
-                const isWJ = selectedFlight.aerolinea.toLowerCase().includes("smart");
-                const isLA = selectedFlight.aerolinea.toLowerCase().includes("latam");
-
-                const badgeBg = isAR ? "bg-sky-500 text-white" : isFB ? "bg-amber-400 text-slate-900" : isWJ ? "bg-[#E600D2] text-white" : "bg-slate-600 text-white";
-                const codeStr = isAR ? "ARG" : isFB ? "FBO" : isWJ ? "JSM" : isLA ? "LAN" : "PLT";
-                
-                return (
-                  <div className="flex flex-col items-center gap-3">
-                    <div className={`${badgeBg} w-16 h-16 rounded-[4px] border border-white/20 flex items-center justify-center font-mono font-black text-xl shadow-xl transition-transform group-hover:scale-105 duration-300`}>
-                      {codeStr}
-                    </div>
-                    <div className="space-y-0.5">
-                      <div className="text-sm font-sans font-extrabold text-white uppercase tracking-wide leading-tight">
-                        {selectedFlight.aerolinea}
-                      </div>
-                      <div className="text-[10px] font-mono text-[#45AFFF] uppercase tracking-wider font-bold">
-                        {getAircraftByFlight(selectedFlight.codigo, selectedFlight.aerolinea)}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })()}
-            </div>
-
-            {/* 2. Custom route visual card styled exactly as the attached screenshot */}
-            <div className="lg:col-span-3 bg-[#00172e]/75 border border-[#3B7EB2]/45 rounded-[5px] p-6 flex flex-col sm:flex-row items-center justify-between gap-6 min-h-[140px] text-white relative">
-              
-              {/* Origin Section */}
-              <div className="flex flex-col text-center sm:text-left space-y-1 w-full sm:w-auto">
-                <span className="font-sans font-black text-5xl sm:text-6xl tracking-wide uppercase leading-none drop-shadow-md text-white">
-                  {selectedFlight.origen}
-                </span>
-                <span className="text-[10px] text-[#45AFFF]/80 tracking-widest font-mono font-bold block">
-                  ORIGIN
-                </span>
-                <span className="text-xs text-white/70 font-sans max-w-[190px] leading-snug">
-                  {routeDetails.orgName}
-                </span>
-                <span className="text-xl font-mono font-black text-[#43E600] mt-1 pt-1 block">
-                  {routeDetails.depTime}
-                </span>
-              </div>
-
-              {/* Middle flight visual connection */}
-              <div className="flex flex-col items-center justify-center flex-1 px-2 max-w-[200px] w-full">
-                <span className="text-[11px] font-mono font-extrabold text-white/50 tracking-wider uppercase pb-1">
-                  {routeDetails.dur}
-                </span>
-                
-                <div className="flex items-center w-full gap-2 text-[#45AFFF]/70 my-1">
-                  <div className="h-[2px] flex-1 bg-white/20"></div>
-                  <Plane className="w-4 h-4 rotate-90 text-[#45AFFF] drop-shadow-lg scale-110" />
-                  <div className="h-[2px] flex-1 bg-white/20"></div>
-                </div>
-
-                <span className="text-[11px] font-mono font-bold text-[#45AFFF] tracking-wider pt-1 uppercase">
-                  {routeDetails.dist}
-                </span>
-              </div>
-
-              {/* Destination Section */}
-              <div className="flex flex-col text-center sm:text-right sm:items-end space-y-1 w-full sm:w-auto">
-                <span className="font-sans font-black text-5xl sm:text-6xl tracking-wide uppercase leading-none drop-shadow-md text-white">
-                  {selectedFlight.destino}
-                </span>
-                <span className="text-[10px] text-[#45AFFF]/80 tracking-widest font-mono font-bold block">
-                  DEST
-                </span>
-                <span className="text-xs text-white/70 font-sans max-w-[190px] leading-snug block">
-                  {routeDetails.destName}
-                </span>
-                <span className="text-xl font-mono font-black text-[#43E600] mt-1 pt-1 block">
-                  {routeDetails.arrTime}
-                </span>
-              </div>
-
-            </div>
-          </div>
-
-          {/* Tab menu options in top of analysis block */}
-          <div className="space-y-4">
-            <div className="flex items-center justify-start border-b border-white/10 gap-2 pb-[1px]" id="flight-report-tabs">
-              <button
-                onClick={() => setFlightReportTab("overview")}
-                className={`px-5 py-2.5 text-xs font-mono font-bold uppercase tracking-wider transition-all relative cursor-pointer ${
-                  flightReportTab === "overview" 
-                    ? "text-[#45AFFF] border-[#45AFFF] bg-[#00345C]/20 border-b-2" 
-                    : "text-white/60 hover:text-white/90 hover:bg-[#2C6591]/30"
-                }`}
-              >
-                VISTA GENERAL
-              </button>
-              <button
-                onClick={() => setFlightReportTab("telemetry")}
-                className={`px-5 py-2.5 text-xs font-mono font-bold uppercase tracking-wider transition-all relative cursor-pointer ${
-                  flightReportTab === "telemetry" 
-                    ? "text-[#45AFFF] border-[#45AFFF] bg-[#00345C]/20 border-b-2" 
-                    : "text-white/60 hover:text-white/90 hover:bg-[#2C6591]/30"
-                }`}
-              >
-                TELEMETRÍA AVANZADA
-              </button>
-            </div>
-
-            {/* Conditionally render selected view tab */}
-            {flightReportTab === "overview" ? (
-              <div className="space-y-6 animate-fadeIn" id="overview-tab-content">
-                
-                {/* Primary stats overview */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-                  <div className="bg-[#00345C]/30 border border-white/5 rounded-[4px] p-4 text-center">
-                    <div className="text-xs font-mono text-white/60 mb-1">TASA DE DESCENSO</div>
-                    <div className={`text-3xl font-mono font-extrabold ${landingColor}`}>
-                      {selectedFlight.fpmLanding} FPM
-                    </div>
-                    <div className="text-[10px] text-white/40 mt-1 uppercase font-mono">
-                      {Math.abs(selectedFlight.fpmLanding) <= 100 ? "Aterrizaje Perfecto" : Math.abs(selectedFlight.fpmLanding) <= 150 ? "Suave" : Math.abs(selectedFlight.fpmLanding) <= 200 ? "Normal" : "Duro"}
-                    </div>
-                  </div>
-
-                  <div className="bg-[#00345C]/30 border border-white/5 rounded-[4px] p-4 text-center">
-                    <div className="text-xs font-mono text-white/60 mb-1">VALORACIÓN DE CABINA</div>
-                    <div className="text-3xl font-mono font-extrabold text-[#45AFFF] flex items-center justify-center gap-1">
-                      <span>{valoracion}</span>
-                      <span className="text-sm text-white/40">/10</span>
-                    </div>
-                    <div className="text-[10px] text-white/40 mt-1 uppercase font-mono">
-                      {selectedFlight.satisfaccionMedia}% Satisfacción Media
-                    </div>
-                  </div>
-
-                  <div className="bg-[#00345C]/30 border border-white/5 rounded-[4px] p-4 text-center">
-                    <div className="text-xs font-mono text-white/60 mb-1">PUNTUACIÓN DE CARRERA</div>
-                    <div className="text-3xl font-mono font-extrabold text-[#43E600]">
-                      +{selectedFlight.puntuacion} XP
-                    </div>
-                    <div className="text-[10px] text-white/40 mt-1 uppercase font-mono">
-                      Simulador Sincronizado
-                    </div>
-                  </div>
-                </div>
-
-                {/* Tactical flight route map */}
-                <RouteMapView flight={selectedFlight} />
-              </div>
-            ) : (
-              <TelemetryView flight={selectedFlight} />
-            )}
-          </div>
-
-        </div>
-      </div>
-    );
-  }
 
   if (!isLoggedIn) {
     const handleLocalLogin = async (e: React.FormEvent) => {
@@ -783,24 +582,63 @@ export default function HubView({
                 <thead>
                   <tr className="border-b border-white/20 text-xs font-mono text-[#45AFFF]/80">
                     <th className="py-2.5 px-3">Aerolínea</th>
-                    <th className="py-2.5 px-3">Vuelo</th>
+                    <th className="py-2.5 px-3">N° de Vuelo</th>
                     <th className="py-2.5 px-3">Ruta</th>
+                    <th className="py-2.5 px-3">Fecha y Hora</th>
                     <th className="py-2.5 px-3">Duración</th>
-                    <th className="py-2.5 px-3 text-right">Aterrizaje (FPM)</th>
                     <th className="py-2.5 px-3 text-center">Valoración</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/10 text-xs text-white/90">
-                  {vuelos.map((flight) => {
-                    // Classify landing comfort
-                    let landingColor = "text-[#43E600]";
-                    if (Math.abs(flight.fpmLanding) >= 200) {
-                      landingColor = "text-[#E600D2]";
-                    } else if (Math.abs(flight.fpmLanding) >= 150) {
-                      landingColor = "text-[#E68B00]";
-                    }
-
-                    const ratingVal = (flight.satisfaccionMedia / 10).toFixed(1);
+                  {flightsLoading ? (
+                    <tr>
+                      <td colSpan={6} className="py-8 px-3 text-center">
+                        <div className="flex items-center justify-center gap-2 text-white/60 font-mono text-xs">
+                          <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                          </svg>
+                          Cargando tu historial de vuelos…
+                        </div>
+                      </td>
+                    </tr>
+                  ) : flightsError ? (
+                    <tr>
+                      <td colSpan={6} className="py-8 px-3 text-center">
+                        <div className="space-y-2">
+                          <p className="text-xs font-mono text-red-300">No se pudo cargar el historial: {flightsError}</p>
+                          <button
+                            type="button"
+                            onClick={() => setHistoryReloadKey((k) => k + 1)}
+                            className="bg-[#2C6591]/50 border border-white/20 hover:bg-[#45AFFF]/15 text-white px-3 py-1.5 rounded-[5px] font-mono text-[11px] transition-all cursor-pointer"
+                          >
+                            Reintentar
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : historyLoaded && tableRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="py-10 px-3 text-center">
+                        <div className="flex flex-col items-center gap-2">
+                          <PlaneTakeoff className="w-8 h-8 text-[#45AFFF]/40" />
+                          <p className="text-sm font-bold text-white/80">Aún no registraste ningún vuelo</p>
+                          <p className="text-[11px] font-mono text-white/50 max-w-sm">
+                            Cuando completes tu primer vuelo con Announs, aparecerá aquí tu historial.
+                          </p>
+                          <button
+                            type="button"
+                            onClick={onStartFlightShortcut}
+                            className="mt-1 bg-[#45AFFF] hover:bg-[#45AFFF]/85 text-[#00345C] px-4 py-2 rounded font-mono font-extrabold text-[11px] uppercase tracking-widest transition-all cursor-pointer"
+                          >
+                            Iniciar mi primer vuelo
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : tableRows.map((flight) => {
+                    const isPhStats = flight.isPlaceholderStats === true;
+                    const ratingVal = isPhStats ? "—" : (flight.satisfaccionMedia / 10).toFixed(1);
 
                     return (
                       <tr 
@@ -825,14 +663,15 @@ export default function HubView({
                             </span>
                           </div>
                         </td>
+                        <td className="py-3 px-3 font-mono text-white/70 whitespace-nowrap">{flight.fecha}</td>
                         <td className="py-3 px-3 font-mono text-white/70">{flight.duracion}</td>
-                        <td className="py-3 px-3 text-right font-mono font-bold">
-                          <span className={landingColor}>{flight.fpmLanding} FPM</span>
-                        </td>
                         <td className="py-3 px-3 text-center">
-                          <div className="inline-flex items-center gap-1 bg-black/20 px-2.5 py-0.5 rounded-[4px] border border-white/10 font-mono font-bold text-white">
+                          <div
+                            className="inline-flex items-center gap-1 bg-black/20 px-2.5 py-0.5 rounded-[4px] border border-white/10 font-mono font-bold text-white"
+                            title={isPhStats ? "La valoración estará disponible próximamente" : undefined}
+                          >
                             <UserCheck className="w-3 h-3 text-[#43E600] scale-90" />
-                            <span className="text-[#43E600]">{ratingVal}</span>
+                            <span className={isPhStats ? "text-white/40" : "text-[#43E600]"}>{ratingVal}</span>
                             <span className="text-[9px] text-white/40 font-normal">/10</span>
                           </div>
                         </td>

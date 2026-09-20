@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import ConnectionStatus from "./flight/ConnectionStatus";
 import type { FlightController } from "../services/FlightController";
+import { APP_VERSION } from "../version";
 
 interface SidebarProps {
   currentView: string;
@@ -122,7 +123,7 @@ export default function Sidebar({
         {!collapsed && (
           <div className="mt-4 flex items-center justify-center gap-1.5 text-[10px] font-mono text-[#45AFFF]/50">
             <Terminal className="w-3 h-3" />
-            <span>Announs Desktop. v.0.1.0</span>
+            <span>Announs Desktop. v{APP_VERSION}</span>
           </div>
         )}
       </div>
