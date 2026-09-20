@@ -17,10 +17,22 @@ export class FlightPhaseDetector {
   private stability = 0;
   private readonly STABILITY_THRESHOLD = 3;
   private boardingCompleted = false;
-  // Última fase CONFIRMADA (la que detectPhase realmente devolvió, no el
-  // tracking transitorio de lastPhase). Se usa para el mapeo direccional
-  // TAXI vs TAXI_IN: debe reflejar de dónde venimos de forma estable.
-  private lastStablePhase: FlightPhase | null = null;
+  // Latch de arribo (monotónico): una vez que el detector CONFIRMA una fase de
+  // llegada (DESCENT/APPROACH/LANDING) queda en true hasta reset(). Gobierna el
+  // mapeo direccional TAXI vs TAXI_IN.
+  //
+  // Antes se usaba la última fase estable (lastStablePhase), pero una detección
+  // espuria de TAKEOFF durante la aproximación/rodadura (alt < 500 ft con
+  // gs > 50, condición que tiene prioridad sobre APPROACH) la sobrescribía y el
+  // rodaje post-aterrizaje volvía a proponer TAXI (salida) en vez de TAXI_IN
+  // (llegada). El latch no se degrada con detecciones transitorias ni con
+  // transiciones que el FSM rechaza (incidente 2026-09-20).
+  private arrivalLatch = false;
+  private static readonly ARRIVAL_PHASES: FlightPhase[] = [
+    FlightPhase.DESCENT,
+    FlightPhase.APPROACH,
+    FlightPhase.LANDING,
+  ];
   // Contexto opcional (inyectado por la vista): provee flight.cruiseAltitude
   // (SimBrief) para detectar CRUISE a la altitud real del vuelo. Sin contexto
   // (Mock/tests/vía estática) se usa solo el fallback genérico de 25.000 ft.
@@ -197,6 +209,8 @@ export class FlightPhaseDetector {
     const met = elapsed >= FlightPhaseDetector.DESCENT_WINDOW_S;
     if (met && !this.descentWindow.announced) {
       this.descentWindow.announced = true;
+      // Descenso confirmado por reloj ⇒ vuelo de llegada: activar el latch.
+      this.arrivalLatch = true;
       logger.phaseDetector('DESCENT confirmado:', { altitude, verticalSpeed, elapsed });
     }
     return met;
@@ -258,7 +272,10 @@ export class FlightPhaseDetector {
     if (detected === this.lastPhase) {
       this.stability++;
       if (this.stability >= this.STABILITY_THRESHOLD) {
-        this.lastStablePhase = detected;
+        // Fase de llegada confirmada de forma estable ⇒ latch de arribo.
+        if (FlightPhaseDetector.ARRIVAL_PHASES.includes(detected)) {
+          this.arrivalLatch = true;
+        }
         return detected;
       }
     } else {
@@ -367,18 +384,13 @@ export class FlightPhaseDetector {
     // Si esa telemetría no está disponible (compat Mock / providers parciales)
     // se mantiene la detección anterior (altura 0 + puertas cerradas + motor 1).
     // Mapeo direccional: el mismo rodaje en tierra significa cosas opuestas
-    // según de dónde venimos. Si la última fase estable fue de llegada
-    // (DESCENT/APPROACH/LANDING), el rollout va a TAXI_IN (el Scheduler lo
-    // normaliza a TAXI_TO_GATE: bienvenida destino, permanecer sentado). Si
-    // venimos de salida, a TAXI (escenario de departure). Sin esto, al
-    // aterrizar se recargaba TAXI desde el paso 1 y sonaba el safety demo de
-    // salida (incidente 2026-09-19).
-    // TAXI_IN está en el set a propósito (auto-sostenido): una vez confirmado
-    // el rodaje de llegada, las siguientes evaluaciones deben seguir diciendo
-    // TAXI_IN. Sin esto, la primera confirmación contaminaría lastStablePhase
-    // y la salida fliparía a TAXI, reintroduciendo el bug con 1s de retraso.
-    const ARRIVAL_PHASES = [FlightPhase.DESCENT, FlightPhase.APPROACH, FlightPhase.LANDING, FlightPhase.TAXI_IN];
-    const taxiPhase = ARRIVAL_PHASES.includes(this.lastStablePhase as FlightPhase)
+    // según de dónde venimos. Si el vuelo pasó por una fase de llegada
+    // (DESCENT/APPROACH/LANDING, latch monotónico), el rollout va a TAXI_IN
+    // (el Scheduler lo normaliza a TAXI_TO_GATE: bienvenida destino,
+    // permanecer sentado). Si venimos de salida, a TAXI (escenario de
+    // departure). Sin esto, al aterrizar se recargaba TAXI desde el paso 1 y
+    // sonaba el safety demo de salida (incidente 2026-09-19).
+    const taxiPhase = this.arrivalLatch
       ? FlightPhase.TAXI_IN
       : FlightPhase.TAXI;
     const hasAdvancedGroundData = simOnGround !== undefined && atcOnParkingSpot !== undefined;
@@ -442,7 +454,12 @@ export class FlightPhaseDetector {
     ) {
       return taxiPhase;
     }
-    if (altitude > 0 && altitude < 500 && groundspeed > 50) {
+    // TAKEOFF exige NO estar descendiendo (VS >= -100). Sin este gate, la
+    // condición alt<500 && gs>50 disparaba durante la aproximación final y la
+    // rodadura (mismo rango de altitud/velocidad), proponiendo TAKEOFF encima
+    // de APPROACH y contaminando la provenance del rodaje (incidente
+    // 2026-09-20). En el despegue real el VS es >= 0 (rodadura/rotación).
+    if (altitude > 0 && altitude < 500 && groundspeed > 50 && verticalSpeed >= -100) {
       return FlightPhase.TAKEOFF;
     }
     if (altitude >= 500 && altitude < 35000 && verticalSpeed > 0) {
@@ -481,7 +498,7 @@ export class FlightPhaseDetector {
   /** Limpia histéresis de salida + ventanas por reloj (nuevo vuelo). */
   reset(): void {
     this.lastPhase = null;
-    this.lastStablePhase = null;
+    this.arrivalLatch = false;
     this.stability = 0;
     this.boardingCompleted = false;
     this.cruiseWindow = { startedAt: null, announced: false };

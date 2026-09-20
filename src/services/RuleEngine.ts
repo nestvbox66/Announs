@@ -5,6 +5,7 @@ import { FlightContext } from "./FlightContext";
 import { NarrativeStep } from "../scenarios/narrative/NarrativeStep";
 import { secondsToHHMM } from "../utils/timeUtils";
 import { logger } from "../utils/logger";
+import { fileLogger } from "./FileLogger";
 
 interface AnnouncementAction {
   type: "announcement";
@@ -59,6 +60,10 @@ export class RuleEngine {
 
   // Estado independiente por evento de demora (one-shot + última evaluación)
   private delayEventState: Map<string, { triggered: boolean; lastEvaluation: number; thresholdMs: number }> = new Map();
+
+  // Anclas phase_transition con conditions no reconocidas (una advertencia por
+  // evento): evita el fallback silencioso a la receta clásica de TAXI.
+  private warnedUnrecognizedPhaseConditions = new Set<string>();
 
   constructor(flightContext?: FlightContext, eventCatalog?: typeof EventCatalogService) {
     if (flightContext) this.flightContext = flightContext;
@@ -1526,6 +1531,25 @@ export class RuleEngine {
       const alt = Number(altitude) || 0;
       items.push({ key: 'altitude_lt', label: `ALTITUDE < ${threshold} ft`, ok: alt < threshold, value: `${Number.isInteger(alt) ? alt : alt.toFixed(1)} ft` });
     }
+    // ── Tren de aterrizaje (transition_to_landing) ──────────────────────
+    // Sin esta clave, `transition_to_landing` (conditions {gear_down:true,
+    // target_phase:"LANDING"}) no reconocía ninguna condición, caía a la
+    // receta clásica de TAXI (verdadera recién en la rodadura) y el ancla se
+    // completaba con el avión ya en tierra: la narrativa quedaba rezagada
+    // respecto del detector, que a esa altura ya proponía el rodaje. Resultado:
+    // LANDING se pisaba con TAXI/TAXI_TO_GATE (incidente 2026-09-20). Con
+    // gear_down reconocido, el ancla completa al bajar el tren (en aproximación)
+    // y la narrativa entra en LANDING mucho antes del toque.
+    if (has('gear_down') || has('gearDown')) {
+      const expected = (conds.gear_down ?? conds.gearDown) !== false;
+      const gearDownRaw = tel.gearDown ?? tel.gear_down;
+      items.push({
+        key: 'gear_down',
+        label: expected ? 'GEAR DOWN' : 'GEAR UP',
+        ok: (gearDownRaw === true) === expected,
+        value: gearDownRaw === undefined ? '—' : gearDownRaw ? 'abajo (true)' : 'arriba (false)',
+      });
+    }
     // ── Transición a DESCENT (transition_to_descent) ────────────────────
     // altitude_diff_lt: (altitud actual − FL crucero) <= umbral (p. ej. -1000).
     // distance_to_dest_lt: distancia al destino (Haversine) <= umbral NM.
@@ -1581,10 +1605,32 @@ export class RuleEngine {
       });
     }
 
+    // Claves que NO son condiciones (metadatos del ancla).
+    const conditionKeys = Object.keys(conds).filter(
+      (k) => k !== 'target_phase' && k !== 'targetPhase'
+    );
+    // Config con condiciones pero ninguna reconocida: fallar CERRADO (no
+    // cumplida) en vez de caer a la receta clásica de TAXI. Sin esto, un ancla
+    // como transition_to_landing ({gear_down}) se evaluaba como "rodaje en
+    // tierra" y solo completaba durante el rollout, pisando LANDING
+    // (incidente 2026-09-20). Se advierte una vez por evento.
+    const hasUnrecognizedConditions = conditionKeys.length > 0 && items.length === 0;
+    if (hasUnrecognizedConditions) {
+      const key = `${targetPhase}:${conditionKeys.join(',')}`;
+      if (!this.warnedUnrecognizedPhaseConditions.has(key)) {
+        this.warnedUnrecognizedPhaseConditions.add(key);
+        const msg = `[RuleEngine] phase_transition (target ${targetPhase}): conditions sin claves reconocidas; se evalúa como NO cumplida (fail-closed)`;
+        console.warn(msg, { conditionKeys });
+        fileLogger.warn(msg, { targetPhase, conditionKeys });
+      }
+    }
+
     const allConditionsMet =
-      items.length > 0
-        ? items.every((it) => it.ok)
-        : isOnGround && isMoving && isParkingBrakeOff && isNotAtParkingSpot && allEnginesRunning;
+      hasUnrecognizedConditions
+        ? false
+        : items.length > 0
+          ? items.every((it) => it.ok)
+          : isOnGround && isMoving && isParkingBrakeOff && isNotAtParkingSpot && allEnginesRunning;
 
     return {
       isOnGround,

@@ -22,6 +22,20 @@ const PHASE_SOURCES: Partial<Record<FlightPhase, ScenarioSource>> = {
     edgePhaseKey: "BOARDING",
     fallback: () => new BoardingScenario(),
   },
+  // Aliases internos del Desktop → clave canónica del Backoffice. El Edge
+  // Function `scenarios-active` solo acepta claves canónicas (p. ej.
+  // TAXI_TO_GATE, AT_GATE): sin esto pedía `phase=TAXI_IN` → HTTP 400
+  // INVALID_PHASE, la fase quedaba con 0 pasos y el fallback la saltaba a
+  // AT_GATE en 5s (incidente 2026-09-20: TAXI_TO_GATE mudo). No tienen
+  // fallback hardcodeado: si no hay publicación, devuelven null como el resto.
+  [FlightPhase.TAXI_IN]: {
+    edgePhaseKey: "TAXI_TO_GATE",
+    fallback: () => null,
+  },
+  [FlightPhase.FLIGHT_COMPLETED]: {
+    edgePhaseKey: "AT_GATE",
+    fallback: () => null,
+  },
 };
 
 const NAME_SOURCES: Record<string, ScenarioSource> = {
