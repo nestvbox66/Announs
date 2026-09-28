@@ -109,4 +109,19 @@ export interface TelemetrySnapshot {
   flapsPosition?: number;
   /** true si tren abajo. */
   gearDown?: boolean;
+  // --- Luces (XP disciplina) ---
+  /** true si LIGHT TAXI encendida. */
+  taxiLightsOn?: boolean;
+  /** true si LIGHT LANDING encendida. */
+  landingLightsOn?: boolean;
+  /** true si LIGHT STROBE encendida. */
+  strobeLightsOn?: boolean;
+  /** true si LIGHT BEACON (baliza) encendida. */
+  beaconLightsOn?: boolean;
+  // --- Hora del día (bonus nocturno) ---
+  /**
+   * E:TIME OF DAY nativo del simulador (enum): 0 = día, 1 = atardecer,
+   * 2 = amanecer, 3 = noche. Ausente → no computa en día/noche.
+   */
+  timeOfDay?: number;
 }

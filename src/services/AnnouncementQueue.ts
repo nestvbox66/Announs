@@ -77,6 +77,13 @@ export class AnnouncementQueue {
 
     fileLogger.log('[AnnouncementQueue] enqueue', { eventKey: params.eventKey, callId, queueLength: this.queue.length + 1, flightId: params.flightId, languageId: params.languageId });
 
+    // Aviso de reproducción aceptada (con clave): es el punto único por el
+    // que pasa TODO el audio (pasos narrativos, phase-rules del Scheduler,
+    // fallbacks y disparos manuales). Los oyentes (p. ej. sinergia XP)
+    // cuentan aquí en vez de en `step:executed`, que solo cubre la vía
+    // narrativa. Los duplicados rechazados arriba no emiten (no suenan).
+    this.emit("announcement:enqueued", params.eventKey);
+
     return new Promise((resolve, reject) => {
       this.queue.push({ params, resolve, reject });
       if (!this.processing) {

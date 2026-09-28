@@ -64,6 +64,17 @@ export interface VoicesInfo {
   captain: string;
   crew: string;
   gateAgent: string;
+  /**
+   * Catálogo id→rol disponible en el dispatch (lo llena `syncFlightContext`
+   * desde las voces habilitadas del usuario). Permite elegir alternativa del
+   * mismo rol cuando la voz actual no coincide con el idioma global.
+   */
+  voiceRoles?: Record<string, string>;
+  /**
+   * Catálogo id→languageIds (lo llena `syncFlightContext`). Ausente o vacío
+   * = voz sin etiquetar (no se puede probar su idioma).
+   */
+  voiceLanguages?: Record<string, string[]>;
 }
 
 export interface SettingsInfo {

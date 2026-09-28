@@ -11,6 +11,7 @@ pub fn run() {
     option_env!("GIT_COMMIT").unwrap_or("unknown")
   );
   tauri::Builder::default()
+    .plugin(tauri_plugin_shell::init())
     .setup(|app| {
       if cfg!(debug_assertions) {
         app.handle().plugin(

@@ -2,6 +2,9 @@ import { AnnouncementInfo } from "../types";
 import { AnnouncementQueue } from "./AnnouncementQueue";
 import { FlightContext } from "./FlightContext";
 import { EventContextBuilder } from "../eventContext/EventContextBuilder";
+import {
+  resolvePinnedSpeaker,
+} from "./speakerResolver";
 import { fileLogger } from "./FileLogger";
 
 export class AnnouncementPlayer {
@@ -42,10 +45,17 @@ export class AnnouncementPlayer {
 
     console.log(`[AnnouncementPlayer] 🔊 Encargando reproducción para: ${eventKey}`);
 
+    // Mismo pinning que el handler: idioma global + locutor explícito en gate_*.
+    const pinned = resolvePinnedSpeaker(eventKey, fc);
+    const languageId = pinned.languageId ?? flight.captainPrimaryLang;
+    const { role: speakerRole, voiceId } = pinned;
+
     return this.queue.enqueue({
       eventKey: context.eventKey,
       flightId: flight.flightId,
-      languageId: flight.captainPrimaryLang,
+      languageId,
+      ...(voiceId ? { voiceId } : {}),
+      ...(speakerRole ? { speakerRole } : {}),
       eventData: context.eventData,
     });
   }

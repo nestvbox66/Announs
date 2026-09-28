@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="100" viewBox="0 0 300 100">
+  <rect width="300" height="100" rx="8" fill="#00172e"/>
+  <g fill="none" stroke="#45AFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.85">
+    <path d="M20 68 L120 68 L140 56 L160 56 L150 68 L190 68 L200 62 L208 62 L200 68 L230 68"/>
+    <path d="M120 68 L108 80 L132 80 L140 68"/>
+    <path d="M185 68 L178 78 L196 78 L200 68"/>
+  </g>
+  <text x="248" y="60" font-family="monospace" font-size="26" font-weight="bold" fill="#45AFFF" opacity="0.5" text-anchor="middle">✈</text>
+</svg>

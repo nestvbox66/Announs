@@ -107,6 +107,22 @@ export const SIMVAR_LIST = [
   // Compat: también con guiones bajos
   "RADIO_HEIGHT",
   "GEAR_HANDLE_POSITION",
+  // Luces (XP disciplina)
+  "LIGHT TAXI",
+  "LIGHT LANDING",
+  "LIGHT STROBE",
+  // Compat: también con guiones bajos
+  "LIGHT_TAXI",
+  "LIGHT_LANDING",
+  "LIGHT_STROBE",
+  // Baliza (bonus beacon disc_beacon_lights_xp)
+  "LIGHT BEACON",
+  // Compat: también con guiones bajos
+  "LIGHT_BEACON",
+  // Hora del día nativa (bonus nocturno E:TIME OF DAY; 3 = noche)
+  "TIME OF DAY",
+  // Compat: también con guiones bajos
+  "TIME_OF_DAY",
 ] as const;
 
 // ── 2. Mapeo a TelemetrySnapshot ────────────────────────────────────────
@@ -188,7 +204,23 @@ export function mapSimVarsToTelemetry(simVars: Record<string, any>): TelemetrySn
     // Descenso / aproximación (RADIO HEIGHT solo válida < ~2500 ft AGL)
     radioHeight: simVars["RADIO HEIGHT"] ?? simVars["RADIO_HEIGHT"] ?? 0,
     gearDown: (simVars["GEAR HANDLE POSITION"] ?? simVars["GEAR_HANDLE_POSITION"]) === 1,
+
+    // Luces (XP disciplina; SimVars Bool: 1 = encendida)
+    taxiLightsOn: (simVars["LIGHT TAXI"] ?? simVars["LIGHT_TAXI"]) === 1,
+    landingLightsOn: (simVars["LIGHT LANDING"] ?? simVars["LIGHT_LANDING"]) === 1,
+    strobeLightsOn: (simVars["LIGHT STROBE"] ?? simVars["LIGHT_STROBE"]) === 1,
+    beaconLightsOn: (simVars["LIGHT BEACON"] ?? simVars["LIGHT_BEACON"]) === 1,
+
+    // Hora del día nativa E:TIME OF DAY (enum; 3 = noche). Sin dato → undefined
+    // (el tracker no computa día/noche en vez de asumir diurno).
+    timeOfDay: toTimeOfDay(simVars["TIME OF DAY"] ?? simVars["TIME_OF_DAY"]),
   };
+}
+
+/** Normaliza E:TIME OF DAY a número o undefined (sin dato válido). */
+function toTimeOfDay(raw: unknown): number | undefined {
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
 }
 
 // ── 3. MsfsFlightController ─────────────────────────────────────────────

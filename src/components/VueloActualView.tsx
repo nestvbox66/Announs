@@ -42,7 +42,8 @@ import {
   Loader2,
   DoorClosed,
   Globe,
-  Activity
+  Activity,
+  Trophy
 } from "lucide-react";
 import { FlightState, Pasajero, SimBriefData, ConfigVoces, ConfigAudio, UltimoAnuncio, AnnouncementInfo } from "../types";
 import { FlightPhase } from "../engine/FlightEngine";
@@ -70,6 +71,17 @@ import { UserEventDefaultsService } from "../services/UserEventDefaultsService";
 import { FlightEventConfigService } from "../services/FlightEventConfigService";
 import { ScenarioConfigService } from "../services/ScenarioConfigService";
 import { FlightPathRecorder } from "../services/FlightPathRecorder";
+import { XpBonusTracker } from "../services/XpBonusTracker";
+import {
+  resolveHardAirportBonus,
+  resolveWeatherSeverityBonus,
+} from "../services/FlightCompletionBonuses";
+import {
+  explainXpBreakdown,
+  toColumnBonusItems,
+  type CompletionRpcBonuses,
+  type XpCompletionSummary,
+} from "../services/XpBonusExplanations";
 import { FlightPathService } from "../services/FlightPathService";
 import { BoardingMusicService, BoardingMusicTrack } from "../services/BoardingMusicService";
 import { musicController, RANDOM_MUSIC_ID } from "../services/MusicController";
@@ -100,6 +112,7 @@ import DebugMonitorButton from "./flight/DebugMonitorButton";
 import { connectionStatusService } from "../services/ConnectionStatusService";
 import { isTauri } from "@tauri-apps/api/core";
 import FlightStartPopup from "./flight/FlightStartPopup";
+import FlightSelectView from "./flight/FlightSelectView";
 import type { FlightStartPreferences } from "../services/FlightContext";
 // @ts-ignore
 import siluetaAvion from "./Silueta Avion.png";
@@ -236,6 +249,27 @@ async function loadUserMusicDefault(userId: string): Promise<string | null> {
     return null;
   }
 }
+
+/** Opciones de cierre del vuelo para flushFlightPath. */
+interface FlushFlightPathOptions {
+  /** 'ended' en cierre normal, 'saved' en recuperación de emergencia. */
+  status?: "ended" | "saved";
+  /** Nota de recuperación (va en properties del GeoJSON). */
+  recoveryNote?: string | null;
+}
+
+/**
+ * Fases que justifican guardar el track ante una desconexión (vuelo
+ * avanzado). Las fases tempranas en tierra se descartan. TAKEOFF/CLIMB quedan
+ * cubiertos por la señal de despegue (takeoffMs) en el handler.
+ */
+const RECOVERY_PHASE_SET: ReadonlySet<string> = new Set([
+  "CRUISE",
+  "DESCENT",
+  "LANDING",
+  "TAXI_TO_GATE",
+  "AT_GATE",
+]);
 
 export default function VueloActualView({
   currentState,
@@ -505,6 +539,10 @@ export default function VueloActualView({
   if (!flightContextRef.current) {
     flightContextRef.current = new FlightContext();
   }
+  // El TimerManager resuelve idioma/voz contra el contexto vivo al disparar.
+  if (timerManagerRef.current) {
+    timerManagerRef.current.setFlightContext(flightContextRef.current);
+  }
 
   const announcementEventHandlerRef = useRef<AnnouncementEventHandler | null>(null);
   if (!announcementEventHandlerRef.current) {
@@ -570,6 +608,9 @@ export default function VueloActualView({
   // recién tras un guardado exitoso en `flight_paths`.
   const flightPathRecorderRef = useRef<FlightPathRecorder | null>(null);
   if (!flightPathRecorderRef.current) flightPathRecorderRef.current = new FlightPathRecorder();
+  // Tracker de bonos XP de disciplina (se alimenta muestra a muestra junto al recorder)
+  const xpBonusTrackerRef = useRef<XpBonusTracker | null>(null);
+  if (!xpBonusTrackerRef.current) xpBonusTrackerRef.current = new XpBonusTracker();
   // `flightId` como ref para leerlo desde el bucle de telemetría y los handlers
   // sin depender de closures con estado obsoleto.
   const flightIdRef = useRef<string | null>(null);
@@ -605,6 +646,27 @@ export default function VueloActualView({
         );
       } catch (err) {
         console.warn("[VueloActualView] Error registrando punto de recorrido:", err);
+      }
+
+      // Acumulación de evidencia para bonos XP de disciplina (luces por fase,
+      // límite de velocidad bajo 10k ft, perfil vertical en climb/descent).
+      try {
+        xpBonusTrackerRef.current?.sample(
+          {
+            taxiLightsOn: snap.taxiLightsOn,
+            landingLightsOn: snap.landingLightsOn,
+            strobeLightsOn: snap.strobeLightsOn,
+            altitude: snap.altitude,
+            indicatedAirspeed: snap.indicated_airspeed,
+            groundspeed: snap.groundspeed,
+            verticalSpeed: snap.verticalSpeed,
+            timeOfDay: snap.timeOfDay,
+            beaconLightsOn: snap.beaconLightsOn,
+          },
+          scheduler.getCurrentPhase()
+        );
+      } catch (err) {
+        console.warn("[VueloActualView] Error acumulando evidencia XP:", err);
       }
 
       // Transición automática vía detector con histéresis (evita saltos por ruido)
@@ -864,14 +926,33 @@ export default function VueloActualView({
    *  - El `flight_id` se captura al inicio (ref + fallback a FlightContext)
    *    para que un desmontaje/limpieza de estado no lo invalide mid-flight.
    */
-  const flushChainRef = useRef<Promise<void>>(Promise.resolve());
+  const flushChainRef = useRef<Promise<boolean>>(Promise.resolve(false));
   const lastFlushErrorRef = useRef<string | null>(null);
+  // Resumen del cierre de XP para la pantalla final (Plataforma): se rellena
+  // con los bonus capturados ANTES de liberar el tracker y con la respuesta
+  // de la RPC. Sobrevive al reset porque son valores planos, no el tracker.
+  const [xpCompletion, setXpCompletion] = useState<XpCompletionSummary | null>(null);
 
-  const flushFlightPath = (reason: string): Promise<void> => {
-    const run = async (): Promise<void> => {
+  /** Clave del stash de emergencia en localStorage (cierres abruptos). */
+  const FLIGHT_PATH_STASH_KEY = "announs_flightpath_stash_v1";
+
+  const clearFlightPathStash = (): void => {
+    try {
+      localStorage.removeItem(FLIGHT_PATH_STASH_KEY);
+    } catch {
+      // almacenamiento no disponible: nada que limpiar
+    }
+  };
+
+  const flushFlightPath = (reason: string, opts: FlushFlightPathOptions = {}): Promise<boolean> => {
+    // Estado de cierre: 'ended' en cierre normal, 'saved' en recuperación.
+    // Sin esto los vuelos finalizados quedan en 'started' y no se reflejan
+    // en las estadísticas globales.
+    const status = opts.status ?? "ended";
+    const run = async (): Promise<boolean> => {
       const tag = `[FLUSH_DEBUG:${reason}]`;
-      console.log(`${tag} inicio`, { reason, at: new Date().toISOString() });
-      fileLogger.log(`${tag} inicio`, { reason });
+      console.log(`${tag} inicio`, { reason, status, at: new Date().toISOString() });
+      fileLogger.log(`${tag} inicio`, { reason, status });
 
       // 1) Resolver flight_id (ref sincronizada con el estado + fallback).
       const recorder = flightPathRecorderRef.current;
@@ -890,7 +971,7 @@ export default function VueloActualView({
         const msg = `${tag} ABORTADO: sin recorder en memoria`;
         console.warn(msg);
         fileLogger.warn(msg, { reason });
-        return;
+        return false;
       }
       if (!id || typeof id !== "string" || id.trim() === "") {
         const msg =
@@ -900,7 +981,7 @@ export default function VueloActualView({
         console.warn(msg, { flightIdRef: flightIdRef.current });
         fileLogger.warn(msg, { reason, flightIdRef: flightIdRef.current });
         lastFlushErrorRef.current = "missing-flight-id";
-        return;
+        return false;
       }
 
       // 2) Estado del buffer.
@@ -915,13 +996,18 @@ export default function VueloActualView({
         console.log(`${tag} sin puntos: nada que persistir, se resetea el recorder`);
         fileLogger.log(`${tag} sin puntos`, { reason });
         recorder.reset();
-        return;
+        xpBonusTrackerRef.current?.reset();
+        return true;
       }
 
       // 3) Resumen calculado desde el recorder. Los tiempos viajan como epoch
       // ms y el servicio los formatea a `time`/`date` (UTC); el log muestra
       // ambos formatos para verificar contra el esquema real.
-      const feature = recorder.toGeoJSON(id);
+      const recoveryNote = opts.recoveryNote ?? null;
+      const feature = recorder.toGeoJSON(id, {
+        recovery: status === "saved",
+        recoveryNote,
+      });
       const takeoffMs = recorder.getTakeoffMs();
       const touchdownMs = recorder.getTouchdownMs();
       const airMinutes = recorder.getAirMinutes();
@@ -947,12 +1033,13 @@ export default function VueloActualView({
       });
 
       try {
-        // 4) UPDATE en flights con el payload exacto.
+        // 4) UPDATE en flights con el payload exacto (incluye flight_status).
         const summaryPayload = {
           airTimeMin: airMinutes,
           distanceNm,
           departureMs: takeoffMs,
           arrivalMs: touchdownMs,
+          flightStatus: status,
         };
         console.log(`${tag} UPDATE flights → payload`, { flightId: id, ...summaryPayload });
         fileLogger.log(`${tag} UPDATE flights`, { flightId: id, ...summaryPayload });
@@ -984,11 +1071,169 @@ export default function VueloActualView({
           throw new Error(`INSERT flight_paths falló: ${pathResult.error ?? "error desconocido"}`);
         }
 
-        // 6) Todo persistido → liberar el buffer en memoria.
+        // 5b) Capturar bonus ANTES de liberar: el reset del paso 6 pondría
+        // todos los contadores en cero y la RPC recibiría 0 en todo (bug
+        // reportado: payload en cero antes del envío). Solo en cierre normal.
+        let capturedRpc: CompletionRpcBonuses | null = null;
+        let capturedSynergy: string[] = [];
+        let capturedNightFraction: number | null = null;
+        let capturedDayNight = { dayHours: 0, nightHours: 0 };
+        let capturedDestIcao = "";
+        let capturedMetar: string | null = null;
+        if (status === "ended") {
+          // Llamada única a la RPC unificada: disciplina operativa +
+          // los 4 bonus de entorno/sinergia. Cada bonus es fail-closed
+          // (0 ante cualquier duda) para no bloquear nunca el cierre.
+          const tracker = xpBonusTrackerRef.current;
+          const aiSynergy = tracker?.getAiSynergyBonus() ?? 0;
+          // Noche por telemetría nativa (E:TIME OF DAY muestreado; >30%):
+          // reemplaza la heurística de horario programado.
+          const nightFlight = tracker?.getNightBonus() ?? 0;
+          const dayNightHours = tracker?.getDayNightHours() ?? { dayHours: 0, nightHours: 0 };
+          const destIcaoForBonus =
+            (destICAO ?? "").toString().trim() ||
+            (flightContextRef.current?.getFlight()?.destICAO ?? "").toString().trim();
+          const destMetar =
+            ((simbriefRawData as any)?.destination?.metar ?? null) as string | null;
+          const [hardAirport, weatherSeverity] = await Promise.all([
+            resolveHardAirportBonus(destIcaoForBonus).catch(() => 0),
+            Promise.resolve(resolveWeatherSeverityBonus(destMetar)),
+          ]);
+          capturedRpc = {
+            p_disc_taxi: tracker?.getTaxiBonus() ?? 0,
+            p_disc_strobe: tracker?.getStrobeBonus() ?? 0,
+            p_disc_landing: tracker?.getLandingBonus() ?? 0,
+            p_disc_beacon: tracker?.getBeaconBonus() ?? 0,
+            p_disc_speed: tracker?.getSpeedBonus() ?? 0,
+            p_disc_climb: tracker?.getClimbBonus() ?? 0,
+            p_disc_descent: tracker?.getDescentBonus() ?? 0,
+            // Bonus de entorno/sinergia calculados en el Desktop.
+            p_ai_synergy: aiSynergy,
+            p_night_flight: nightFlight,
+            p_hard_airport: hardAirport,
+            p_weather_severity: weatherSeverity,
+          };
+          capturedSynergy = tracker?.getSynergyEventKeys() ?? [];
+          capturedNightFraction = tracker?.getNightFraction() ?? null;
+          capturedDayNight = dayNightHours;
+          capturedDestIcao = destIcaoForBonus;
+          capturedMetar = destMetar;
+          console.log(`${tag} bonus de cierre capturados (pre-reset)`, {
+            aiSynergyEvents: capturedSynergy,
+            p_ai_synergy: aiSynergy,
+            nightFraction: capturedNightFraction,
+            dayHours: dayNightHours.dayHours,
+            nightHours: dayNightHours.nightHours,
+            p_night_flight: nightFlight,
+            destIcao: destIcaoForBonus,
+            p_hard_airport: hardAirport,
+            destMetar: destMetar ?? null,
+            p_weather_severity: weatherSeverity,
+          });
+          fileLogger.log(`${tag} bonus capturados (pre-reset)`, { flightId: id, ...capturedRpc });
+          setXpCompletion({
+            status: "pending",
+            flightId: id,
+            bonuses: toColumnBonusItems(capturedRpc),
+            baseXpAwarded: null,
+            totalFlightXp: null,
+          });
+        }
+
+        // 6) Todo persistido → liberar el buffer en memoria y el stash.
         recorder.reset();
+        xpBonusTrackerRef.current?.reset();
+        clearFlightPathStash();
         lastFlushErrorRef.current = null;
-        console.log(`${tag} ✅ OK: vuelo cerrado y buffer liberado`);
-        fileLogger.log(`${tag} OK`, { reason, points: feature.properties.point_count });
+        console.log(`${tag} ✅ OK: vuelo cerrado (status=${status}) y buffer liberado`);
+        fileLogger.log(`${tag} OK`, { reason, status, points: feature.properties.point_count });
+
+        // 7) Progresión post-vuelo: solo en cierre normal ('ended'). Las
+        // recuperaciones 'saved' no otorgan XP aquí para evitar doble
+        // otorgamiento si el vuelo se finaliza después por la vía normal.
+        if (status === "ended") {
+          try {
+            const { data: { user } } = await supabase.auth.getUser();
+            const userId = user?.id ?? null;
+            if (!userId) {
+              console.warn(`${tag} progresión omitida: sin usuario autenticado`);
+              fileLogger.warn(`${tag} progresión omitida (sin usuario)`, { reason });
+              setXpCompletion({
+                status: "error",
+                flightId: id,
+                bonuses: capturedRpc ? toColumnBonusItems(capturedRpc) : [],
+                baseXpAwarded: null,
+                totalFlightXp: null,
+                error: "Sin usuario autenticado: no se pudo otorgar XP.",
+              });
+            } else if (!capturedRpc) {
+              // No debería ocurrir (se captura en 5b); sin valores no se llama.
+              console.warn(`${tag} progresión omitida: sin bonus capturados`);
+              fileLogger.warn(`${tag} progresión omitida (sin captura)`, { reason });
+              setXpCompletion({
+                status: "error",
+                flightId: id,
+                bonuses: [],
+                baseXpAwarded: null,
+                totalFlightXp: null,
+                error: "No se pudieron capturar los bonus antes del cierre.",
+              });
+            } else {
+              console.log(`${tag} RPC process_flight_completion (unificada) → params`, {
+                flightId: id,
+                ...capturedRpc,
+              });
+              const rewardResult = await FlightPathService.processFlightCompletion(id, userId, capturedRpc);
+              if (rewardResult.success && rewardResult.data) {
+                const reward = rewardResult.data;
+                console.log(
+                  `${tag} 🎖️ XP ganada en el vuelo: +${reward.baseXpAwarded} XP base ` +
+                  `(vuelo ${reward.totalFlightXp} XP · total ${reward.newTotalXp} XP` +
+                  `${reward.newLevel !== null ? `, nivel ${reward.newLevel}` : ""}` +
+                  `${reward.newRank ? `, rango ${reward.newRank}` : ""})`
+                );
+                fileLogger.log(`${tag} progresión`, { flightId: id, ...reward });
+                setXpCompletion({
+                  status: "done",
+                  flightId: id,
+                  bonuses: toColumnBonusItems(capturedRpc),
+                  baseXpAwarded: reward.baseXpAwarded,
+                  totalFlightXp: reward.totalFlightXp,
+                });
+                showToast(
+                  `Vuelo completado: +${reward.totalFlightXp} XP ` +
+                  `(${reward.baseXpAwarded} base)` +
+                  `${reward.newRank ? ` · Rango ${reward.newRank}` : ""}`,
+                  "success"
+                );
+              } else {
+                console.warn(`${tag} progresión falló (no bloqueante):`, rewardResult.error);
+                fileLogger.warn(`${tag} progresión falló`, { reason, error: rewardResult.error });
+                setXpCompletion({
+                  status: "error",
+                  flightId: id,
+                  bonuses: toColumnBonusItems(capturedRpc),
+                  baseXpAwarded: null,
+                  totalFlightXp: null,
+                  error: rewardResult.error ?? "La RPC no devolvió recompensa.",
+                });
+              }
+            }
+          } catch (progErr) {
+            // La progresión nunca debe romper el cierre ya persistido.
+            console.warn(`${tag} excepción en progresión (no bloqueante):`, progErr);
+            fileLogger.warn(`${tag} excepción en progresión`, { reason, error: String(progErr) });
+            setXpCompletion({
+              status: "error",
+              flightId: id,
+              bonuses: capturedRpc ? toColumnBonusItems(capturedRpc) : [],
+              baseXpAwarded: null,
+              totalFlightXp: null,
+              error: progErr instanceof Error ? progErr.message : String(progErr),
+            });
+          }
+        }
+        return true;
       } catch (err) {
         // Blindaje: el buffer se conserva para reintentar; nunca se limpia en fallo.
         const full = err instanceof Error
@@ -1004,12 +1249,13 @@ export default function VueloActualView({
           console.warn(hint);
           fileLogger.warn(hint, { reason });
         }
+        return false;
       }
     };
 
     // Serializar: cada disparo espera al anterior sin pisarlo.
     const chained = flushChainRef.current.then(run, run);
-    flushChainRef.current = chained.catch(() => {});
+    flushChainRef.current = chained.catch(() => false);
     return chained;
   };
 
@@ -1026,6 +1272,176 @@ export default function VueloActualView({
       onResetSimulation();
     }
   };
+
+  /**
+   * Safety recovery ante desconexión del simulador con vuelo activo.
+   * Fases avanzadas (o vuelo que ya despegó) → volcado automático con estado
+   * 'saved' + nota de emergencia, y se reanuda un segmento nuevo por si la
+   * telemetría vuelve. Fases tempranas en tierra → se descarta sin ensuciar
+   * el historial.
+   */
+  const wasConnectedRef = useRef<boolean>(true);  const handleSimDisconnect = async (): Promise<void> => {
+    const tag = "[FLUSH_DEBUG:safety-recovery]";
+    const recorder = flightPathRecorderRef.current;
+    if (!recorder || !recorder.isRecording() || recorder.getPointCount() === 0) {
+      console.log(`${tag} desconexión sin vuelo activo grabando: nada que recuperar`);
+      fileLogger.log(`${tag} desconexión sin grabación activa`, {});
+      return;
+    }
+    const phase = recorder.getPhase();
+    const advanced = phase !== null && RECOVERY_PHASE_SET.has(phase);
+    const airborne = recorder.getTakeoffMs() !== null;
+    console.log(`${tag} desconexión con vuelo activo`, {
+      points: recorder.getPointCount(),
+      phase,
+      advanced,
+      airborne,
+    });
+    fileLogger.log(`${tag} desconexión con vuelo activo`, {
+      points: recorder.getPointCount(),
+      phase,
+    });
+    if (!advanced && !airborne) {
+      console.log(`${tag} fase temprana en tierra: se descarta sin guardar`);
+      fileLogger.log(`${tag} descarte en fase temprana`, { phase });
+      recorder.reset();
+      xpBonusTrackerRef.current?.reset();
+      return;
+    }
+    // Congelar el segmento, volcar como 'saved' y reanudar por si vuelve la señal.
+    const scenarioKey = recorder.getScenarioKey();
+    recorder.stop();
+    const ok = await flushFlightPath("safety-recovery", {
+      status: "saved",
+      recoveryNote:
+        `Guardado por recuperación de emergencia ante desconexión del simulador ` +
+        `(fase ${phase ?? "desconocida"}).`,
+    });
+    if (ok) {
+      console.log(`${tag} segmento de emergencia guardado; se reanuda la grabación por si vuelve la señal`);
+      fileLogger.log(`${tag} reanudando grabación tras recovery`, { phase });
+      recorder.start({ phase, scenarioKey });
+      // El reinicio limpia las muestras del segmento, pero la sinergia IA
+      // es acumulada del vuelo: se preserva para el cierre 'ended'.
+      const synergyKept = xpBonusTrackerRef.current?.getSynergyEventKeys() ?? [];
+      xpBonusTrackerRef.current?.start();
+      synergyKept.forEach((key) => xpBonusTrackerRef.current?.noteVoiceEvent(key));
+      xpBonusTrackerRef.current?.setAirMinutesProvider(
+        () => flightPathRecorderRef.current?.getAirMinutes() ?? null
+      );
+    } else {
+      console.warn(`${tag} no se pudo guardar el segmento (buffer conservado para reintento manual)`);
+    }
+  };
+
+  useEffect(() => {
+    const unsub = connectionStatusService.onStatusChange((status) => {
+      const was = wasConnectedRef.current;
+      wasConnectedRef.current = status.connected;
+      if (was && !status.connected) {
+        console.log("[FLUSH_DEBUG:safety-recovery] transición connected → disconnected detectada");
+        fileLogger.log("[FLUSH_DEBUG:safety-recovery] desconexión detectada", { status });
+        void handleSimDisconnect();
+      }
+    });
+    return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /**
+   * Stash de emergencia ante cierres abruptos de la app: en `beforeunload` se
+   * guarda una foto sincrónica del buffer; al montar se intenta volcar una
+   * sola vez como recuperación y se limpia el stash (haya éxito o no, para no
+   * reintentar en cada arranque).
+   */
+  useEffect(() => {
+    const onBeforeUnload = (): void => {
+      try {
+        const recorder = flightPathRecorderRef.current;
+        const id = flightIdRef.current;
+        if (recorder && id && recorder.getPointCount() > 0) {
+          localStorage.setItem(
+            FLIGHT_PATH_STASH_KEY,
+            JSON.stringify({ flightId: id, snapshot: recorder.toSnapshot(), at: new Date().toISOString() })
+          );
+          console.log("[FLUSH_DEBUG:stash] buffer guardado en stash ante cierre");
+        } else {
+          localStorage.removeItem(FLIGHT_PATH_STASH_KEY);
+        }
+      } catch {
+        // cierre abrupto: mejor esfuerzo, nunca bloquear
+      }
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      let raw: string | null = null;
+      try {
+        raw = localStorage.getItem(FLIGHT_PATH_STASH_KEY);
+      } catch {
+        return;
+      }
+      if (!raw) return;
+      try {
+        const stash = JSON.parse(raw) as {
+          flightId?: string;
+          snapshot?: {
+            points?: unknown[];
+            phase?: string | null;
+            scenarioKey?: string | null;
+            startedAtIso?: string | null;
+            endedAtIso?: string | null;
+            takeoffMs?: number | null;
+            touchdownMs?: number | null;
+            lastRecordedAtMs?: number | null;
+          };
+        };
+        const points = stash?.snapshot?.points;
+        if (!stash?.flightId || !Array.isArray(points) || points.length === 0) {
+          clearFlightPathStash();
+          return;
+        }
+        console.log("[FLUSH_DEBUG:boot-recovery] stash previo encontrado; intentando volcado", {
+          flightId: stash.flightId,
+          points: points.length,
+        });
+        fileLogger.log("[FLUSH_DEBUG:boot-recovery] stash encontrado", {
+          flightId: stash.flightId,
+          points: points.length,
+        });
+        flightIdRef.current = stash.flightId;
+        flightPathRecorderRef.current?.loadSnapshot({
+          points: points as import("../services/FlightPathRecorder").FlightPathPoint[],
+          phase: stash.snapshot?.phase ?? null,
+          scenarioKey: stash.snapshot?.scenarioKey ?? null,
+          startedAtIso: stash.snapshot?.startedAtIso ?? null,
+          endedAtIso: stash.snapshot?.endedAtIso ?? null,
+          takeoffMs: stash.snapshot?.takeoffMs ?? null,
+          touchdownMs: stash.snapshot?.touchdownMs ?? null,
+          lastRecordedAtMs: stash.snapshot?.lastRecordedAtMs ?? null,
+        });
+        if (!cancelled) {
+          await flushFlightPath("boot-recovery", {
+            status: "saved",
+            recoveryNote: "Guardado por recuperación de emergencia al reiniciar la app tras un cierre inesperado.",
+          });
+        }
+      } catch (err) {
+        console.warn("[FLUSH_DEBUG:boot-recovery] stash ilegible, se descarta:", err);
+      } finally {
+        if (!cancelled) clearFlightPathStash();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Subscribe to Scheduler phase events (Fase 0 GATE -> BOARDING flow)
   useEffect(() => {
@@ -1095,6 +1511,9 @@ export default function VueloActualView({
       console.log(
         `[UI] step:executed -> ${data.step.eventKey} (modo: ${data.mode})`
       );
+      // Contador en memoria para el bonus de sinergia IA (3 XP por evento
+      // del conjunto, solo ejecutados — nunca omitidos ni pendientes).
+      xpBonusTrackerRef.current?.noteVoiceEvent(data.step.eventKey);
       setPendingManualStep((prev) =>
         prev && prev.eventKey === data.step.eventKey ? null : prev
       );
@@ -1143,12 +1562,21 @@ export default function VueloActualView({
       setStepHistory([]);
     });
 
+    // Sinergia IA en el punto único de reproducción: la cola acepta TODO el
+    // audio (pasos narrativos, phase-rules, fallbacks y disparos manuales),
+    // mientras `step:executed` solo cubre la vía narrativa. Deduplicado en el
+    // tracker (Set), así ambas suscripciones pueden convivir.
+    const unsubEnqueued = announcementQueueRef.current?.on("announcement:enqueued", (eventKey: string) => {
+      xpBonusTrackerRef.current?.noteVoiceEvent(eventKey);
+    });
+
     return () => {
       unsubPending();
       unsubExecuted();
       unsubSkipped();
       unsubCompleted();
       unsubClear();
+      unsubEnqueued?.();
     };
   }, []);
 
@@ -1781,6 +2209,61 @@ export default function VueloActualView({
     destCity: destCityName || getRouteDetails(originICAO, destICAO).destCity,
   };
 
+  // Pantalla de selección "Volar": se muestra en NoIniciado mientras no haya
+  // vuelo cargado ni ajustes abiertos. Tras importar, sigue el flujo clásico.
+  const showFlightSelect =
+    currentState === FlightState.NoIniciado && !isFlightSettingsOpen && !canStartFlight;
+
+  // Volver a la pantalla de selección: limpia la importación actual para
+  // mostrar de nuevo "Volar" (la próxima importación hace upsert en destino).
+  const handleBackToSelection = useCallback(() => {
+    setSimbriefRawData(null);
+    setSimbriefAircraft(null);
+    setSimbriefError(null);
+    setIsBriefImported(false);
+    setCanStartFlight(false);
+    setIsFlightSettingsOpen(false);
+  }, []);
+
+  // ── Vista previa pre-vuelo: ciudad legible inmediata desde `airports` ──
+  // El banner superior (NoIniciado / Ajustes Pre-Vuelo) antes usaba solo
+  // `getAirportName()` (mapa hardcodeado de ~60 ICAO) y mostraba el código
+  // ICAO para el resto. Aquí se replica el criterio del detalle finalizado
+  // (`FlightHistoryService.loadFlightDetail`): `municipality` de la tabla
+  // `airports` primero, luego fallback hardcodeado / SimBrief / ICAO.
+  // `resolvedAirports` solo se usa cuando su `icao_code` coincide con el del
+  // plan visible, para no mostrar una ciudad obsoleta durante el cambio.
+  const sbOriginIcao = ((simbriefRawData as any)?.origin?.icao_code ?? originICAO ?? "").toString().toUpperCase().trim();
+  const sbDestIcao = ((simbriefRawData as any)?.destination?.icao_code ?? destICAO ?? "").toString().toUpperCase().trim();
+  const sbOriginMatchesState = !sbOriginIcao || sbOriginIcao === (originICAO ?? "").toString().toUpperCase().trim();
+  const sbDestMatchesState = !sbDestIcao || sbDestIcao === (destICAO ?? "").toString().toUpperCase().trim();
+  const preFlightOriginCity = useMemo(() => {
+    const dbCity = resolvedAirports.origin?.icao_code?.toUpperCase().trim() === sbOriginIcao && sbOriginIcao
+      ? resolvedAirports.origin?.municipality
+      : "";
+    return (
+      dbCity ||
+      (sbOriginIcao ? getAirportName(sbOriginIcao) : "") ||
+      ((simbriefRawData as any)?.origin?.city ?? "") ||
+      (sbOriginMatchesState ? originCityName : "") ||
+      sbOriginIcao ||
+      ""
+    );
+  }, [resolvedAirports.origin, sbOriginIcao, simbriefRawData, originCityName, sbOriginMatchesState]);
+  const preFlightDestCity = useMemo(() => {
+    const dbCity = resolvedAirports.dest?.icao_code?.toUpperCase().trim() === sbDestIcao && sbDestIcao
+      ? resolvedAirports.dest?.municipality
+      : "";
+    return (
+      dbCity ||
+      (sbDestIcao ? getAirportName(sbDestIcao) : "") ||
+      ((simbriefRawData as any)?.destination?.city ?? "") ||
+      (sbDestMatchesState ? destCityName : "") ||
+      sbDestIcao ||
+      ""
+    );
+  }, [resolvedAirports.dest, sbDestIcao, simbriefRawData, destCityName, sbDestMatchesState]);
+
   React.useEffect(() => {
     setFlightCode(simBriefData.vueloCodigo);
     setOriginICAO(simBriefData.origen);
@@ -1807,6 +2290,18 @@ export default function VueloActualView({
     resolveAirports(originICAO, destICAO).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [originICAO, destICAO]);
+
+  // Al cargar un plan (SimBrief u otro origen) se resuelven origen/destino
+  // contra `airports` de forma inmediata, sin esperar a ningún guardado
+  // previo en `flights`. Cubre el caso en que `simbriefRawData` llega antes
+  // de que los estados `originICAO/destICAO` se sincronicen.
+  React.useEffect(() => {
+    const sbO = ((simbriefRawData as any)?.origin?.icao_code ?? "").toString().trim();
+    const sbD = ((simbriefRawData as any)?.destination?.icao_code ?? "").toString().trim();
+    if (!sbO && !sbD) return;
+    resolveAirports(sbO || originICAO, sbD || destICAO).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [simbriefRawData]);
 
   // Phase 1 boarding simulation timer effect
   React.useEffect(() => {
@@ -2018,6 +2513,14 @@ export default function VueloActualView({
         phase: schedulerRef.current?.getCurrentPhase() ?? null,
         scenarioKey: selectedScenarioKey,
       });
+      // Arrancar el tracker de bonos XP y vincularle los minutos de vuelo para
+      // proyectar base_time_xp en el monitor.
+      xpBonusTrackerRef.current?.start();
+      // Nuevo vuelo: descartar el resumen de XP del anterior.
+      setXpCompletion(null);
+      xpBonusTrackerRef.current?.setAirMinutesProvider(
+        () => flightPathRecorderRef.current?.getAirMinutes() ?? null
+      );
       // Scheduler.startFlight resincroniza los umbrales de demora desde la DB
       // (events.default_delay_ms); se re-aplican los delays elegidos por el usuario
       // en los sliders de "Configurar Eventos" para que se usen en el vuelo.
@@ -2137,10 +2640,16 @@ export default function VueloActualView({
       }
       setResolvedAirports({ origin: originAirport, dest: destAirport });
 
+      // Al cargar un plan nuevo se sobrescribe siempre (sin `prev ||`): si se
+      // conservara el valor previo, una re-importación de otro ICAO mantendría
+      // la ciudad vieja o el código ICAO en lugar del municipality recién
+      // resuelto de la tabla `airports` (mismo criterio que el detalle final).
       if (originAirport?.municipality) setOriginCityName(originAirport.municipality);
-      else if (originICAO) setOriginCityName((prev) => prev || getAirportName(originICAO) || originICAO);
+      else if (originICAO) setOriginCityName(getAirportName(originICAO) || originICAO);
+      else setOriginCityName("");
       if (destAirport?.municipality) setDestCityName(destAirport.municipality);
-      else if (destICAO) setDestCityName((prev) => prev || getAirportName(destICAO) || destICAO);
+      else if (destICAO) setDestCityName(getAirportName(destICAO) || destICAO);
+      else setDestCityName("");
 
       flightContextRef.current?.updateFlight({
         originICAO,
@@ -3067,6 +3576,10 @@ export default function VueloActualView({
         captain: captainVoice,
         crew: crewVoice,
         gateAgent: gateAgentVoiceId,
+        // Catálogo para el pinning en dispatch: rol e idiomas por voz. Sin
+        // esto, los eventos gate_* no pueden validar voz↔idioma al invocar.
+        voiceRoles: Object.fromEntries(availableVoices.map((v) => [v.id, v.role])),
+        voiceLanguages: Object.fromEntries(availableVoices.map((v) => [v.id, v.languages ?? []])),
       });
       ctx.updateSettings({
         scenarioKey: selectedScenarioKey,
@@ -3100,7 +3613,7 @@ export default function VueloActualView({
   }, [
     airline, flightCode, originICAO, destICAO, originCityName, destCityName,
     gate, departureTimeStr, departureTimeLocalStr, captainPrimaryLang, captainSecondaryLang, flightId,
-    captainVoice, crewVoice, gateAgentVoiceId, eventConfig, selectedScenarioKey, simbriefRawData,
+    captainVoice, crewVoice, gateAgentVoiceId, availableVoices, eventConfig, selectedScenarioKey, simbriefRawData,
     buildFlightDataForContext,
   ]);
 
@@ -3416,67 +3929,15 @@ export default function VueloActualView({
         <div className="flex flex-col md:flex-row md:items-center md:justify-between border-b border-[#3B7EB2]/50 pb-4 gap-4">
           <div>
             <h1 className="font-display font-extrabold text-3xl tracking-tight text-[#45AFFF]">
-              {isFlightSettingsOpen ? t("current_flight.not_started.settings_title") : t("current_flight.not_started.title")}
+              {showFlightSelect
+                ? t("volar.title")
+                : isFlightSettingsOpen
+                  ? t("current_flight.not_started.settings_title")
+                  : t("current_flight.not_started.title")}
             </h1>
           </div>
-          {/* Action Buttons inside header for instant usability */}
-          {!isFlightSettingsOpen && (
-            <div className="flex flex-col gap-2">
-            <div className="flex flex-wrap items-center gap-3">
-              {/* Tooltip Wrapper for Import button */}
-              {simbriefId ? (
-              <>
-              <div className="relative group inline-block">
-                <button
-                  id="btn-import-simbrief-header"
-                  type="button"
-                  onClick={handleImportSimbrief}
-                  disabled={isFetchingSimbrief}
-                  className={`px-5 py-2.5 rounded-[5px] text-xs font-mono font-bold flex items-center justify-center gap-1.5 transition-all ${
-                    isFetchingSimbrief
-                      ? "opacity-50 cursor-not-allowed"
-                      : "cursor-pointer hover:scale-[1.01] active:scale-[0.99]"
-                  } ${
-                    !isBriefImported
-                      ? "bg-[#43E600]/10 hover:bg-[#43E600]/20 text-[#43E600] border border-[#43E600] shadow-[0_0_15px_rgba(67,230,0,0.25)]"
-                      : "bg-[#45AFFF]/15 hover:bg-[#45AFFF]/30 text-[#45AFFF] border border-[#45AFFF]/40 shadow"
-                  }`}
-                >
-                  {isFetchingSimbrief ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Download className="w-4 h-4" />
-                  )}
-                  {isFetchingSimbrief ? "Importando..." : t("current_flight.not_started.import_btn")}
-                </button>
-                {/* Tooltip Popup */}
-                <div className="absolute right-0 top-full mt-2 hidden group-hover:block w-72 p-3 bg-[#00172e] border border-[#3B7EB2] text-white text-xs rounded shadow-2xl z-50 animate-fadeIn pointer-events-none">
-                  <p className="font-sans font-medium text-white/90 leading-relaxed text-left text-[11px]">
-                    {t("current_flight.not_started.import_tooltip")}
-                  </p>
-                  {/* Arrow pointing up */}
-                </div>
-              </div>
-              </>
-              ) : (
-              <button
-                type="button"
-                onClick={onNavigateToAccount}
-                className="px-5 py-2.5 rounded-[5px] text-xs font-mono font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer hover:scale-[1.01] active:scale-[0.99] bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/40 shadow-[0_0_15px_rgba(251,191,36,0.15)]"
-              >
-                <AlertTriangle className="w-4 h-4" />
-                {t("current_flight.not_started.no_simbrief_id_msg")}
-              </button>
-              )}
-
-              {simbriefError && (
-                <div className="w-full text-center text-red-500 text-sm font-semibold">
-                  {t(`current_flight.not_started.errors.${simbriefError}`, { defaultValue: simbriefError })}
-                </div>
-              )}
-              </div>
-            </div>
-          )}
+          {/* La importación vive en la pantalla de selección (Volar);
+              el encabezado clásico ya no duplica el botón. */}
         </div>
       ) : (
         <div className="bg-[#001d35]/75 border border-[#3B7EB2]/40 rounded-[5px] p-5 shadow-xl animate-fadeIn flex flex-col md:flex-row items-stretch md:items-center justify-between gap-5 w-full">
@@ -3501,7 +3962,7 @@ export default function VueloActualView({
               </span>
               <span className="text-sm font-sans font-black text-white mt-1 uppercase flex flex-col justify-center sm:justify-start">
                 <span className="text-white">{simbriefRawData?.origin?.icao_code}</span>
-                <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{getAirportName(simbriefRawData?.origin?.icao_code)}{simbriefRawData?.origin?.name ? ' (' + simbriefRawData.origin.name + ')' : ''}</span>
+                <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{preFlightOriginCity}{simbriefRawData?.origin?.name ? ' (' + simbriefRawData.origin.name + ')' : ''}</span>
               </span>
             </div>
 
@@ -3517,7 +3978,7 @@ export default function VueloActualView({
               </span>
               <span className="text-sm font-sans font-black mt-1 uppercase flex flex-col justify-center sm:justify-start">
                 <span className="text-[#43E600]">{simbriefRawData?.destination?.icao_code}</span>
-                <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{getAirportName(simbriefRawData?.destination?.icao_code)}{simbriefRawData?.destination?.name ? ' (' + simbriefRawData.destination.name + ')' : ''}</span>
+                <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{preFlightDestCity}{simbriefRawData?.destination?.name ? ' (' + simbriefRawData.destination.name + ')' : ''}</span>
               </span>
             </div>
 
@@ -3693,26 +4154,11 @@ export default function VueloActualView({
       {/* ==================== ESTADO A: NO INICIADO ==================== */}
       {currentState === FlightState.NoIniciado && (
         <div id="vuelo-estado-A" className="space-y-6 animate-fadeIn text-white w-full">
-          {/* Advertencia si no hay conexión con un simulador real */}
-          {!isConnected && !isTestMode && (
-            <div className="warning-banner bg-amber-500/10 border border-amber-500/40 rounded-[5px] p-4 text-xs font-sans text-amber-300 leading-relaxed flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-              <span>⚠️ No hay conexión con un simulador. El sistema usará el modo Mock (simulado).</span>
-              <button
-                type="button"
-                onClick={() => {
-                  setIsTestMode(true);
-                  fileLogger.log('[VueloActualView] Modo pruebas activado desde banner');
-                }}
-                className="bg-[#E68B00] hover:bg-[#ffa726] text-black font-mono font-black text-[10px] px-4 py-2 rounded-[5px] transition-all cursor-pointer shrink-0"
-              >
-                Usar modo pruebas
-              </button>
-            </div>
-          )}
+          {/* Advertencia de conexión movida a la línea de Monitor/Descargar logs
+              (cluster fijo superior derecho) para ganar espacio vertical. */}
 
           {isFlightSettingsOpen ? (
             <div id="pantalla-ajustes-vuelo" className="space-y-6 animate-fadeIn pb-8">
-
               {/* Sin vuelo cargado: se requiere importar desde SimBrief antes de iniciar */}
               {!canStartFlight && (
                 <div className="bg-[#E68B00]/10 border border-[#E68B00]/40 rounded-[5px] p-4 text-xs font-sans text-[#ffb03a] leading-relaxed">
@@ -3746,7 +4192,7 @@ export default function VueloActualView({
                       </span>
                       <span className="text-sm font-sans font-black text-white mt-1 uppercase flex flex-col justify-center sm:justify-start">
                         <span className="text-white">{simbriefRawData?.origin?.icao_code}</span>
-                        <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{getAirportName(simbriefRawData?.origin?.icao_code)}{simbriefRawData?.origin?.name ? ' (' + simbriefRawData.origin.name + ')' : ''}</span>
+                        <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{preFlightOriginCity}{simbriefRawData?.origin?.name ? ' (' + simbriefRawData.origin.name + ')' : ''}</span>
                       </span>
                     </div>
 
@@ -3762,7 +4208,7 @@ export default function VueloActualView({
                       </span>
                       <span className="text-sm font-sans font-black mt-1 uppercase flex flex-col justify-center sm:justify-start">
                         <span className="text-[#43E600]">{simbriefRawData?.destination?.icao_code}</span>
-                        <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{getAirportName(simbriefRawData?.destination?.icao_code)}{simbriefRawData?.destination?.name ? ' (' + simbriefRawData.destination.name + ')' : ''}</span>
+                        <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{preFlightDestCity}{simbriefRawData?.destination?.name ? ' (' + simbriefRawData.destination.name + ')' : ''}</span>
                       </span>
                     </div>
 
@@ -4173,6 +4619,14 @@ export default function VueloActualView({
               </div>
 
             </div>
+          ) : showFlightSelect ? (
+            <FlightSelectView
+              hasSimbriefId={!!simbriefId}
+              isFetchingSimbrief={isFetchingSimbrief}
+              simbriefError={simbriefError}
+              onImportSimbrief={handleImportSimbrief}
+              onNavigateToAccount={onNavigateToAccount}
+            />
           ) : (
             <>
               {/* Informacion de Vuelo Básico (Visible after import or load) */}
@@ -4199,7 +4653,7 @@ export default function VueloActualView({
                   </span>
                   <span className="text-sm font-sans font-black text-white mt-1 uppercase flex flex-col justify-center sm:justify-start">
                     <span className="text-white">{simbriefRawData?.origin?.icao_code}</span>
-                    <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{getAirportName(simbriefRawData?.origin?.icao_code)}{simbriefRawData?.origin?.name ? ' (' + simbriefRawData.origin.name + ')' : ''}</span>
+                    <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{preFlightOriginCity}{simbriefRawData?.origin?.name ? ' (' + simbriefRawData.origin.name + ')' : ''}</span>
                   </span>
                 </div>
 
@@ -4215,7 +4669,7 @@ export default function VueloActualView({
                   </span>
                   <span className="text-sm font-sans font-black mt-1 uppercase flex flex-col justify-center sm:justify-start">
                     <span className="text-[#43E600]">{simbriefRawData?.destination?.icao_code}</span>
-                    <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{getAirportName(simbriefRawData?.destination?.icao_code)}{simbriefRawData?.destination?.name ? ' (' + simbriefRawData.destination.name + ')' : ''}</span>
+                    <span className="text-[11px] text-[#45AFFF] normal-case font-semibold">{preFlightDestCity}{simbriefRawData?.destination?.name ? ' (' + simbriefRawData.destination.name + ')' : ''}</span>
                   </span>
                 </div>
 
@@ -4248,11 +4702,11 @@ export default function VueloActualView({
                   {t("current_flight.not_started.start_flight_btn")}
                 </button>
                 <button
-                  onClick={handleImportSimbrief}
+                  onClick={handleBackToSelection}
                   className="text-[10px] text-[#45AFFF] hover:underline flex items-center gap-1 cursor-pointer font-mono font-bold"
                 >
-                  <Download className="w-3 h-3" />
-                  {t("current_flight.not_started.reimport_btn")}
+                  <ArrowLeft className="w-3 h-3" />
+                  {t("volar.back_to_select")}
                 </button>
               </div>
             </div>
@@ -5238,6 +5692,86 @@ export default function VueloActualView({
                   </div>
                 </div>
 
+                {/* Caja: Experiencia Ganada (datos reales del cierre: bonus
+                    capturados pre-reset + respuesta de la RPC). */}
+                <div id="xp-earned-box" className="bg-[#00345C]/30 rounded-[8px] border-2 border-[#43E600]/40 p-5 shadow-2xl text-white">
+                  <div className="flex justify-between items-center text-[10px] font-mono font-bold tracking-wider border-b border-white/10 pb-2.5 uppercase text-[#43E600]">
+                    <span className="flex items-center gap-1.5 font-bold">
+                      <Trophy className="w-4 h-4" />
+                      <span>Experiencia Ganada - Desglose XP</span>
+                    </span>
+                    {xpCompletion?.status === "done" && xpCompletion.totalFlightXp !== null && (
+                      <span className="font-sans font-black bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/25">
+                        +{xpCompletion.totalFlightXp.toLocaleString("en-US")} XP
+                      </span>
+                    )}
+                  </div>
+
+                  {!xpCompletion || xpCompletion.status === "pending" ? (
+                    <div className="flex flex-col items-center justify-center py-6 text-center space-y-2">
+                      <Loader2 className="w-6 h-6 text-[#43E600] animate-spin" />
+                      <p className="text-xs font-mono text-white/70 font-bold">
+                        {!xpCompletion ? "Aguardando cierre del vuelo…" : "Calculando experiencia…"}
+                      </p>
+                      <p className="text-[10px] font-mono text-white/40">
+                        El desglose aparece al persistirse el recorrido (AT_GATE / Finalizar).
+                      </p>
+                    </div>
+                  ) : xpCompletion.status === "error" ? (
+                    <div className="space-y-3 mt-3">
+                      <div className="bg-red-900/30 border border-red-500/40 rounded px-3 py-2 text-[11px] font-mono text-red-300">
+                        No se pudo otorgar la XP: {xpCompletion.error ?? "fallo en el cierre."} Se muestran los
+                        valores calculados localmente (no otorgados).
+                      </div>
+                      <ul className="space-y-2">
+                        {explainXpBreakdown(xpCompletion.bonuses).map((bonus) => (
+                          <li key={bonus.key} className="flex items-start justify-between gap-2 text-xs font-mono pl-1">
+                            <span className="flex flex-col gap-0.5">
+                              <span className="text-white/75">{bonus.label}</span>
+                              <span className="text-[10px] leading-snug text-white/35">{bonus.reason}</span>
+                            </span>
+                            <span className="font-extrabold whitespace-nowrap pt-0.5 text-white/35">
+                              → {bonus.xp.toLocaleString("en-US")} XP
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : (
+                    <div className="space-y-3 mt-3">
+                      <div className="flex items-center justify-between gap-2 bg-black/30 rounded border border-white/10 px-3 py-2">
+                        <span className="text-xs font-mono font-bold text-white uppercase tracking-wider">
+                          Base por tiempo de vuelo
+                        </span>
+                        <span className="text-lg font-mono font-extrabold text-white whitespace-nowrap">
+                          → {(xpCompletion.baseXpAwarded ?? 0).toLocaleString("en-US")} XP
+                        </span>
+                      </div>
+                      <ul className="space-y-2">
+                        {explainXpBreakdown(xpCompletion.bonuses).map((bonus) => (
+                          <li key={bonus.key} className="flex items-start justify-between gap-2 text-xs font-mono pl-1">
+                            <span className="flex flex-col gap-0.5">
+                              <span className="text-white/75">{bonus.label}</span>
+                              <span className={`text-[10px] leading-snug ${
+                                bonus.state === "earned"
+                                  ? "text-[#43E600]/80"
+                                  : bonus.state === "partial"
+                                    ? "text-amber-400/80"
+                                    : "text-white/35"
+                              }`}>
+                                {bonus.reason}
+                              </span>
+                            </span>
+                            <span className={`font-extrabold whitespace-nowrap pt-0.5 ${bonus.xp > 0 ? "text-[#43E600]" : "text-white/35"}`}>
+                              → {bonus.xp.toLocaleString("en-US")} XP
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+
                 {/* Caja: Resumen de IA */}
                 <div className="bg-[#2C6591]/30 rounded-[8px] border-2 border-[#45AFFF]/40 p-5 shadow-2xl text-white">
                   <div className="flex justify-between items-center text-[10px] font-mono font-bold tracking-wider border-b border-white/10 pb-2.5 uppercase text-[#45AFFF]">
@@ -5547,11 +6081,27 @@ export default function VueloActualView({
         scheduler={schedulerRef.current}
         ruleEngine={ruleEngineRef.current}
         phaseDetector={phaseDetectorRef.current}
+        xpBonusTracker={xpBonusTrackerRef.current}
         lastEventVariables={lastEventVars}
       />
 
-      {/* Debug cluster — barra superior derecha (Monitor / Descargar / Limpiar logs) */}
+      {/* Debug cluster — barra superior derecha (aviso conexión / Monitor / Descargar / Limpiar logs) */}
       <div className="fixed top-4 right-4 z-50 flex items-center gap-1.5">
+        {!isConnected && !isTestMode && currentState === FlightState.NoIniciado && (
+          <div className="warning-banner bg-amber-500/10 border border-amber-500/40 rounded-[5px] px-2.5 py-2 text-[11px] font-sans text-amber-300 leading-tight flex items-center gap-2 shadow-lg shadow-black/30">
+            <span className="whitespace-nowrap">⚠️ No hay conexión con un simulador. El sistema usará el modo Mock (simulado).</span>
+            <button
+              type="button"
+              onClick={() => {
+                setIsTestMode(true);
+                fileLogger.log('[VueloActualView] Modo pruebas activado desde banner');
+              }}
+              className="bg-[#E68B00] hover:bg-[#ffa726] text-black font-mono font-black text-[10px] px-2.5 py-1 rounded-[5px] transition-all cursor-pointer shrink-0"
+            >
+              Usar modo pruebas
+            </button>
+          </div>
+        )}
         <button
           type="button"
           onClick={() => setIsDebugOpen(true)}

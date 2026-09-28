@@ -1,5 +1,9 @@
 import { Clock } from "./Clock";
 import { AnnouncementQueue } from "./AnnouncementQueue";
+import type { FlightContext } from "./FlightContext";
+import {
+  resolvePinnedSpeaker,
+} from "./speakerResolver";
 
 export interface TimerAction {
   id: string;
@@ -20,10 +24,16 @@ export class TimerManager {
   private subscribed = false;
   private flightId: string | null = null;
   private languageId: string | null = null;
+  /** Referencia viva al contexto (siempre fresca al disparar el timer). */
+  private flightContext: FlightContext | null = null;
 
   constructor(clock: Clock, queue: AnnouncementQueue) {
     this.clock = clock;
     this.queue = queue;
+  }
+
+  setFlightContext(fc: FlightContext | null): void {
+    this.flightContext = fc;
   }
 
   setEventContext(flightId: string | null, languageId: string | null): void {
@@ -82,10 +92,18 @@ export class TimerManager {
         if (record.action.onFire) {
           record.action.onFire(id);
         } else {
+          // Idioma global vigente + locutor explícito en gate_* (igual que el
+          // handler): evita snapshot rancio y fallback del servidor (Mía ES).
+          const fc = this.flightContext;
+          const pinned = resolvePinnedSpeaker(record.action.event, fc);
+          const languageId = pinned.languageId ?? this.languageId ?? "";
+          const { role: speakerRole, voiceId } = pinned;
           this.queue.enqueue({
             eventKey: record.action.event,
             flightId: this.flightId,
-            languageId: this.languageId ?? "",
+            languageId,
+            ...(voiceId ? { voiceId } : {}),
+            ...(speakerRole ? { speakerRole } : {}),
           }).catch((err) => {
             console.error('[TimerManager] ❌ enqueue fallido:', { event: record.action.event, error: (err as Error)?.message ?? String(err) });
           });

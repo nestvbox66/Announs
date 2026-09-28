@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { supabase } from "../lib/supabase";
 import { 
@@ -27,13 +27,82 @@ import {
   LogIn,
   Mail,
   Eye,
-  EyeOff
+  EyeOff,
+  Trophy
 } from "lucide-react";
 import { VueloReciente, Logro } from "../types";
+import { ProgressionService, LevelProgress } from "../services/ProgressionService";
+import { formatTotalHours } from "../services/pilotStatsFormat";
 import PassportView from "./PassportView";
 import AccountView from "./AccountView";
 import FlightDetailView from "./flight/FlightDetailView";
-import { FlightHistoryService, FlightHistoryEntry } from "../services/FlightHistoryService";
+import { FlightHistoryService, FlightHistoryEntry, FLIGHT_HISTORY_PAGE_SIZE } from "../services/FlightHistoryService";
+import { PilotStatsService, PilotStats } from "../services/PilotStatsService";
+import { formatMinutes, formatNm, formatHours } from "../services/pilotStatsFormat";
+import { ResponsiveContainer, Treemap, Tooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid, Cell } from "recharts";
+
+/** Celda del treemap de flota (colores de la paleta, texto adaptativo). */
+function FleetTreemapCell(props: any) {
+  const { x, y, width, height, name, fill, hours, flights, sharePct } = props;
+  // Texto azul marino sobre los rellenos brillantes de la paleta: el blanco
+  // se lavaba y parecía "transparente". Sin emoji (algunas fuentes lo
+  // dibujan solo como contorno).
+  const showTitle = width > 64 && height > 40;
+  const showSub = width > 84 && height > 62;
+  return (
+    <g>
+      <rect
+        x={x}
+        y={y}
+        width={width}
+        height={height}
+        fill={fill}
+        fillOpacity={0.92}
+        stroke="#00172e"
+        strokeWidth={2}
+        rx={4}
+      />
+      {showTitle && (
+        <text x={x + 8} y={y + 22} fill="#0a1622" fontSize={14} fontFamily="monospace" fontWeight="800">
+          {name}
+        </text>
+      )}
+      {showSub && (
+        <text x={x + 8} y={y + 40} fill="#0a1622" opacity={0.78} fontSize={11} fontFamily="monospace" fontWeight="700">
+          {formatHours(hours)} · {Number(sharePct ?? 0).toFixed(1)}% · {flights} {flights === 1 ? "vuelo" : "vuelos"}
+        </text>
+      )}
+    </g>
+  );
+}
+
+/** Tooltip del treemap: modelo, horas, vuelos y participación. */
+function FleetTreemapTip({ active, payload }: any) {
+  if (!active || !payload || payload.length === 0) return null;
+  const node = payload[0]?.payload ?? {};
+  return (
+    <div
+      style={{
+        backgroundColor: "#00172e",
+        border: "1px solid rgba(69,175,255,0.4)",
+        borderRadius: 5,
+        padding: "8px 10px",
+        fontSize: 11,
+        fontFamily: "monospace",
+        color: "#fff",
+      }}
+    >
+      <div style={{ fontWeight: "bold", color: "#45AFFF", marginBottom: 4 }}>✈ {node.name ?? "—"}</div>
+      <div>Horas de vuelo: <strong>{formatHours(node.hours)}</strong></div>
+      <div>
+        Vuelos operados: <strong>{node.flights ?? 0}</strong>
+      </div>
+      <div>
+        Participación: <strong>{Number(node.sharePct ?? 0).toFixed(1)}%</strong>
+      </div>
+    </div>
+  );
+}
 
 interface HubViewProps {
   vuelos: VueloReciente[];
@@ -57,9 +126,20 @@ export default function HubView({
   const [selectedFlight, setSelectedFlight] = useState<VueloReciente | null>(null);
   // Historial real desde Supabase (`public.flights` del usuario autenticado).
   const [recentFlights, setRecentFlights] = useState<FlightHistoryEntry[] | null>(null);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyPage, setHistoryPage] = useState(0);
+  const historyTotalRef = useRef(0);
+  useEffect(() => {
+    historyTotalRef.current = historyTotal;
+  }, [historyTotal]);
   const [flightsLoading, setFlightsLoading] = useState(false);
   const [flightsError, setFlightsError] = useState<string | null>(null);
   const [historyReloadKey, setHistoryReloadKey] = useState(0);
+  // Estadísticas reales vía RPC `get_pilot_stats` (usuario autenticado).
+  const [pilotStats, setPilotStats] = useState<PilotStats | null>(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [statsError, setStatsError] = useState<string | null>(null);
+  const [statsReloadKey, setStatsReloadKey] = useState(0);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -100,22 +180,72 @@ export default function HubView({
     return () => { cancelled = true; };
   }, [isLoggedIn]);
 
+  // Progresión real del piloto (rango, XP acumulada, horas de vuelos finalizados).
+  const [progression, setProgression] = useState<{
+    totalXp: number;
+    rankTitle: string | null;
+    level: number | null;
+    badgeIconUrl: string | null;
+  } | null>(null);
+  const [totalHoursLabel, setTotalHoursLabel] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isLoggedIn) {
+      setProgression(null);
+      setTotalHoursLabel(null);
+      return;
+    }
+    let cancelled = false;
+    const loadProgression = async () => {
+      const [progRes, hoursRes] = await Promise.all([
+        ProgressionService.loadUserProgression(),
+        ProgressionService.loadTotalAirMinutes(),
+      ]);
+      if (cancelled) return;
+      setProgression(progRes.success ? progRes.data ?? null : null);
+      setTotalHoursLabel(hoursRes.success ? formatTotalHours(hoursRes.data ?? 0) : null);
+    };
+    void loadProgression();
+    return () => { cancelled = true; };
+  }, [isLoggedIn]);
+
   // Historial de vuelos recientes: datos reales del usuario autenticado.
   useEffect(() => {
     if (!isLoggedIn) {
       setRecentFlights(null);
+      setHistoryTotal(0);
+      setHistoryPage(0);
       setFlightsError(null);
       setFlightsLoading(false);
       return;
     }
     let cancelled = false;
     const loadHistory = async () => {
+      // Pre-clamp con el total conocido: evita pedir un rango fuera de alcance
+      // (PostgREST responde 416) si el total se redujo desde la última carga.
+      const knownTotal = historyTotalRef.current;
+      const maxPage = knownTotal > 0 ? Math.ceil(knownTotal / FLIGHT_HISTORY_PAGE_SIZE) - 1 : 0;
+      const safePage = Math.min(Math.max(0, historyPage), maxPage);
+      if (safePage !== historyPage) {
+        setHistoryPage(safePage);
+        return;
+      }
       setFlightsLoading(true);
       setFlightsError(null);
-      const result = await FlightHistoryService.loadRecentFlights();
+      const result = await FlightHistoryService.loadRecentFlights(
+        FLIGHT_HISTORY_PAGE_SIZE,
+        safePage * FLIGHT_HISTORY_PAGE_SIZE
+      );
       if (cancelled) return;
       if (result.success) {
-        setRecentFlights(result.data ?? []);
+        const page = result.data ?? { entries: [], total: 0 };
+        // Si la página quedó vacía por cambios en el total, volver a la última válida.
+        if (page.entries.length === 0 && page.total > 0 && historyPage > 0) {
+          setHistoryPage(Math.max(0, Math.ceil(page.total / FLIGHT_HISTORY_PAGE_SIZE) - 1));
+          setFlightsLoading(false);
+          return;
+        }
+        setRecentFlights(page.entries);
+        setHistoryTotal(page.total);
       } else {
         setFlightsError(result.error ?? "No se pudo cargar el historial.");
         setRecentFlights(null);
@@ -124,7 +254,41 @@ export default function HubView({
     };
     void loadHistory();
     return () => { cancelled = true; };
-  }, [isLoggedIn, historyReloadKey]);
+  }, [isLoggedIn, historyReloadKey, historyPage]);
+
+  // Análisis estadístico: datos reales vía RPC del usuario autenticado.
+  // Progreso de nivel para la cabecera (XP total, nivel y barra al siguiente).
+  const [levelProgress, setLevelProgress] = useState<LevelProgress | null>(null);
+
+  useEffect(() => {
+    if (!isLoggedIn) {
+      setPilotStats(null);
+      setLevelProgress(null);
+      setStatsError(null);
+      setStatsLoading(false);
+      return;
+    }
+    let cancelled = false;
+    const loadStats = async () => {
+      setStatsLoading(true);
+      setStatsError(null);
+      const [result, levelResult] = await Promise.all([
+        PilotStatsService.loadPilotStats(),
+        ProgressionService.loadLevelProgress(),
+      ]);
+      if (cancelled) return;
+      if (result.success) {
+        setPilotStats(result.data ?? null);
+      } else {
+        setStatsError(result.error ?? "No se pudieron cargar las estadísticas.");
+        setPilotStats(null);
+      }
+      setLevelProgress(levelResult.success ? levelResult.data ?? null : null);
+      setStatsLoading(false);
+    };
+    void loadStats();
+    return () => { cancelled = true; };
+  }, [isLoggedIn, statsReloadKey]);
 
   /**
    * Filas de la tabla: datos reales cuando la consulta terminó, mocks de la
@@ -152,9 +316,28 @@ export default function HubView({
   })();
   const historyLoaded = recentFlights !== null;
 
+  // Navegación anterior/siguiente dentro del detalle (orden de la grilla).
+  const selectedFlightIndex = selectedFlight
+    ? tableRows.findIndex((f) => f.id === selectedFlight.id)
+    : -1;
+  const navigateDetail = (dir: 1 | -1) => {
+    if (selectedFlightIndex < 0) return;
+    const next = tableRows[selectedFlightIndex + dir];
+    if (next) setSelectedFlight(next);
+  };
+
   // Render Full Screen Flight Detail view if selected
   if (selectedFlight) {
-    return <FlightDetailView flight={selectedFlight} onBack={() => setSelectedFlight(null)} />;
+    return (
+      <FlightDetailView
+        flight={selectedFlight}
+        onBack={() => setSelectedFlight(null)}
+        onPrev={() => navigateDetail(-1)}
+        onNext={() => navigateDetail(1)}
+        hasPrev={selectedFlightIndex > 0}
+        hasNext={selectedFlightIndex >= 0 && selectedFlightIndex < tableRows.length - 1}
+      />
+    );
   }
 
   // Let's map country flags or stamps for the passport stamp representation
@@ -460,8 +643,24 @@ export default function HubView({
                         PRO
                       </span>
                     </div>
-                    <div className="text-xs text-[#45AFFF] font-mono">{t("overview.rank_undefined")}</div>
-                    <div className="text-[10px] text-white/60">{t("overview.member_since", { date: memberSince })}</div>
+                    <div className="flex items-center gap-2 mt-1">
+                      <span
+                        className="w-10 h-10 rounded-full bg-[#00345C] border border-[#E68B00]/60 flex items-center justify-center shrink-0 overflow-hidden"
+                        title={progression?.rankTitle ?? undefined}
+                      >
+                        {progression?.badgeIconUrl ? (
+                          <img src={progression.badgeIconUrl} alt={progression.rankTitle ?? "Rango"} className="w-full h-full object-cover" />
+                        ) : (
+                          <Trophy className="w-5 h-5 text-[#E68B00]" />
+                        )}
+                      </span>
+                      <div>
+                        <div className="text-xs text-[#45AFFF] font-mono font-bold leading-tight">
+                          {progression?.rankTitle ?? t("overview.rank_undefined")}
+                        </div>
+                        <div className="text-[10px] text-white/60">{t("overview.member_since", { date: memberSince })}</div>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
@@ -472,14 +671,14 @@ export default function HubView({
                       <Clock className="w-3.5 h-3.5 text-[#E68B00]" />
                       {t("overview.total_hours")}
                     </span>
-                    <span className="font-mono text-sm font-bold text-white">{totalHoras} hrs</span>
+                    <span className="font-mono text-sm font-bold text-white">{totalHoursLabel ?? `${totalHoras} hrs`}</span>
                   </div>
                   <div className="flex items-center justify-between pb-2 border-b border-white/10">
                     <span className="text-xs text-white/80 flex items-center gap-1.5">
                       <Award className="w-3.5 h-3.5 text-[#45AFFF]" />
                       {t("overview.total_score")}
                     </span>
-                    <span className="font-mono text-sm font-bold text-[#45AFFF]">{totalXP.toLocaleString()} XP</span>
+                    <span className="font-mono text-sm font-bold text-[#45AFFF]">{(progression ? progression.totalXp : totalXP).toLocaleString("en-US")} XP</span>
                   </div>
                   <div className="flex items-center justify-between pb-2 border-b border-white/10">
                     <span className="text-xs text-white/80 flex items-center gap-1.5">
@@ -681,44 +880,69 @@ export default function HubView({
                 </tbody>
               </table>
             </div>
+            {(() => {
+              const totalPages = Math.max(1, Math.ceil(historyTotal / FLIGHT_HISTORY_PAGE_SIZE));
+              const currentPage = Math.min(historyPage, totalPages - 1);
+              const from = historyTotal === 0 ? 0 : historyPage * FLIGHT_HISTORY_PAGE_SIZE + 1;
+              const to = Math.min(historyTotal, (historyPage + 1) * FLIGHT_HISTORY_PAGE_SIZE);
+              const prevPage = () => setHistoryPage((p) => Math.max(0, p - 1));
+              const nextPage = () => setHistoryPage((p) => Math.min(totalPages - 1, p + 1));
+              // Ventana de hasta 5 números alrededor de la página actual.
+              const startNum = Math.max(0, Math.min(currentPage - 2, totalPages - 5));
+              const pageNums = Array.from(
+                { length: Math.min(5, totalPages) },
+                (_, i) => startNum + i
+              );
+              return (
+                <div className="flex flex-wrap items-center justify-between gap-2 mt-3 px-1">
+                  <span className="text-[10px] font-mono text-white/45">
+                    Mostrando {from}–{to} de {historyTotal} {historyTotal === 1 ? "vuelo" : "vuelos"}
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={prevPage}
+                      disabled={flightsLoading || currentPage <= 0}
+                      className="px-2.5 py-1 rounded-[4px] border border-white/20 bg-[#2C6591]/40 font-mono text-[11px] text-white hover:bg-[#45AFFF]/15 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      ‹ Anterior
+                    </button>
+                    {pageNums.map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        onClick={() => setHistoryPage(n)}
+                        disabled={flightsLoading}
+                        className={`min-w-[28px] px-2 py-1 rounded-[4px] border font-mono text-[11px] transition-all cursor-pointer disabled:cursor-not-allowed ${
+                          n === currentPage
+                            ? "bg-[#45AFFF] text-[#00345C] border-[#45AFFF]/30 font-extrabold"
+                            : "border-white/20 bg-[#2C6591]/40 text-white hover:bg-[#45AFFF]/15"
+                        }`}
+                      >
+                        {n + 1}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={nextPage}
+                      disabled={flightsLoading || currentPage >= totalPages - 1}
+                      className="px-2.5 py-1 rounded-[4px] border border-white/20 bg-[#2C6591]/40 font-mono text-[11px] text-white hover:bg-[#45AFFF]/15 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Siguiente ›
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         </>
       )}
 
       {subView === "stats" && (() => {
-        const statsVuelosTotal = 142 + vuelos.length;
-        const statsDistanciaTotal = statsVuelosTotal * 412 + 350;
-        const statsDuracionPromedio = "1h 48m";
-        const statsAeropuertosUnicos = 26 + Math.min(vuelos.length, 6);
-        const statsPuntuacionRating = (vuelos.length > 0 ? (vuelos.reduce((sum, v) => sum + v.satisfaccionMedia, 0) / vuelos.length / 10) : 8.8).toFixed(1);
-        const statsRachaActual = 12;
-
-        const statsMedianaVS = vuelos.length > 0 ? Math.round(vuelos.reduce((sum, v) => sum + Math.abs(v.fpmLanding), 0) / vuelos.length) : 118;
-        const statsVueloMasLargoDur = "4h 15m";
-        const statsVueloMasLargoDtn = 1650;
-        const statsMejorRacha = 24;
-        const statsPaisesVisitados = 8;
-
-        const mesesData = [
-          { name: "Ene", flights: 12, hClass: "h-[40%]" },
-          { name: "Feb", flights: 18, hClass: "h-[60%]" },
-          { name: "Mar", flights: 22, hClass: "h-[75%]" },
-          { name: "Abr", flights: 15, hClass: "h-[50%]" },
-          { name: "May", flights: 28, hClass: "h-[95%]" },
-          { name: "Jun", flights: 19, hClass: "h-[65%]" },
-          { name: "Jul", flights: 14, hClass: "h-[45%]" },
-          { name: "Ago", flights: 25, hClass: "h-[85%]" },
-          { name: "Sep", flights: 30, hClass: "h-full" },
-          { name: "Oct", flights: 16, hClass: "h-[53%]" },
-          { name: "Nov", flights: 22, hClass: "h-[75%]" },
-          { name: "Dic", flights: 27, hClass: "h-[90%]" },
-        ];
-
-        return (
-          <div id="stats-dashboard-screen" className="space-y-6 animate-fadeIn">
-            {/* Header / Volver bar */}
-            <div className="flex bg-[#001b33]/60 p-4 rounded-[5px] border border-[#3B7EB2]/30 items-center justify-between">
-              <div className="flex items-center gap-3">
+        if (statsLoading) {
+          return (
+            <div id="stats-dashboard-screen" className="space-y-6 animate-fadeIn">
+              <div className="flex bg-[#001b33]/60 p-4 rounded-[5px] border border-[#3B7EB2]/30 items-center justify-between">
                 <div>
                   <h2 className="text-sm font-mono font-bold text-[#45AFFF] uppercase tracking-wider">
                     Análisis Estadístico
@@ -726,6 +950,108 @@ export default function HubView({
                   <p className="text-[10px] text-white/50 font-mono">Panel Global de Estadísticas de Carrera</p>
                 </div>
               </div>
+              <div className="bg-[#2C6591]/20 border border-white/20 rounded-[5px] p-10 flex items-center justify-center gap-2 text-white/60 font-mono text-xs">
+                <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+                Cargando tus estadísticas…
+              </div>
+            </div>
+          );
+        }
+
+        if (statsError || !pilotStats) {
+          return (
+            <div id="stats-dashboard-screen" className="space-y-6 animate-fadeIn">
+              <div className="flex bg-[#001b33]/60 p-4 rounded-[5px] border border-[#3B7EB2]/30 items-center justify-between">
+                <div>
+                  <h2 className="text-sm font-mono font-bold text-[#45AFFF] uppercase tracking-wider">
+                    Análisis Estadístico
+                  </h2>
+                  <p className="text-[10px] text-white/50 font-mono">Panel Global de Estadísticas de Carrera</p>
+                </div>
+              </div>
+              <div className="bg-[#2C6591]/20 border border-white/20 rounded-[5px] p-10 text-center space-y-3">
+                <p className="text-xs font-mono text-red-300">No se pudieron cargar las estadísticas: {statsError ?? "sin datos"}</p>
+                <button
+                  type="button"
+                  onClick={() => setStatsReloadKey((k) => k + 1)}
+                  className="bg-[#2C6591]/50 border border-white/20 hover:bg-[#45AFFF]/15 text-white px-3 py-1.5 rounded-[5px] font-mono text-[11px] transition-all cursor-pointer"
+                >
+                  Reintentar
+                </button>
+              </div>
+            </div>
+          );
+        }
+
+        // Datos reales de la RPC `get_pilot_stats`.
+        const career = pilotStats.career;
+        const performance = pilotStats.performance;
+        const distribution = pilotStats.distribution;
+        const topRoutes = pilotStats.topRoutes;
+        const monthly = pilotStats.monthlyActivity;
+
+        const statsVuelosTotal = career.totalFlights;
+        const statsDistanciaTotal = formatNm(career.totalDistanceNm);
+        const statsDuracionPromedio = formatMinutes(career.avgAirTimeMinutes);
+        const statsAeropuertosUnicos = career.uniqueAirports;
+        const statsRachaActual = pilotStats.currentStreakDays;
+
+        const statsVueloMasLargoDur = formatMinutes(performance.maxAirTimeMinutes);
+        const statsVueloMasLargoDtn = formatNm(performance.maxDistanceNm);
+        const statsPaisesVisitados = career.uniqueCountries;
+
+        const monthlyMax = Math.max(1, ...monthly.map((m) => m.flights));
+        const monthlyTotal = monthly.reduce((sum, m) => sum + m.flights, 0);
+        const monthlyAvg = monthly.length > 0 ? (monthlyTotal / monthly.length).toFixed(1) : "0.0";
+
+        const FLEET_COLORS = ["#43E600", "#45AFFF", "#E600D2", "#E68B00", "#8B5CF6", "#14B8A6"];
+        const totalDistHours = distribution.reduce((sum, item) => sum + item.hours, 0);
+
+        return (
+          <div id="stats-dashboard-screen" className="space-y-6 animate-fadeIn">
+            {/* Header / Volver bar */}
+            <div className="flex bg-[#001b33]/60 p-4 rounded-[5px] border border-[#3B7EB2]/30 items-center justify-between gap-4">
+              <div className="flex items-center gap-3 shrink-0">
+                <div>
+                  <h2 className="text-sm font-mono font-bold text-[#45AFFF] uppercase tracking-wider">
+                    Análisis Estadístico
+                  </h2>
+                  <p className="text-[10px] text-white/50 font-mono">Panel Global de Estadísticas de Carrera</p>
+                </div>
+              </div>
+              {levelProgress && (
+                <div className="flex-1 max-w-md space-y-1.5" title="Progreso de nivel">
+                  <div className="flex items-baseline justify-between gap-3">
+                    <span className="text-xs font-mono font-extrabold text-white">
+                      {levelProgress.totalXp.toLocaleString("en-US")}{" "}
+                      <span className="text-[10px] text-white/50 font-bold">XP</span>
+                    </span>
+                    <span className="text-[10px] font-mono text-[#45AFFF] font-bold uppercase tracking-wider">
+                      {levelProgress.level !== null ? `Nivel ${levelProgress.level}` : "Nivel —"}
+                    </span>
+                  </div>
+                  <div className="h-2 rounded-full bg-white/10 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-[#45AFFF] to-[#43E600] transition-all duration-500"
+                      style={{ width: `${Math.min(100, Math.max(0, levelProgress.progressPct))}%` }}
+                    />
+                  </div>
+                  <div className="text-[10px] font-mono text-white/50 text-right">
+                    {levelProgress.nextRankXp !== null ? (
+                      <>
+                        {levelProgress.xpToNext.toLocaleString("en-US")} XP para{" "}
+                        <span className="text-white/75 font-bold">{levelProgress.nextRankTitle}</span>
+                        <span className="text-white/35"> ({levelProgress.nextRankXp.toLocaleString("en-US")} XP)</span>
+                      </>
+                    ) : (
+                      <span className="text-[#43E600] font-bold">Nivel máximo alcanzado</span>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Title: Estadísticas de Carrera */}
@@ -745,7 +1071,7 @@ export default function HubView({
               
               <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-4 shadow-sm flex flex-col justify-between h-24">
                 <span className="text-[10px] font-mono text-[#45AFFF]/80 uppercase tracking-wider">DISTANCIA</span>
-                <span className="text-xl font-mono font-extrabold text-white">{statsDistanciaTotal.toLocaleString()} <span className="text-xs text-white/60">MN</span></span>
+                <span className="text-xl font-mono font-extrabold text-white">{statsDistanciaTotal} <span className="text-xs text-white/60">MN</span></span>
                 <span className="text-[9px] text-white/40 font-mono">Millas Náuticas</span>
               </div>
 
@@ -761,10 +1087,10 @@ export default function HubView({
                 <span className="text-[9px] text-white/40 font-mono">Terminales Conectadas</span>
               </div>
 
-              <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-4 shadow-sm flex flex-col justify-between h-24">
+              <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-4 shadow-sm flex flex-col justify-between h-24" title="El puntaje promedio estará disponible próximamente">
                 <span className="text-[10px] font-mono text-[#45AFFF]/80 uppercase tracking-wider">PUNTAJE PROMEDIO</span>
-                <span className="text-xl font-mono font-extrabold text-[#43E600]">{statsPuntuacionRating}<span className="text-xs text-white/50">/10</span></span>
-                <span className="text-[9px] text-white/40 font-mono">Aprobación Pasajeros</span>
+                <span className="text-xl font-mono font-extrabold text-white/40">—<span className="text-xs text-white/40">/10</span></span>
+                <span className="text-[9px] text-white/40 font-mono">Próximamente</span>
               </div>
 
               <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-4 shadow-sm flex flex-col justify-between h-24">
@@ -780,10 +1106,10 @@ export default function HubView({
                 RENDIMIENTO DE COCKPIT
               </h4>
               <div className="grid grid-cols-2 md:grid-cols-5 gap-4" id="stats-performance-row">
-                <div className="bg-[#00345C]/35 border border-white/10 rounded-[5px] p-3 text-center">
+                <div className="bg-[#00345C]/35 border border-white/10 rounded-[5px] p-3 text-center" title="La mediana de VS estará disponible próximamente">
                   <span className="text-[9px] font-mono text-white/50 block uppercase">MEDIANA DE VS</span>
-                  <span className="text-lg font-mono font-extrabold text-[#43E600]">{statsMedianaVS} FPM</span>
-                  <span className="text-[9px] text-white/30 block mt-0.5">Tasa de Descenso Aterrizaje</span>
+                  <span className="text-lg font-mono font-extrabold text-white/40">— FPM</span>
+                  <span className="text-[9px] text-white/30 block mt-0.5">Próximamente</span>
                 </div>
 
                 <div className="bg-[#00345C]/35 border border-white/10 rounded-[5px] p-3 text-center">
@@ -794,14 +1120,14 @@ export default function HubView({
 
                 <div className="bg-[#00345C]/35 border border-white/10 rounded-[5px] p-3 text-center">
                   <span className="text-[9px] font-mono text-white/50 block uppercase">VUELO MÁS LARGO (DIST.)</span>
-                  <span className="text-lg font-mono font-extrabold text-white">{statsVueloMasLargoDtn.toLocaleString()} MN</span>
+                  <span className="text-lg font-mono font-extrabold text-white">{statsVueloMasLargoDtn} MN</span>
                   <span className="text-[9px] text-white/30 block mt-0.5">Millas Máximas Cruzadas</span>
                 </div>
 
-                <div className="bg-[#00345C]/35 border border-white/10 rounded-[5px] p-3 text-center">
+                <div className="bg-[#00345C]/35 border border-white/10 rounded-[5px] p-3 text-center" title="La mejor racha estará disponible próximamente">
                   <span className="text-[9px] font-mono text-white/50 block uppercase">MEJOR RACHA</span>
-                  <span className="text-lg font-mono font-extrabold text-[#E68B00]">{statsMejorRacha} DÍAS</span>
-                  <span className="text-[9px] text-white/30 block mt-0.5">Récord Histórico Personal</span>
+                  <span className="text-lg font-mono font-extrabold text-white/40">— DÍAS</span>
+                  <span className="text-[9px] text-white/30 block mt-0.5">Próximamente</span>
                 </div>
 
                 <div className="bg-[#00345C]/35 border border-white/10 rounded-[5px] p-3 text-center col-span-2 md:col-span-1">
@@ -819,70 +1145,35 @@ export default function HubView({
                 <span className="text-[9px] text-[#43E600] font-bold">FLOTA & PARTICIPACIÓN HORARIA</span>
               </h4>
               
-              <div className="grid grid-cols-1 md:grid-cols-12 gap-3 min-h-[200px]">
-                {/* 50% Share - Boeing 737-800 */}
-                <div className="md:col-span-6 bg-[#001b33]/40 border border-white/10 rounded p-4 flex flex-col justify-between hover:bg-[#001b33]/60 transition-all duration-300 cursor-pointer relative overflow-hidden group">
-                  <div className="absolute top-0 left-0 w-1.5 h-full bg-[#43E600]"></div>
-                  <div className="space-y-1 pl-2">
-                    <span className="text-[10px] font-mono text-white/50 block">PARTICIPACIÓN DIRECTA — 50%</span>
-                    <h5 className="font-mono text-sm font-bold text-white flex items-center gap-1.5">
-                      <span>✈️</span> Boeing 737-800 NG
-                    </h5>
-                    <p className="text-[11px] text-white/70">
-                      Modelo principal de operaciones de rango medio. Utilizado por Aerolíneas Argentinas y Flybondi.
-                    </p>
-                  </div>
-                  
-                  <div className="flex gap-2 items-center flex-wrap mt-3 pl-2">
-                    <span className="px-2 py-0.5 rounded bg-sky-500 font-mono text-[9px] font-extrabold flex items-center gap-1">
-                      AR <span>30%</span>
-                    </span>
-                    <span className="px-2 py-0.5 rounded bg-amber-400 text-slate-800 font-mono text-[9px] font-extrabold flex items-center gap-1">
-                      FB <span>20%</span>
-                    </span>
-                    <span className="text-[10px] text-white/40 ml-auto font-mono">79 Horas Bloque</span>
-                  </div>
+              {distribution.length === 0 ? (
+                <div className="text-center py-8 space-y-1">
+                  <p className="text-sm font-bold text-white/70">Sin operaciones por modelo todavía</p>
+                  <p className="text-[11px] font-mono text-white/45">La distribución de tu flota aparecerá aquí.</p>
                 </div>
-
-                {/* Right columns further partitioned */}
-                <div className="md:col-span-6 grid grid-rows-2 gap-3">
-                  {/* Row 1: Airbus A320neo - 35% */}
-                  <div className="bg-[#001b33]/40 border border-[#3B7EB2]/30 rounded p-4 flex flex-col justify-between hover:bg-[#001b33]/60 transition-all duration-300 cursor-pointer relative overflow-hidden group">
-                    <div className="absolute top-0 left-0 w-1.5 h-full bg-[#45AFFF]"></div>
-                    <div className="space-y-1 pl-2">
-                      <div className="flex justify-between items-start">
-                        <span className="text-[10px] font-mono text-white/50 block font-semibold">PARTICIPACIÓN — 35%</span>
-                        <span className="px-1.5 py-0.5 rounded bg-[#E600D2] font-mono text-[8px] font-extrabold">WJ 35%</span>
-                      </div>
-                      <h5 className="font-mono text-xs font-bold text-white flex items-center gap-1.5">
-                        <span>✈️</span> Airbus A320neo
-                      </h5>
-                    </div>
-                    <div className="flex justify-between items-center text-[10px] text-white/60 font-mono mt-2 pl-2">
-                      <span>Operado 100% por JetSMART</span>
-                      <span className="text-white/40">55 Horas</span>
-                    </div>
-                  </div>
-
-                  {/* Row 2: Embraer E190 - 15% */}
-                  <div className="bg-[#001b33]/40 border border-white/5 rounded p-4 flex flex-col justify-between hover:bg-[#001b33]/60 transition-all duration-300 cursor-pointer relative overflow-hidden group">
-                    <div className="absolute top-0 left-0 w-1.5 h-full bg-[#E600D2]"></div>
-                    <div className="space-y-1 pl-2">
-                      <div className="flex justify-between items-start">
-                        <span className="text-[10px] font-mono text-white/50 block">PARTICIPACIÓN — 15%</span>
-                        <span className="px-1.5 py-0.5 rounded bg-sky-500 font-mono text-[8px] font-extrabold">AR 15%</span>
-                      </div>
-                      <h5 className="font-mono text-xs font-bold text-white flex items-center gap-1.5">
-                        <span>✈️</span> Embraer E190
-                      </h5>
-                    </div>
-                    <div className="flex justify-between items-center text-[10px] text-white/60 font-mono mt-2 pl-2">
-                      <span>Vectores Regionales (AR Austral)</span>
-                      <span className="text-white/40">24 Horas</span>
-                    </div>
-                  </div>
+              ) : (
+                <div style={{ width: "100%", height: 260 }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <Treemap
+                      data={distribution.map((item, idx) => ({
+                        name: item.model,
+                        size: item.hours > 0 ? item.hours : Math.max(item.flights, 0.001),
+                        fill: FLEET_COLORS[idx % FLEET_COLORS.length],
+                        hours: item.hours,
+                        flights: item.flights,
+                        sharePct: item.sharePct,
+                      }))}
+                      dataKey="size"
+                      stroke="#00172e"
+                      content={<FleetTreemapCell />}
+                    >
+                      <Tooltip content={<FleetTreemapTip />} />
+                    </Treemap>
+                  </ResponsiveContainer>
                 </div>
-              </div>
+              )}
+              {totalDistHours <= 0 && distribution.length > 0 && (
+                <p className="text-[10px] font-mono text-white/35">Participación estimada por cantidad de vuelos (sin horas registradas).</p>
+              )}
             </div>
 
             {/* Row 4: Rutas más realizadas & Actividad Mensual Bar Chart */}
@@ -894,69 +1185,31 @@ export default function HubView({
                 </h4>
 
                 <div className="divide-y divide-white/5 space-y-2 text-xs">
-                  {/* Ruta 1 */}
-                  <div className="flex justify-between items-center pt-2">
-                    <div className="space-y-0.5">
-                      <div className="flex items-center gap-1.5 font-bold font-mono">
-                        <span className="text-[#43E600]">AEP</span>
-                        <span className="text-white/40">➔</span>
-                        <span className="text-[#45AFFF]">BAR</span>
+                  {topRoutes.length === 0 ? (
+                    <div className="py-6 text-center space-y-1">
+                      <p className="text-xs font-bold text-white/70">Sin rutas registradas todavía</p>
+                      <p className="text-[10px] font-mono text-white/45">Tus rutas más voladas aparecerán aquí.</p>
+                    </div>
+                  ) : (
+                    topRoutes.map((route, idx) => (
+                      <div key={`${route.origin}-${route.dest}-${idx}`} className="flex justify-between items-center pt-2">
+                        <div className="space-y-0.5">
+                          <div className="flex items-center gap-1.5 font-bold font-mono">
+                            <span className="text-[#43E600]">{route.origin}</span>
+                            <span className="text-white/40">➔</span>
+                            <span className="text-[#45AFFF]">{route.dest}</span>
+                          </div>
+                          <div className="text-[10px] text-white/55">
+                            {[route.originCity, route.destCity].filter(Boolean).join(" ➔ ") || "—"}
+                          </div>
+                        </div>
+                        <div className="text-right font-mono">
+                          <div className="font-extrabold text-white">{route.count} {route.count === 1 ? "vez" : "veces"}</div>
+                          <div className="text-[10px] text-white/40">{route.distanceNm !== null ? `${formatNm(route.distanceNm)} MN` : "—"}</div>
+                        </div>
                       </div>
-                      <div className="text-[10px] text-white/55">Aeroparque ➔ Bariloche (Patagonia)</div>
-                    </div>
-                    <div className="text-right font-mono">
-                      <div className="font-extrabold text-white">18 veces</div>
-                      <div className="text-[10px] text-white/40">710 MN</div>
-                    </div>
-                  </div>
-
-                  {/* Ruta 2 */}
-                  <div className="flex justify-between items-center pt-2">
-                    <div className="space-y-0.5">
-                      <div className="flex items-center gap-1.5 font-bold font-mono">
-                        <span className="text-[#43E600]">AEP</span>
-                        <span className="text-white/40">➔</span>
-                        <span className="text-[#45AFFF]">COR</span>
-                      </div>
-                      <div className="text-[10px] text-white/55">Aeroparque ➔ Córdoba (Pampa)</div>
-                    </div>
-                    <div className="text-right font-mono">
-                      <div className="font-extrabold text-white font-mono">14 veces</div>
-                      <div className="text-[10px] text-white/40">345 MN</div>
-                    </div>
-                  </div>
-
-                  {/* Ruta 3 */}
-                  <div className="flex justify-between items-center pt-2">
-                    <div className="space-y-0.5">
-                      <div className="flex items-center gap-1.5 font-bold font-mono">
-                        <span className="text-[#43E600]">EZE</span>
-                        <span className="text-white/40">➔</span>
-                        <span className="text-[#45AFFF]">MDZ</span>
-                      </div>
-                      <div className="text-[10px] text-white/55">Ezeiza Int. ➔ Mendoza (Andes)</div>
-                    </div>
-                    <div className="text-right font-mono">
-                      <div className="font-extrabold text-white">11 veces</div>
-                      <div className="text-[10px] text-white/40">524 MN</div>
-                    </div>
-                  </div>
-
-                  {/* Ruta 4 */}
-                  <div className="flex justify-between items-center pt-2">
-                    <div className="space-y-0.5">
-                      <div className="flex items-center gap-1.5 font-bold font-mono">
-                        <span className="text-[#43E600]">AEP</span>
-                        <span className="text-white/40">➔</span>
-                        <span className="text-[#45AFFF]">IGR</span>
-                      </div>
-                      <div className="text-[10px] text-white/55">Aeroparque ➔ Iguazú (Selva Misionera)</div>
-                    </div>
-                    <div className="text-right font-mono">
-                      <div className="font-extrabold text-white">9 veces</div>
-                      <div className="text-[10px] text-white/40">580 MN</div>
-                    </div>
-                  </div>
+                    ))
+                  )}
                 </div>
               </div>
 
@@ -967,30 +1220,45 @@ export default function HubView({
                   <span className="text-[9px] text-white/40 font-mono uppercase font-normal">Frecuencia Cockpit</span>
                 </h4>
 
-                {/* Styled Flexible Bar Charts using pure Tailwind markup */}
-                <div className="flex items-end justify-between h-48 pt-4 pb-2 px-1 bg-[#001b33]/40 border border-[#3B7EB2]/10 rounded" id="bar-chart-container">
-                  {mesesData.map((mes, index) => (
-                    <div key={index} className="flex flex-col items-center flex-1 group relative">
-                      {/* Floating tooltip on hover */}
-                      <div className="absolute top-[-30px] rounded bg-[#00345C] text-[10px] font-mono text-[#43E600] border border-white/10 px-1 py-0.5 shadow-md opacity-0 group-hover:opacity-100 transition-opacity duration-200 z-20 pointer-events-none">
-                        {mes.flights} vls
-                      </div>
-
-                      {/* Bar Fill */}
-                      <div className="w-4 sm:w-6 bg-black/15 hover:bg-black/25 rounded-t-sm flex items-end h-[110px] pb-0.5">
-                        <div className={`w-full bg-[#45AFFF] group-hover:bg-[#43E600] rounded-t-sm transition-all duration-300 ${mes.hClass}`}></div>
-                      </div>
-
-                      {/* Tick Label */}
-                      <span className="text-[10px] font-mono text-white/50 group-hover:text-white mt-1 pt-0.5 border-t border-white/5 w-full text-center">
-                        {mes.name}
-                      </span>
-                    </div>
-                  ))}
+                {/* Actividad mensual (Recharts) */}
+                <div className="h-[212px] w-full pt-2 pb-0 px-1 bg-[#001b33]/40 border border-[#3B7EB2]/10 rounded" id="bar-chart-container">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={monthly} margin={{ top: 8, right: 8, bottom: 0, left: -18 }}>
+                      <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" vertical={false} />
+                      <XAxis
+                        dataKey="label"
+                        tick={{ fill: "rgba(255,255,255,0.55)", fontSize: 10, fontFamily: "monospace" }}
+                        axisLine={{ stroke: "rgba(255,255,255,0.2)" }}
+                        tickLine={false}
+                        interval={0}
+                      />
+                      <YAxis
+                        allowDecimals={false}
+                        tick={{ fill: "rgba(255,255,255,0.55)", fontSize: 10, fontFamily: "monospace" }}
+                        axisLine={false}
+                        tickLine={false}
+                        width={36}
+                      />
+                      <Tooltip
+                        cursor={{ fill: "rgba(69,175,255,0.08)" }}
+                        contentStyle={{ backgroundColor: "#00172e", border: "1px solid rgba(69,175,255,0.4)", borderRadius: 5, fontSize: 11, fontFamily: "monospace", color: "#fff" }}
+                        labelStyle={{ color: "#45AFFF" }}
+                        formatter={(value: number | string) => [`${value} vls`, "Vuelos"]}
+                      />
+                      <Bar dataKey="flights" name="Vuelos" radius={[4, 4, 0, 0]}>
+                        {monthly.map((mes) => (
+                          <Cell
+                            key={mes.key}
+                            fill={monthlyMax > 0 && mes.flights === monthlyMax ? "#43E600" : "#45AFFF"}
+                          />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
                 </div>
 
                 <div className="text-[10px] text-white/60 text-right font-mono">
-                  Total acumulado promedio mensual: <strong className="text-[#45AFFF]">21.8 vuelos / mes</strong>
+                  Total acumulado promedio mensual: <strong className="text-[#45AFFF]">{monthlyAvg} vuelos / mes</strong>
                 </div>
               </div>
             </div>

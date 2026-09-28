@@ -31,6 +31,7 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-log = "2"
+tauri-plugin-shell = "2"
 # Fase 3 — SimConnect. `simconnect-sdk` (opcional) se habilita con la feature `simconnect`.
 # Build real: `cargo build --features simconnect` (Windows + MSFS SDK + libclang).
 simconnect-sdk = { version = "0.2", optional = true, features = ["derive"] }

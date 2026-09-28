@@ -71,6 +71,18 @@ pub struct TelemetrySnapshot {
     pub radio_height: Option<f64>,
     #[serde(rename = "gearDown")]
     pub gear_down: Option<bool>,
+    #[serde(rename = "taxiLightsOn")]
+    pub taxi_lights_on: Option<bool>,
+    #[serde(rename = "landingLightsOn")]
+    pub landing_lights_on: Option<bool>,
+    #[serde(rename = "strobeLightsOn")]
+    pub strobe_lights_on: Option<bool>,
+    /// LIGHT BEACON (baliza). Bonus disc_beacon_lights_xp.
+    #[serde(rename = "beaconLightsOn")]
+    pub beacon_lights_on: Option<bool>,
+    /// E:TIME OF DAY nativo (enum; 3 = noche). Bonus nocturno + horas día/noche.
+    #[serde(rename = "timeOfDay")]
+    pub time_of_day: Option<f64>,
 }
 
 // ── Implementación real (feature "simconnect") ──────────────────────────
@@ -145,6 +157,20 @@ mod sim {
         radio_height: f64,
         #[simconnect(name = "GEAR HANDLE POSITION")]
         gear_handle_position: f64,
+        // ── XP disciplina: luces (Bool; 1.0 = encendida) ──
+        #[simconnect(name = "LIGHT TAXI")]
+        light_taxi: f64,
+        #[simconnect(name = "LIGHT LANDING")]
+        light_landing: f64,
+        #[simconnect(name = "LIGHT STROBE")]
+        light_strobe: f64,
+        // ── Bonus beacon: baliza (Bool; 1.0 = encendida) ──
+        #[simconnect(name = "LIGHT BEACON")]
+        light_beacon: f64,
+        // ── Bonus nocturno + horas día/noche: E:TIME OF DAY (enum; 3 = noche) ──
+        // Sin `unit` (como las luces Bool): el valor llega como f64 igualmente.
+        #[simconnect(name = "TIME OF DAY")]
+        time_of_day: f64,
         // ── Descenso / noche / restante (reactivados: sin VERTICAL SPEED el
         // descenso nunca se detecta; sin LOCAL TIME siempre es "de noche") ──
         #[simconnect(name = "VERTICAL SPEED", unit = "feet per minute")]
@@ -197,8 +223,8 @@ mod sim {
             // Incluye seatbelt_raw para diagnosticar inversiones reportadas
             // (SDK: 1 = cinturones ON; ver nota en `seatbelt_switch`).
             println!(
-                "[simconnect] zulu_time: {}, parking: {}, on_ground: {}, seatbelt_raw: {}, vspeed_fpm: {}, local_time: {}",
-                self.zulu_time, self.plane_in_parking_state, self.sim_on_ground, self.seatbelt_switch, self.vertical_speed, self.local_time
+                "[simconnect] zulu_time: {}, parking: {}, on_ground: {}, seatbelt_raw: {}, vspeed_fpm: {}, local_time: {}, taxi_lt: {}, landing_lt: {}, strobe_lt: {}, beacon_lt: {}, time_of_day: {}",
+                self.zulu_time, self.plane_in_parking_state, self.sim_on_ground, self.seatbelt_switch, self.vertical_speed, self.local_time, self.light_taxi, self.light_landing, self.light_strobe, self.light_beacon, self.time_of_day
             );
             TelemetrySnapshot {
                 altitude: self.altitude,
@@ -236,6 +262,11 @@ mod sim {
                 next_waypoint: None,
                 radio_height: Some(self.radio_height),
                 gear_down: Some(self.gear_handle_position == 1.0),
+                taxi_lights_on: Some(self.light_taxi != 0.0),
+                landing_lights_on: Some(self.light_landing != 0.0),
+                strobe_lights_on: Some(self.light_strobe != 0.0),
+                beacon_lights_on: Some(self.light_beacon != 0.0),
+                time_of_day: Some(self.time_of_day),
             }
         }
     }
@@ -524,6 +555,13 @@ mod sim {
             // DESCENT: en crucero (35000 ft) el radioaltímetro no da lectura válida (>2500 ft AGL)
             radio_height: Some(0.0),
             gear_down: Some(false),
+            taxi_lights_on: Some(true),
+            landing_lights_on: Some(false),
+            strobe_lights_on: Some(true),
+            // Stub en vuelo (baliza encendida).
+            beacon_lights_on: Some(true),
+            // Stub en crucero diurno (E:TIME OF DAY = 0).
+            time_of_day: Some(0.0),
         }
     }
 

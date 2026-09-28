@@ -87,6 +87,8 @@ export class AnnouncementService {
     eventKey,
     flightId,
     languageId,
+    voiceId,
+    speakerRole,
     eventData,
   }: AnnouncementParams): Promise<AnnouncementInfo> {
     this.aborted = false;
@@ -104,6 +106,10 @@ export class AnnouncementService {
       event_key: eventKey,
       flight_id: flightId,
       language_id: languageId,
+      // Locutor explícito (solo eventos con pinning): la Edge Function debe
+      // usar esta voz en vez de su resolución por defecto.
+      ...(voiceId ? { voice_id: voiceId } : {}),
+      ...(speakerRole ? { speaker_role: speakerRole } : {}),
       ...(eventData ? { event_data: eventData } : {}),
     };
     console.log("[AnnouncementService] Llamando a audio-get con payload:", payload);

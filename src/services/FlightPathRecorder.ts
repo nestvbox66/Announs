@@ -46,7 +46,29 @@ export interface FlightPathFeature {
     point_count: number;
     started_at: string | null;
     ended_at: string | null;
+    /** true cuando el volcado es por recuperación de emergencia. */
+    recovery?: boolean;
+    /** Nota de recuperación (p. ej. desconexión del simulador). */
+    recovery_note?: string | null;
   };
+}
+
+/** Foto serializable del buffer para stash en localStorage (cierres abruptos). */
+export interface FlightPathSnapshot {
+  points: FlightPathPoint[];
+  phase: string | null;
+  scenarioKey: string | null;
+  startedAtIso: string | null;
+  endedAtIso: string | null;
+  takeoffMs: number | null;
+  touchdownMs: number | null;
+  lastRecordedAtMs: number | null;
+}
+
+/** Opciones de empaquetado del GeoJSON. */
+export interface FlightPathGeoJsonOptions {
+  recovery?: boolean;
+  recoveryNote?: string | null;
 }
 
 export interface FlightPathRecorderStartOptions {
@@ -285,7 +307,7 @@ export class FlightPathRecorder {
   }
 
   /** Empaqueta el recorrido como GeoJSON Feature (LineString). */
-  toGeoJSON(flightId: string | null): FlightPathFeature {
+  toGeoJSON(flightId: string | null, opts: FlightPathGeoJsonOptions = {}): FlightPathFeature {
     return {
       type: "Feature",
       geometry: {
@@ -299,8 +321,47 @@ export class FlightPathRecorder {
         point_count: this.points.length,
         started_at: this.startedAtIso,
         ended_at: this.endedAtIso,
+        recovery: opts.recovery === true ? true : undefined,
+        recovery_note: opts.recoveryNote ?? undefined,
       },
     };
+  }
+
+  /** Foto serializable del estado para stash ante cierres abruptos. */
+  toSnapshot(): FlightPathSnapshot {
+    return {
+      points: this.points.map((point) => [...point] as FlightPathPoint),
+      phase: this.flightPhase,
+      scenarioKey: this.scenarioKey,
+      startedAtIso: this.startedAtIso,
+      endedAtIso: this.endedAtIso,
+      takeoffMs: this.takeoffMs,
+      touchdownMs: this.touchdownMs,
+      lastRecordedAtMs: this.lastRecordedAtMs,
+    };
+  }
+
+  /**
+   * Restaura un snapshot (p. ej. recuperado de localStorage tras un cierre).
+   * Deja el recorder detenido: solo sirve para volcar, no para seguir grabando.
+   */
+  loadSnapshot(snap: FlightPathSnapshot): void {
+    this.reset();
+    if (!snap || !Array.isArray(snap.points)) return;
+    this.points = snap.points
+      .filter((p) => Array.isArray(p) && p.length >= 4)
+      .map((p) => [...p] as FlightPathPoint);
+    this.last = null;
+    this.flightPhase = snap.phase ?? null;
+    this.scenarioKey = snap.scenarioKey ?? null;
+    this.startedAtIso = snap.startedAtIso ?? null;
+    this.endedAtIso = snap.endedAtIso ?? null;
+    this.takeoffMs = snap.takeoffMs ?? null;
+    this.touchdownMs = snap.touchdownMs ?? null;
+    this.lastRecordedAtMs = snap.lastRecordedAtMs ?? null;
+    this.prevOnGround = null;
+    this.prevPhase = this.flightPhase;
+    this.recording = false;
   }
 
   /** Limpia todo el estado en memoria (liberación de recursos). */

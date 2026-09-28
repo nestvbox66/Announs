@@ -7,8 +7,19 @@
  */
 
 import React, { useEffect, useState, useMemo, useRef } from "react";
-import { X, Clock, Activity, Plane, FileText, Layers, Variable, Timer, AlertTriangle, MoonStar, GitBranch } from "lucide-react";
+import { X, Clock, Activity, Plane, FileText, Layers, Variable, Timer, AlertTriangle, MoonStar, GitBranch, Trophy } from "lucide-react";
 import { FlightContext } from "../../services/FlightContext";
+import { XpBonusTracker } from "../../services/XpBonusTracker";
+import {
+  AI_SYNERGY_EVENT_KEYS,
+  AI_SYNERGY_XP_PER_EVENT,
+  HARD_AIRPORT_BONUS_XP,
+  WEATHER_SEVERITY_BONUS_XP,
+  hasSevereWeather,
+  resolveHardAirportBonus,
+  resolveWeatherSeverityBonus,
+} from "../../services/FlightCompletionBonuses";
+import { formatXpSeconds } from "../../services/XpBonusTracker";
 import type { FlightController } from "../../services/FlightController";
 import type { FlightPhaseDetector } from "../../services/FlightPhaseDetector";
 import { NarrativeEngine } from "../../narrative/NarrativeEngine";
@@ -111,12 +122,35 @@ function Section({
   children: React.ReactNode;
   defaultOpen?: boolean;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  // Memoria visual: el despliegue/colapso de cada grupo persiste en
+  // localStorage para no resetear la interfaz al cerrar y reabrir el monitor.
+  const storageKey = `announs:debugmonitor:section:${title}`;
+  const [open, setOpen] = useState<boolean>(() => {
+    try {
+      const stored = localStorage.getItem(storageKey);
+      if (stored === "1") return true;
+      if (stored === "0") return false;
+    } catch {
+      // almacenamiento no disponible: usar default
+    }
+    return defaultOpen;
+  });
+  const toggle = () => {
+    setOpen((v) => {
+      const next = !v;
+      try {
+        localStorage.setItem(storageKey, next ? "1" : "0");
+      } catch {
+        // almacenamiento no disponible: solo estado en memoria
+      }
+      return next;
+    });
+  };
   return (
     <div className="border border-white/10 rounded-[5px] overflow-hidden">
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={toggle}
         className="w-full flex items-center justify-between px-3 py-2 bg-[#002440]/60 hover:bg-[#00345C]/60 transition-colors"
       >
         <span className="flex items-center gap-2 text-xs font-mono font-bold text-[#45AFFF] uppercase tracking-wider">
@@ -153,6 +187,71 @@ function KeyValueGrid({ data, units }: { data: Record<string, unknown>; units?: 
           </span>
         </div>
       ))}
+    </div>
+  );
+}
+
+// ── Monitor XP en vivo: boxes por bonus ──────────────────────────────
+// Cada bonus evaluado va en su propio box con las variables involucradas,
+// sus valores en vivo y un indicador de estado (cumple / en curso /
+// violado / sin muestras) para auditoría visual durante el vuelo.
+type XpTone = "ok" | "warn" | "bad" | "idle";
+
+function xpToneClass(tone: XpTone): string {
+  switch (tone) {
+    case "ok": return "bg-[#43E600]/15 border-[#43E600]/45 text-[#43E600]";
+    case "warn": return "bg-amber-500/10 border-amber-500/40 text-amber-400";
+    case "bad": return "bg-red-500/10 border-red-500/40 text-red-400";
+    default: return "bg-white/5 border-white/15 text-white/45";
+  }
+}
+
+function XpPill({ tone, children }: { tone: XpTone; children: React.ReactNode }) {
+  return (
+    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border font-mono text-[10px] font-bold uppercase tracking-wider shrink-0 ${xpToneClass(tone)}`}>
+      {children}
+    </span>
+  );
+}
+
+function XpVar({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-2 px-2 py-0.5">
+      <span className="font-mono text-[11px] text-white/55 shrink-0">{label}</span>
+      <span className="font-mono text-[11px] text-white/85 text-right break-all">{value}</span>
+    </div>
+  );
+}
+
+function XpBonusBox({
+  title,
+  rule,
+  xp,
+  tone,
+  status,
+  children,
+}: {
+  title: string;
+  rule: string;
+  xp: number;
+  tone: XpTone;
+  status: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="border border-white/10 rounded-[5px] overflow-hidden bg-white/[0.02]">
+      <div className="flex items-center justify-between gap-2 px-2 py-1 bg-white/[0.04] border-b border-white/5">
+        <span className="font-mono text-[10px] font-bold text-[#45AFFF] uppercase tracking-wider truncate" title={rule}>
+          {title}
+        </span>
+        <span className="flex items-center gap-1.5 shrink-0">
+          <XpPill tone={tone}>{status}</XpPill>
+          <span className={`font-mono text-[11px] font-extrabold ${xp > 0 ? "text-[#43E600]" : "text-white/35"}`}>
+            +{xp} XP
+          </span>
+        </span>
+      </div>
+      <div className="py-0.5">{children}</div>
     </div>
   );
 }
@@ -238,6 +337,8 @@ export interface DebugMonitorProps {
   ruleEngine?: RuleEngine | null;
   /** Detector de fases (ventanas de histéresis por reloj) */
   phaseDetector?: FlightPhaseDetector | null;
+  /** Tracker de bonos XP de disciplina (muestras por fase) */
+  xpBonusTracker?: XpBonusTracker | null;
   /** Variables resueltas del último evento (opcional, si el caller las provee) */
   lastEventVariables?: Record<string, unknown> | null;
 }
@@ -251,6 +352,7 @@ export default function DebugMonitor({
   scheduler,
   ruleEngine,
   phaseDetector,
+  xpBonusTracker,
   lastEventVariables,
 }: DebugMonitorProps) {
   const [tick, setTick] = useState(0);
@@ -389,6 +491,64 @@ export default function DebugMonitor({
       return null;
     }
   }, [flightController, tick]);
+
+  // ── XP disciplina (XpBonusTracker: luces por fase, velocidad, perfil) ────
+  const xpBonus = useMemo(() => {
+    void tick;
+    try {
+      return xpBonusTracker?.getSnapshot() ?? null;
+    } catch {
+      return null;
+    }
+  }, [xpBonusTracker, tick]);
+
+  // ── Bonus de entorno en vivo (misma lógica que el cierre del vuelo) ────
+  // Noche: E:TIME OF DAY muestreado por el tracker (>30% nocturno).
+  const nightLive = useMemo(() => {
+    void tick;
+    const dn = xpBonus?.dayNight ?? null;
+    const frac = dn?.nightFraction ?? null;
+    return {
+      evaluatedSec: dn?.evaluatedSec ?? 0,
+      nightSec: (dn?.nightHours ?? 0) * 3600,
+      dayHours: dn?.dayHours ?? 0,
+      nightHours: dn?.nightHours ?? 0,
+      fraction: frac,
+      lastTimeOfDay: dn?.lastTimeOfDay ?? null,
+      bonus: dn?.bonus ?? 0,
+    };
+  }, [xpBonus, tick]);
+
+  // Clima: METAR de destino del OFP crudo en contexto + análisis en vivo.
+  const weatherLive = useMemo(() => {
+    const metar = ((simbrief as any)?.destination?.metar ?? null) as string | null;
+    const severe = hasSevereWeather(metar);
+    return { metar, severe, bonus: resolveWeatherSeverityBonus(metar) };
+  }, [simbrief]);
+
+  // Aeropuerto difícil: `airports.hard` del destino (una consulta por destino,
+  // no por tick). null = consultando/sin dato.
+  const destIcaoLive = String((flight as any)?.destICAO ?? "").toUpperCase().trim();
+  const [hardAirportLive, setHardAirportLive] = useState<{ dest: string; hard: boolean | null }>({
+    dest: "",
+    hard: null,
+  });
+  useEffect(() => {
+    if (!isOpen || !destIcaoLive) {
+      setHardAirportLive({ dest: "", hard: null });
+      return;
+    }
+    let cancelled = false;
+    setHardAirportLive((prev) => (prev.dest === destIcaoLive ? prev : { dest: destIcaoLive, hard: null }));
+    resolveHardAirportBonus(destIcaoLive)
+      .then((bonus) => {
+        if (!cancelled) setHardAirportLive({ dest: destIcaoLive, hard: bonus > 0 });
+      })
+      .catch(() => {
+        if (!cancelled) setHardAirportLive({ dest: destIcaoLive, hard: null });
+      });
+    return () => { cancelled = true; };
+  }, [isOpen, destIcaoLive]);
 
   // ── Eventos de Demora (preflight_capt_delay_parked / taxi) ─────────────────────
   const getEventThreshold = (eventKey: string): number => {
@@ -1246,6 +1406,133 @@ export default function DebugMonitor({
               <div className="mt-2 pt-2 border-t border-white/5">
                 <div className="text-[10px] font-mono text-white/40 mb-1 px-2">Controller.getTelemetry() (directo)</div>
                 <KeyValueGrid data={controllerTelemetry} units={TELEMETRY_UNITS} />
+              </div>
+            )}
+          </Section>
+
+          {/* XP y disciplina en vivo (XpBonusTracker + bonus de entorno) */}
+          <Section title="XP en vivo" icon={Trophy} count={11} defaultOpen={true}>
+            <div className="flex items-center justify-between gap-2 px-2 pb-1.5 mb-1.5 border-b border-white/5">
+              <span className="text-[10px] font-mono text-white/30">Disciplina + entorno · actualización 1s</span>
+              <span className="flex items-center gap-1.5">
+                <XpPill tone={xpBonus?.recording ? "ok" : "idle"}>
+                  {xpBonus?.recording ? "● Grabando" : "○ Detenido"}
+                </XpPill>
+                <span className="font-mono text-[10px] text-white/50">fase: {xpBonus?.phase ?? "—"}</span>
+                <span className="font-mono text-[10px] font-bold text-white/80">
+                  base: +{xpBonus?.projected.base_time_xp ?? 0} XP
+                </span>
+              </span>
+            </div>
+            {!xpBonus ? (
+              <div className="text-[11px] font-mono text-white/30 italic px-2 py-2">Sin tracker de XP disponible</div>
+            ) : (
+              <div className="space-y-1.5">
+                {(() => {
+                  const pct = (f: number | null) => (f === null ? "—" : `${(f * 100).toFixed(1)}%`);
+                  const LIGHT_MIN = XpBonusTracker.TAXI_LIGHT_MIN_FRACTION;
+                  const lightBox = (
+                    title: string,
+                    rule: string,
+                    on: number,
+                    samples: number,
+                    fraction: number | null,
+                    evaluatedSec: number,
+                    compliedSec: number,
+                    limitPct: string,
+                    xp: number,
+                  ) => {
+                    const meets = fraction !== null && fraction >= LIGHT_MIN;
+                    const tone: XpTone = samples === 0 ? "idle" : meets ? "ok" : "warn";
+                    const status = samples === 0 ? "Sin muestras" : meets ? "Cumple ≥80%" : `En curso ${pct(fraction)}`;
+                    return (
+                      <XpBonusBox title={title} rule={rule} xp={xp} tone={tone} status={status}>
+                        <XpVar label="Muestras ON / total" value={`${on}/${samples}`} />
+                        <XpVar label="Tiempo evaluado" value={formatXpSeconds(evaluatedSec)} />
+                        <XpVar label="Tiempo cumplido" value={formatXpSeconds(compliedSec)} />
+                        <XpVar label="% cumplimiento actual" value={pct(fraction)} />
+                        <XpVar label="% límite requerido" value={limitPct} />
+                      </XpBonusBox>
+                    );
+                  };
+                  const firstViol = xpBonus.speed.firstViolation;
+                  const speedTone: XpTone = xpBonus.speed.fraction !== null && xpBonus.speed.fraction < XpBonusTracker.SPEED_MIN_FRACTION ? "bad" : xpBonus.speed.samplesBelow10k === 0 ? "idle" : "ok";
+                  const speedLimitPct = `≥${Math.round(XpBonusTracker.SPEED_MIN_FRACTION * 100)}%`;
+                  const speedStatus = xpBonus.speed.samplesBelow10k === 0
+                    ? "Sin muestras"
+                    : xpBonus.speed.fraction !== null && xpBonus.speed.fraction >= XpBonusTracker.SPEED_MIN_FRACTION
+                      ? xpBonus.speed.violations > 0 ? `Tolerado (${xpBonus.speed.violations} pico/s)` : "Limpio"
+                      : `Bajo el ${speedLimitPct} (${xpBonus.speed.violations} picos)`;
+                  const climbTone: XpTone = xpBonus.climb.fraction !== null && xpBonus.climb.fraction < XpBonusTracker.VERTICAL_MIN_FRACTION ? "bad" : xpBonus.climb.samples === 0 ? "idle" : "ok";
+                  const descentTone: XpTone = xpBonus.descent.fraction !== null && xpBonus.descent.fraction < XpBonusTracker.VERTICAL_MIN_FRACTION ? "bad" : xpBonus.descent.samples === 0 ? "idle" : "ok";
+                  const synergyCount = xpBonus.synergy.events.length;
+                  const synergyTone: XpTone = synergyCount >= AI_SYNERGY_EVENT_KEYS.size ? "ok" : synergyCount > 0 ? "warn" : "idle";
+                  // A ~10Hz, cada muestra ≥255 kt bajo 10k ft cuenta como violación (regla estricta).
+                  return (
+                    <>
+                      {lightBox(`Luces de taxi +${XpBonusTracker.XP_TAXI_LIGHTS}`, "LIGHT TAXI ON en ≥80% del tiempo en fase TAXI", xpBonus.taxi.on, xpBonus.taxi.samples, xpBonus.taxi.fraction, xpBonus.taxi.evaluatedSec, xpBonus.taxi.compliedSec, "≥80%", xpBonus.projected.disc_taxi_lights_xp)}
+                      {lightBox(`Strobe despegue +${XpBonusTracker.XP_STROBE}`, "LIGHT STROBE ON en ≥80% del tiempo en fase TAKEOFF", xpBonus.takeoff.on, xpBonus.takeoff.samples, xpBonus.takeoff.fraction, xpBonus.takeoff.evaluatedSec, xpBonus.takeoff.compliedSec, "≥80%", xpBonus.projected.disc_strobe_lights_xp)}
+                      {lightBox(`Luces aterrizaje +${XpBonusTracker.XP_LANDING_LIGHTS}`, "LIGHT LANDING ON en ≥80% del tiempo en fase LANDING", xpBonus.landing.on, xpBonus.landing.samples, xpBonus.landing.fraction, xpBonus.landing.evaluatedSec, xpBonus.landing.compliedSec, "≥80%", xpBonus.projected.disc_landing_lights_xp)}
+                      <XpBonusBox title={`Baliza vuelo +${XpBonusTracker.XP_BEACON}`} rule="LIGHT BEACON ON todo el vuelo (gracia 60 s tras inicio, ventana hasta AT_GATE)" xp={xpBonus.projected.disc_beacon_lights_xp} tone={xpBonus.beacon.samples === 0 ? "idle" : xpBonus.beacon.earned ? "ok" : "warn"} status={xpBonus.beacon.samples === 0 ? (xpBonus.beacon.graceRemainingSec > 0 ? "En gracia" : "Sin muestras") : xpBonus.beacon.frozen ? (xpBonus.beacon.earned ? "Congelado OK" : "Congelado NO") : xpBonus.beacon.earned ? "ON todo" : "Apagada"}>
+                        <XpVar label="Muestras en ventana" value={xpBonus.beacon.samples} />
+                        <XpVar label="Tiempo evaluado" value={formatXpSeconds(xpBonus.beacon.evaluatedSec)} />
+                        <XpVar label="Tiempo cumplido (ON)" value={formatXpSeconds(xpBonus.beacon.compliedSec)} />
+                        <XpVar label="% cumplimiento actual" value={pct(xpBonus.beacon.fraction)} />
+                        <XpVar label="% límite requerido" value="100%" />
+                        <XpVar label="Gracia restante" value={xpBonus.beacon.graceRemainingSec > 0 ? formatXpSeconds(xpBonus.beacon.graceRemainingSec) : "—"} />
+                      </XpBonusBox>
+                      <XpBonusBox title={`Velocidad <${XpBonusTracker.SPEED_LIMIT_KT} kt +${XpBonusTracker.XP_SPEED_LIMIT}`} rule={`<${XpBonusTracker.SPEED_LIMIT_KT} kt en ≥${Math.round(XpBonusTracker.SPEED_MIN_FRACTION * 100)}% del tiempo bajo ${XpBonusTracker.SPEED_ALT_FT.toLocaleString("en-US")} ft · IAS preferida, fallback GS`} xp={xpBonus.projected.disc_speed_limit_xp} tone={speedTone} status={speedStatus}>
+                        <XpVar label="Muestras bajo 10k ft" value={xpBonus.speed.samplesBelow10k} />
+                        <XpVar label="Tiempo evaluado" value={formatXpSeconds(xpBonus.speed.evaluatedSec)} />
+                        <XpVar label="Tiempo cumplido" value={formatXpSeconds(xpBonus.speed.compliedSec)} />
+                        <XpVar label="% cumplimiento actual" value={pct(xpBonus.speed.fraction)} />
+                        <XpVar label="% límite requerido" value={speedLimitPct} />
+                        <XpVar label="Violaciones (auditoría)" value={xpBonus.speed.violations} />
+                        <XpVar label="Máx. kt bajo 10k" value={xpBonus.speed.maxKt ?? "—"} />
+                        <XpVar
+                          label="Primera violación"
+                          value={firstViol ? `${firstViol.speedKt}kt @ ${firstViol.altitudeFt}ft [${firstViol.phase ?? "?"}] ${firstViol.at}` : "—"}
+                        />
+                      </XpBonusBox>
+                      <XpBonusBox title={`Perfil ascenso +${XpBonusTracker.XP_VERTICAL_CLIMB}`} rule={`VS ≤${XpBonusTracker.CLIMB_VS_MAX_FPM.toLocaleString("en-US")} fpm en ≥90% del tiempo en fase CLIMB`} xp={xpBonus.climb.fraction !== null && xpBonus.climb.fraction >= XpBonusTracker.VERTICAL_MIN_FRACTION ? XpBonusTracker.XP_VERTICAL_CLIMB : 0} tone={climbTone} status={xpBonus.climb.samples === 0 ? "Sin muestras" : xpBonus.climb.fraction !== null && xpBonus.climb.fraction >= XpBonusTracker.VERTICAL_MIN_FRACTION ? "En límite ≥90%" : "Bajo el 90%"}>
+                        <XpVar label="Muestras en CLIMB" value={xpBonus.climb.samples} />
+                        <XpVar label="Tiempo evaluado" value={formatXpSeconds(xpBonus.climb.evaluatedSec)} />
+                        <XpVar label="Tiempo cumplido" value={formatXpSeconds(xpBonus.climb.compliedSec)} />
+                        <XpVar label="% cumplimiento actual" value={pct(xpBonus.climb.fraction)} />
+                        <XpVar label="% límite requerido" value="≥90%" />
+                        <XpVar label="VS máx. (fpm)" value={xpBonus.climb.maxVs ?? "—"} />
+                      </XpBonusBox>
+                      <XpBonusBox title={`Perfil descenso +${XpBonusTracker.XP_VERTICAL_DESCENT}`} rule={`VS ≥-${XpBonusTracker.DESCENT_VS_MAX_FPM.toLocaleString("en-US")} fpm en ≥90% del tiempo en DESCENT/APPROACH`} xp={xpBonus.descent.fraction !== null && xpBonus.descent.fraction >= XpBonusTracker.VERTICAL_MIN_FRACTION ? XpBonusTracker.XP_VERTICAL_DESCENT : 0} tone={descentTone} status={xpBonus.descent.samples === 0 ? "Sin muestras" : xpBonus.descent.fraction !== null && xpBonus.descent.fraction >= XpBonusTracker.VERTICAL_MIN_FRACTION ? "En límite ≥90%" : "Bajo el 90%"}>
+                        <XpVar label="Muestras en DESCENT" value={xpBonus.descent.samples} />
+                        <XpVar label="Tiempo evaluado" value={formatXpSeconds(xpBonus.descent.evaluatedSec)} />
+                        <XpVar label="Tiempo cumplido" value={formatXpSeconds(xpBonus.descent.compliedSec)} />
+                        <XpVar label="% cumplimiento actual" value={pct(xpBonus.descent.fraction)} />
+                        <XpVar label="% límite requerido" value="≥90%" />
+                        <XpVar label="VS mín. (fpm)" value={xpBonus.descent.minVs ?? "—"} />
+                      </XpBonusBox>
+                      <XpBonusBox title={`Sinergia IA +${xpBonus.synergy.bonus}`} rule="3 XP por cada uno de los 8 eventos de voz aceptados en cola (phase-rules y variantes de demora incluidas)" xp={xpBonus.synergy.bonus} tone={synergyTone} status={synergyCount >= AI_SYNERGY_EVENT_KEYS.size ? "Completo 8/8" : synergyCount > 0 ? `Parcial ${synergyCount}/8` : "Sin eventos"}>
+                        <XpVar label="Eventos (conteo parcial)" value={`${synergyCount}/${AI_SYNERGY_EVENT_KEYS.size} · +${synergyCount * AI_SYNERGY_XP_PER_EVENT} XP`} />
+                        <XpVar label="Reproducidos" value={synergyCount > 0 ? xpBonus.synergy.events.join(", ") : "—"} />
+                      </XpBonusBox>
+                      <XpBonusBox title={`Vuelo nocturno +${XpBonusTracker.XP_NIGHT_FLIGHT}`} rule="E:TIME OF DAY == 3 en >30% del tiempo con dato de hora válido" xp={nightLive.bonus} tone={nightLive.fraction !== null && nightLive.fraction > XpBonusTracker.NIGHT_MIN_FRACTION ? "ok" : nightLive.evaluatedSec === 0 ? "warn" : "idle"} status={nightLive.evaluatedSec === 0 ? "Sin dato hora" : nightLive.fraction !== null && nightLive.fraction > XpBonusTracker.NIGHT_MIN_FRACTION ? "Nocturno >30%" : `Diurno ${pct(nightLive.fraction)}`}>
+                        <XpVar label="E:TIME OF DAY actual" value={nightLive.lastTimeOfDay ?? "—"} />
+                        <XpVar label="Tiempo evaluado (con dato)" value={formatXpSeconds(nightLive.evaluatedSec)} />
+                        <XpVar label="Tiempo nocturno" value={formatXpSeconds(nightLive.nightSec)} />
+                        <XpVar label="% nocturno actual" value={pct(nightLive.fraction)} />
+                        <XpVar label="% límite requerido" value=">30%" />
+                        <XpVar label="Horas día / noche" value={`${nightLive.dayHours.toFixed(2)}h / ${nightLive.nightHours.toFixed(2)}h`} />
+                      </XpBonusBox>
+                      <XpBonusBox title="Clima destino +30" rule="METAR destino SimBrief: TS/SN/GR/FZ o ráfagas G..KT" xp={weatherLive.bonus} tone={!weatherLive.metar ? "warn" : weatherLive.severe ? "ok" : "idle"} status={!weatherLive.metar ? "Sin METAR" : weatherLive.severe ? "Severo" : "Tranquilo"}>
+                        <XpVar label="METAR destino" value={weatherLive.metar ? String(weatherLive.metar).slice(0, 90) : "—"} />
+                        <XpVar label="Análisis en vivo" value={!weatherLive.metar ? "sin dato (0 XP al cierre)" : weatherLive.severe ? "adverso → +30 XP al cierre" : "sin severidad → 0 XP"} />
+                      </XpBonusBox>
+                      <XpBonusBox title="Aeropuerto difícil +30" rule="Columna airports.hard del destino (dest_icao)" xp={hardAirportLive.hard ? HARD_AIRPORT_BONUS_XP : 0} tone={hardAirportLive.hard === null ? "warn" : hardAirportLive.hard ? "ok" : "idle"} status={hardAirportLive.hard === null ? "Consultando…" : hardAirportLive.hard ? "Difícil" : "Estándar"}>
+                        <XpVar label="dest_icao" value={destIcaoLive || "—"} />
+                        <XpVar label="airports.hard" value={hardAirportLive.hard === null ? "…" : hardAirportLive.hard ? "true" : "false"} />
+                      </XpBonusBox>
+                    </>
+                  );
+                })()}
               </div>
             )}
           </Section>

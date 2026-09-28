@@ -72,6 +72,26 @@ function parseMinutes(value: string | null | undefined): number | null {
   return Number.isNaN(parsed) ? null : parsed;
 }
 
+/** Minutos crudos (air_time con fallback a block_time) o null. */
+export function parseDurationMinutes(
+  airTime: string | null | undefined,
+  blockTime: string | null | undefined
+): number | null {
+  const minutes = parseMinutes(airTime) ?? parseMinutes(blockTime);
+  return minutes !== null && minutes > 0 ? minutes : null;
+}
+
+/** Minutos → "1 h 10 Minutos" / "45 Minutos" / "—". */
+export function formatDurationLong(minutes: number | null | undefined): string {
+  if (minutes === null || minutes === undefined || !Number.isFinite(minutes)) return "—";
+  const total = Math.max(0, Math.round(minutes));
+  if (total <= 0) return "—";
+  const hours = Math.floor(total / 60);
+  const rest = total % 60;
+  if (hours <= 0) return `${rest} Minutos`;
+  return rest > 0 ? `${hours} h ${rest} Minutos` : `${hours} h`;
+}
+
 /** Distancia ortodrómica en millas náuticas (null si faltan coords). */
 export function haversineNm(
   lat1: number | null | undefined,

@@ -3,14 +3,16 @@
  *
  * Lee `public.flights` del usuario autenticado (auth.uid(), con filtro
  * explícito `user_id` además de RLS), ordenado por `created_at DESC` y
- * limitado a los últimos vuelos. Resuelve los nombres de ciudad de
+ * limitado a los últimos vuelos. El historial solo incluye operaciones
+ * completadas (`flight_status = 'ended'`). Resuelve los nombres de ciudad de
  * origen/destino vía `airportService` (DB + caché, fallback hardcodeado).
  */
 import { supabase } from "../lib/supabase";
 import { ServiceResult, ok, fail } from "./ServiceResult";
 import { getAirportCity, getAirportByIcao } from "./airportService";
 import { getAirlineName } from "../utils/airlineMapping";
-import { formatDepartLabel, formatShortDate, formatDuration } from "./flightHistoryFormat";
+import { hasAircraftSilhouette } from "../utils/aircraftSilhouettes";
+import { formatDepartLabel, formatShortDate, formatDuration, parseDurationMinutes } from "./flightHistoryFormat";
 
 export interface FlightHistoryEntry {
   flightId: string;
@@ -34,8 +36,12 @@ export interface FlightDetailData {
   flightId: string;
   flightNumber: string;
   airline: string;
+  /** Código ICAO de la aerolínea (para el banner; puede venir vacío). */
+  airlineIcao: string | null;
   aircraft: string;
   aircraftReg: string;
+  /** Categoría del avión para la silueta (de `flights.aircraft_type`). */
+  aircraftCategory: string | null;
   originIcao: string;
   originName: string;
   originCity: string;
@@ -50,7 +56,13 @@ export interface FlightDetailData {
   departTime: string;
   arriveTime: string;
   durationLabel: string;
+  /** Minutos crudos de duración (para "X Minutos") o null. */
+  durationMinutes: number | null;
+  /** Fecha y hora de creación del registro ("20 sept 2026, 21:33") o "—". */
+  createdLabel: string;
   status: string | null;
+  /** URL pública de la "Foto de la Sesión" (`flights.photo_url`) o null. */
+  photoUrl: string | null;
 }
 
 interface FlightRow {
@@ -66,33 +78,47 @@ interface FlightRow {
   block_time?: string | null;
   flight_status?: string | null;
   created_at?: string | null;
+  photo_url?: string | null;
 }
 
-const RECENT_FLIGHTS_LIMIT = 10;
+export const FLIGHT_HISTORY_PAGE_SIZE = 10;
+
+export interface FlightHistoryPage {
+  entries: FlightHistoryEntry[];
+  total: number;
+}
 
 export class FlightHistoryService {
   /**
-   * Últimos vuelos del usuario autenticado (más recientes primero).
-   * Nunca falla por lista vacía: sin vuelos devuelve `ok([])`.
+   * Página de vuelos del usuario autenticado (más recientes primero).
+   * Filtro estricto: solo operaciones completadas (`flight_status = 'ended'`);
+   * los vuelos en curso, cancelados o en estados intermedios no se listan.
+   * Nunca falla por lista vacía: sin vuelos devuelve página vacía con total 0.
    */
-  static async loadRecentFlights(limit: number = RECENT_FLIGHTS_LIMIT): Promise<ServiceResult<FlightHistoryEntry[]>> {
+  static async loadRecentFlights(
+    limit: number = FLIGHT_HISTORY_PAGE_SIZE,
+    offset: number = 0
+  ): Promise<ServiceResult<FlightHistoryPage>> {
     try {
       const { data: { user }, error: authErr } = await supabase.auth.getUser();
       if (authErr || !user) {
         return fail("Sesión no válida: iniciá sesión para ver tu historial.");
       }
 
-      const { data, error } = await supabase
+      const safeLimit = Math.max(1, Math.min(50, Math.floor(limit) || FLIGHT_HISTORY_PAGE_SIZE));
+      const safeOffset = Math.max(0, Math.floor(offset) || 0);
+      const { data, error, count } = await supabase
         .from("flights")
-        .select("id, saved_flight, airlane_icao, flight_number, depart_icao, arrive_icao, departure_date, departure_time, air_time, block_time, flight_status, created_at")
+        .select("id, saved_flight, airlane_icao, flight_number, depart_icao, arrive_icao, departure_date, departure_time, air_time, block_time, flight_status, created_at", { count: "exact" })
         .eq("user_id", user.id)
+        .eq("flight_status", "ended")
         .order("created_at", { ascending: false })
-        .limit(limit);
+        .range(safeOffset, safeOffset + safeLimit - 1);
 
       if (error) return fail(error.message);
 
       const rows = (data ?? []) as FlightRow[];
-      if (rows.length === 0) return ok([]);
+      if (rows.length === 0) return ok({ entries: [], total: count ?? 0 });
 
       // Resolver ciudades una sola vez por ICAO distinto.
       const icaos = Array.from(
@@ -116,7 +142,7 @@ export class FlightHistoryService {
       const entries: FlightHistoryEntry[] = rows.map((row) =>
         mapRowToEntry(row, cityByIcao)
       );
-      return ok(entries);
+      return ok({ entries, total: count ?? entries.length });
     } catch (err) {
       return fail(err instanceof Error ? err.message : String(err));
     }
@@ -136,7 +162,7 @@ export class FlightHistoryService {
 
       const { data, error } = await supabase
         .from("flights")
-        .select("id, saved_flight, airlane_icao, flight_number, atc_callsign, depart_icao, arrive_icao, aircraft_type, variant_airframe, airframe, departure_date, departure_time, arrival_time, air_time, block_time, flight_status, created_at")
+        .select("id, saved_flight, airlane_icao, flight_number, atc_callsign, depart_icao, arrive_icao, aircraft_type, variant_airframe, airframe, departure_date, departure_time, arrival_time, air_time, block_time, flight_status, photo_url, created_at")
         .eq("id", flightId)
         .eq("user_id", user.id)
         .maybeSingle();
@@ -150,13 +176,17 @@ export class FlightHistoryService {
         variant_airframe?: string | null;
         airframe?: string | null;
         arrival_time?: string | null;
+        photo_url?: string | null;
       };
       const departIcao = (row.depart_icao ?? "").toUpperCase().trim();
       const arriveIcao = (row.arrive_icao ?? "").toUpperCase().trim();
 
-      const [origin, dest] = await Promise.all([
+      const [origin, dest, aircraftCat] = await Promise.all([
         departIcao ? getAirportByIcao(departIcao).catch(() => null) : Promise.resolve(null),
         arriveIcao ? getAirportByIcao(arriveIcao).catch(() => null) : Promise.resolve(null),
+        // `flights.aircraft_type` ya trae la categoría (p. ej. "B737"); solo se
+        // consulta `aircraft_types` como respaldo si no hay imagen local.
+        resolveAircraftCategory(row.aircraft_type),
       ]);
 
       const aircraft = [row.aircraft_type, row.variant_airframe].map((s) => (s ?? "").trim()).filter(Boolean).join(" ") || "—";
@@ -167,8 +197,10 @@ export class FlightHistoryService {
         flightId: row.id,
         flightNumber: row.saved_flight?.trim() || row.flight_number?.trim() || "—",
         airline: getAirlineName(row.airlane_icao ?? ""),
+        airlineIcao: (row.airlane_icao ?? "").toUpperCase().trim() || null,
         aircraft,
         aircraftReg: (row.airframe ?? "").trim() || "—",
+        aircraftCategory: aircraftCat,
         originIcao: departIcao || "—",
         originName: origin?.name || departIcao || "—",
         originCity: origin?.municipality || departIcao || "—",
@@ -183,7 +215,10 @@ export class FlightHistoryService {
         departTime,
         arriveTime,
         durationLabel: formatDuration(row.air_time, row.block_time),
+        durationMinutes: parseDurationMinutes(row.air_time, row.block_time),
+        createdLabel: formatDepartLabel(null, null, row.created_at),
         status: row.flight_status ?? null,
+        photoUrl: (row.photo_url ?? "").trim() || null,
       });
     } catch (err) {
       return fail(err instanceof Error ? err.message : String(err));
@@ -191,8 +226,31 @@ export class FlightHistoryService {
   }
 }
 
-function mapRowToEntry(row: FlightRow, cityByIcao: Map<string, string>): FlightHistoryEntry {
-  const departIcao = (row.depart_icao ?? "").toUpperCase().trim();
+/** Categoría para la silueta: el valor directo de `flights.aircraft_type`, con
+ * respaldo a `aircraft_types.category` solo si no hay imagen local. */
+async function resolveAircraftCategory(aircraftType: string | null | undefined): Promise<string | null> {
+  const direct = (aircraftType ?? "").trim();
+  if (direct && hasAircraftSilhouette(direct)) {
+    return direct.toUpperCase();
+  }
+  const code = direct.toUpperCase();
+  if (!code) return null;
+  try {
+    const { data, error } = await supabase
+      .from("aircraft_types")
+      .select("category")
+      .eq("icao_code", code)
+      .limit(1)
+      .maybeSingle();
+    if (error || !data) return direct || null;
+    const category = ((data as { category?: unknown }).category ?? "").toString().trim();
+    return category ? category.toUpperCase() : direct || null;
+  } catch {
+    return direct || null;
+  }
+}
+
+function mapRowToEntry(row: FlightRow, cityByIcao: Map<string, string>): FlightHistoryEntry {  const departIcao = (row.depart_icao ?? "").toUpperCase().trim();
   const arriveIcao = (row.arrive_icao ?? "").toUpperCase().trim();
   const flightNumber = row.saved_flight?.trim() || row.flight_number?.trim() || "—";
 

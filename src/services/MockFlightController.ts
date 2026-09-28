@@ -498,6 +498,32 @@ export class MockFlightController implements FlightController {
       this.state.phase === FlightPhase.LANDING ||
       this.state.phase === FlightPhase.TAXI_IN ||
       this.state.phase === FlightPhase.AT_GATE;
+    // Mock de luces (XP disciplina): taxi en rodaje, landing en aproximación/
+    // aterrizaje, strobe siempre que no se está en puerta/embarque.
+    const phase = this.state.phase;
+    const taxiLightsOn =
+      phase === FlightPhase.TAXI ||
+      phase === FlightPhase.PRE_FLIGHT ||
+      phase === FlightPhase.TAKEOFF;
+    const landingLightsOn =
+      phase === FlightPhase.APPROACH || phase === FlightPhase.LANDING;
+    const strobeLightsOn =
+      phase === FlightPhase.TAKEOFF ||
+      phase === FlightPhase.CLIMB ||
+      phase === FlightPhase.CRUISE ||
+      phase === FlightPhase.DESCENT ||
+      phase === FlightPhase.APPROACH ||
+      phase === FlightPhase.LANDING;
+    // Baliza: encendida siempre que no se está en puerta fría (motores en marcha).
+    const beaconLightsOn = phase !== FlightPhase.GATE;
+    // E:TIME OF DAY simulado desde el reloj mock (zulu inicia 12:00 UTC):
+    // 3 = noche (20-06h), 1 = atardecer, 2 = amanecer, 0 = día.
+    const zuluHour = Math.floor(((43200 + Math.round(this.state.elapsedTime)) % 86400) / 3600);
+    const timeOfDay =
+      zuluHour >= 20 || zuluHour < 6 ? 3
+      : zuluHour >= 17 ? 1
+      : zuluHour >= 8 ? 0
+      : 2;
     return {
       altitude: this.state.altitude,
       groundspeed: this.state.groundspeed,
@@ -524,6 +550,11 @@ export class MockFlightController implements FlightController {
       nextWaypoint: this.state.phase === FlightPhase.CRUISE ? "GBE" : undefined,
       radioHeight,
       gearDown,
+      taxiLightsOn,
+      landingLightsOn,
+      strobeLightsOn,
+      beaconLightsOn,
+      timeOfDay,
     };
   }
 

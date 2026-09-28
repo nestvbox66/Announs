@@ -5,6 +5,35 @@ Todas las modificaciones notables de este proyecto se documentarán en este arch
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/),
 y este proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0-alpha] - 2026-09-28
+
+### Añadido
+- Nueva sección "Volar": pantalla de selección previa a la configuración con
+  "Vuelos de la Semana" (ofertas seleccionables con bonificaciones y botón
+  único "Enviar a SimBrief" habilitado solo con selección) y "Rutas Reales"
+  (buscador con filtros de salida/llegada, aerolínea y avión + grilla de
+  resultados, con acciones en la fila del título).
+- Buscador de rutas reales con integración a SimBrief: despacho vía
+  `dispatch.simbrief.com/options/custom` con origen, destino, aerolínea y
+  tipo de aeronave precargados.
+- Traducción de aeronaves IATA → ICAO vía tabla `of_planes`
+  (`resolveAircraftIcao`, consulta segura con `limit(1)` ante `iata_code`
+  duplicados y fallback al equipo original).
+- Bonus de disciplina "Beacon Lights" (20 XP, `XpBonusTracker` + migración
+  `20260928_flight_xp_beacon`) y ajuste de tolerancia de velocidad.
+- Catálogo de tablas `of_routes`, `of_airports`, `of_airlines` y `of_planes`
+  para rutas del mundo real.
+- Servicios de progresión del piloto (`ProgressionService`,
+  `PilotStatsService`, `FlightPhotoService`) y utilidades
+  (`airlineLogos`, `aircraftSilhouettes`, `openExternal`).
+
+### Corregido
+- Reseteo prematuro del tracker antes del envío a Supabase al cerrar el
+  vuelo (el flush conserva el buffer ante fallos y es reintentable).
+- Localización de voces en fase Gate: locutor explícito por evento
+  (`speakerResolver`) para la Edge Function `audio-get` (corrige voz
+  EN/Amy mezclada en español).
+
 ## [0.8.0-alpha] - 2026-09-20
 
 ### Añadido
