@@ -96,6 +96,16 @@ export const EVENT_CONFIG_FLAVOR_KEY = "announcement_flavor";
 /** Clave especial que persiste el sound pack activo de un vuelo. */
 export const EVENT_CONFIG_PACKAGE_KEY = "packages_location";
 
+/** Evento que puede reproducirse como video de seguridad de la comunidad. */
+export const SAFETY_VIDEO_EVENT_KEY = "taxi_crew_safety_brief";
+
+/**
+ * Clave de localStorage con el package de video de seguridad seleccionado por
+ * defecto por el usuario (id de `packages`). El valor por vuelo vive en el
+ * estado de la pantalla de vuelo y en `SafetyVideoPackService`.
+ */
+export const SAFETY_VIDEO_PACKAGE_STORAGE_KEY = "cfg_safety_video_package_id";
+
 /**
  * Eventos de transición de fase: anclas internas del motor, NO configurables
  * por el usuario (no se pueden apagar). Se excluyen de la pantalla de

@@ -16,22 +16,9 @@ export interface FlightStepperProps {
 }
 
 /**
- * Etiqueta corta (tipo de sub-indicador) para cada fase.
+ * Etiqueta corta (tipo de sub-indicador) para cada fase: clave de
+ * `flight.tag.<fase en minúsculas>`.
  */
-const PHASE_TAG: Record<string, string> = {
-  GATE: "TIERRA",
-  BOARDING: "PRE-FLT",
-  PRE_FLIGHT: "PRE-FLT",
-  TAXI: "RODAJE",
-  TAKEOFF: "DESPEGUE",
-  CLIMB: "ASCENSO",
-  CRUISE: "EN VUELO",
-  DESCENT: "DESCENSO",
-  LANDING: "ATERRIZAJE",
-  TAXI_TO_GATE: "ARRIV",
-  AT_GATE: "ARRIV",
-};
-
 export default function FlightStepper({
   phases,
   currentPhase,
@@ -135,7 +122,7 @@ export default function FlightStepper({
 
                 {/* Small sub-indicator */}
                 <span className="text-[7.5px] font-mono text-white/20 tracking-wider uppercase mt-0.5 hidden xl:block">
-                  {PHASE_TAG[phase] ?? "FLIGHT"}
+                  {t(`flight.tag.${phase.toLowerCase()}`, { defaultValue: "FLIGHT" })}
                 </span>
               </div>
             </button>

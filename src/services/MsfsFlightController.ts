@@ -242,11 +242,33 @@ export class MsfsFlightController implements FlightController {
   private watchdogInterval: number | null = null;
   private lastTelemetryAt = 0;
   private reconnectInProgress = false;
+  // Anti-fantasma: `simconnect_poll` (Rust `latest()`) devuelve el último
+  // snapshot cacheado aunque SimConnect haya dejado de emitir (hilo sin
+  // `Notification::Object`, sim pausado, SimVar inválido). Si rejuveneciéramos
+  // `lastTelemetryAt` con cada poll idéntico, el watchdog nunca dispararía y
+  // la UI quedaría "verde" con datos congelados (zuluTime/groundspeed fijos).
+  // Solo las muestras DISTINTAS refrescan la frescura y se propagan.
+  private lastSampleKey: string | null = null;
+  private identicalSampleCount = 0;
+  // Guarda de conexión concurrente (ver connect()).
+  private connectPromise: Promise<void> | null = null;
 
   public onTelemetry: (snap: TelemetrySnapshot) => void = () => {};
 
   async connect(): Promise<void> {
-    return this.doConnect();
+    // Idempotente: el efecto de montaje y "Iniciar vuelo" pueden llamar a
+    // connect() casi a la vez sobre el mismo objeto; sin esta guarda se
+    // duplican el listener de telemetría y el intervalo de poll (en el log
+    // se veían líneas pareadas al mismo milisegundo) y cada muestra se
+    // procesa dos veces.
+    if (this.connected) return;
+    if (this.connectPromise) return this.connectPromise;
+    this.connectPromise = this.doConnect();
+    try {
+      await this.connectPromise;
+    } finally {
+      this.connectPromise = null;
+    }
   }
 
   private async doConnect(): Promise<void> {
@@ -273,6 +295,8 @@ export class MsfsFlightController implements FlightController {
 
       this.connected = true;
       this.lastTelemetryAt = Date.now();
+      this.lastSampleKey = null;
+      this.identicalSampleCount = 0;
       logger.telemetry('✅ Conectado a SimConnect');
       fileLogger.log('[MsfsFlightController] ✅ Conectado a SimConnect');
 
@@ -280,8 +304,7 @@ export class MsfsFlightController implements FlightController {
       this.unlistenFn = await listenFn("telemetry", (event: any) => {
         logger.telemetry('📡 Telemetría recibida:', event.payload);
         const snap = event.payload as TelemetrySnapshot;
-        this.lastTelemetryAt = Date.now();
-        this.telemetry = snap;
+        if (!this.ingestSample(snap, "event")) return;
         this.onTelemetry(snap);
       });
       logger.telemetry('✅ Listener configurado');
@@ -292,9 +315,10 @@ export class MsfsFlightController implements FlightController {
           try {
             const pollResult = (await invokeFn("simconnect_poll")) as TelemetrySnapshot | null;
             if (pollResult) {
-              // El poll también refresca la frescura y los datos (fallback si el evento no llega).
-              this.lastTelemetryAt = Date.now();
-              this.telemetry = pollResult;
+              // El poll también refresca la frescura y los datos (fallback si el evento no llega),
+              // pero SOLO si la muestra cambió: un clon idéntico del caché Rust
+              // no prueba que el sim siga vivo (ver ingestSample).
+              if (!this.ingestSample(pollResult, "poll")) return;
               this.onTelemetry(pollResult);
             }
           } catch (error) {
@@ -318,6 +342,8 @@ export class MsfsFlightController implements FlightController {
     this.connected = false;
     this.stopWatchdog();
     this.clearListeners();
+    this.lastSampleKey = null;
+    this.identicalSampleCount = 0;
     void invokeFn("simconnect_disconnect").catch(() => {});
     logger.telemetry('Desconectado de MSFS');
   }
@@ -345,6 +371,49 @@ export class MsfsFlightController implements FlightController {
       clearInterval(this.watchdogInterval);
       this.watchdogInterval = null;
     }
+  }
+
+  /**
+   * Ingiere una muestra de telemetría (vía evento o poll).
+   *
+   * Devuelve true si la muestra es NUEVA: actualiza el caché, refresca
+   * `lastTelemetryAt` (frescura del watchdog) y el llamador debe propagarla
+   * con `onTelemetry`. Devuelve false si es idéntica a la anterior (caché
+   * Rust congelado): no toca la frescura — así el watchdog detecta el
+   * estancamiento en ~8s, marca desconectado e intenta reconectar en vez de
+   * mostrar "Conectado a MSFS" con groundspeed clavado en cero.
+   */
+  private ingestSample(snap: TelemetrySnapshot, source: "event" | "poll"): boolean {
+    let key: string;
+    try {
+      key = JSON.stringify(snap);
+    } catch {
+      // Si no se puede serializar, tratarla como nueva (fail-open).
+      this.lastTelemetryAt = Date.now();
+      this.telemetry = snap;
+      return true;
+    }
+    if (key === this.lastSampleKey) {
+      this.identicalSampleCount++;
+      // Throttle: evento y poll transportan el MISMO snapshot, así que un
+      // duplicado aislado es el estado estacionario normal (no un freeze).
+      // Solo avisar cuando el estancamiento persiste (~5s, ~10s, ...).
+      if (this.identicalSampleCount % 50 === 0) {
+        console.warn(
+          `[MsfsFlightController] ⚠️ Telemetría idéntica x${this.identicalSampleCount} (vía ${source}); posible SimConnect congelado — el watchdog marcará desconectado si persiste`
+        );
+        fileLogger.log('[MsfsFlightController] Telemetría idéntica (posible freeze)', {
+          count: this.identicalSampleCount,
+          source,
+        });
+      }
+      return false;
+    }
+    this.lastSampleKey = key;
+    this.identicalSampleCount = 0;
+    this.lastTelemetryAt = Date.now();
+    this.telemetry = snap;
+    return true;
   }
 
   private async checkHealth(): Promise<void> {

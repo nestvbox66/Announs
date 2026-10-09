@@ -9,6 +9,12 @@ export interface AnnouncementParams {
   voiceId?: string | null;
   /** Rol del locutor según el catálogo (solo eventos con pinning). */
   speakerRole?: SpeakerRole | null;
+  /** Posición del avión al disparar (para historial `flight_audio_deliveries`). */
+  latitude?: number | null;
+  /** Posición del avión al disparar (para historial `flight_audio_deliveries`). */
+  longitude?: number | null;
+  /** Altitud ft al disparar (contexto del historial, opcional). */
+  altitude?: number | null;
 }
 
 export type AnnouncementEvent =

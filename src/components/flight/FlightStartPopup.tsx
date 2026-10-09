@@ -7,6 +7,7 @@
  */
 
 import React, { useState, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { X, Plane, DoorClosed, Zap } from "lucide-react";
 import type { FlightStartPreferences } from "../../services/FlightContext";
 
@@ -23,6 +24,7 @@ export default function FlightStartPopup({
   onConfirm,
   defaultPreferences,
 }: FlightStartPopupProps) {
+  const { t } = useTranslation();
   const [initialState, setInitialState] = useState<FlightStartPreferences["initialState"]>(
     defaultPreferences?.initialState ?? "gate_engines_on"
   );
@@ -63,7 +65,7 @@ export default function FlightStartPopup({
       className="fixed inset-0 z-[120] flex items-center justify-center p-4"
       role="dialog"
       aria-modal="true"
-      aria-label="Estado inicial del vuelo"
+      aria-label={t("flight_start.aria_label")}
     >
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
 
@@ -72,12 +74,12 @@ export default function FlightStartPopup({
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#3B7EB2]/30 bg-[#002440]/80">
           <h2 className="font-mono font-black text-sm text-[#45AFFF] uppercase tracking-wider flex items-center gap-2">
             <Plane className="w-4 h-4" />
-            Estado inicial del vuelo
+            {t("flight_start.title")}
           </h2>
           <button
             type="button"
             onClick={onClose}
-            aria-label="Cerrar"
+            aria-label={t("flight_start.close")}
             className="p-1.5 rounded hover:bg-white/10 text-white/60 hover:text-white transition-colors"
           >
             <X className="w-4 h-4" />
@@ -86,7 +88,7 @@ export default function FlightStartPopup({
 
         <div className="p-5 space-y-4">
           <p className="text-[12px] font-sans text-white/70 leading-relaxed">
-            Elegí cómo comienza tu vuelo en el simulador. La elección se respeta en el flujo narrativo y en el embarque.
+            {t("flight_start.description")}
           </p>
 
           {/* Opciones de estado inicial */}
@@ -109,9 +111,9 @@ export default function FlightStartPopup({
               <span className="flex-1">
                 <span className="flex items-center gap-1.5 text-xs font-mono font-bold text-white">
                   <DoorClosed className="w-3.5 h-3.5 text-[#45AFFF]" />
-                  En puerta (Cool & Dark)
+                  {t("flight_start.cold_dark_title")}
                 </span>
-                <span className="block text-[11px] text-white/50 mt-0.5">Aeronave apagada en puerta. Flujo completo desde GATE.</span>
+                <span className="block text-[11px] text-white/50 mt-0.5">{t("flight_start.cold_dark_desc")}</span>
               </span>
             </label>
 
@@ -133,9 +135,9 @@ export default function FlightStartPopup({
               <span className="flex-1">
                 <span className="flex items-center gap-1.5 text-xs font-mono font-bold text-white">
                   <Zap className="w-3.5 h-3.5 text-[#43E600]" />
-                  En puerta (motores encendidos)
+                  {t("flight_start.engines_title")}
                 </span>
-                <span className="block text-[11px] text-white/50 mt-0.5">Motores encendidos en puerta. Podés incluir u omitir el abordaje.</span>
+                <span className="block text-[11px] text-white/50 mt-0.5">{t("flight_start.engines_desc")}</span>
               </span>
             </label>
 
@@ -157,9 +159,9 @@ export default function FlightStartPopup({
               <span className="flex-1">
                 <span className="flex items-center gap-1.5 text-xs font-mono font-bold text-white">
                   <Plane className="w-3.5 h-3.5 text-[#E68B00]" />
-                  En cabecera de pista
+                  {t("flight_start.runway_title")}
                 </span>
-                <span className="block text-[11px] text-white/50 mt-0.5">Listo para despegue. Embarque automático y sin pantalla de embarque.</span>
+                <span className="block text-[11px] text-white/50 mt-0.5">{t("flight_start.runway_desc")}</span>
               </span>
             </label>
           </div>
@@ -173,11 +175,11 @@ export default function FlightStartPopup({
                 onChange={(e) => setIncludeBoarding(e.target.checked)}
                 className="accent-[#43E600] w-4 h-4"
               />
-              <span className="text-xs font-mono text-white/80">Incluir proceso de abordaje</span>
+              <span className="text-xs font-mono text-white/80">{t("flight_start.include_boarding")}</span>
             </label>
           )}
           {initialState === "gate_engines_on" && !includeBoarding && (
-            <p className="text-[10px] font-mono text-[#45AFFF]/70 px-1">Se omitirá BOARDING y se avanzará directo a PRE_FLIGHT.</p>
+            <p className="text-[10px] font-mono text-[#45AFFF]/70 px-1">{t("flight_start.skip_boarding_note")}</p>
           )}
         </div>
 
@@ -188,14 +190,14 @@ export default function FlightStartPopup({
             onClick={onClose}
             className="px-4 py-2 rounded-[5px] text-xs font-mono font-bold bg-white/5 hover:bg-white/10 text-white/70 hover:text-white border border-white/10 transition-colors"
           >
-            Cancelar
+            {t("flight_start.cancel")}
           </button>
           <button
             type="button"
             onClick={handleConfirm}
             className="px-5 py-2 rounded-[5px] text-xs font-mono font-black bg-[#43E600] hover:bg-[#3bcc00] text-black transition-colors shadow-[0_0_10px_rgba(67,230,0,0.3)]"
           >
-            Confirmar e iniciar
+            {t("flight_start.confirm")}
           </button>
         </div>
       </div>

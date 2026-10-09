@@ -109,3 +109,56 @@ export function clearAirportsCache(): void {
   localStorage.removeItem(CACHE_KEY);
   console.log('[airportService] Caché limpiado');
 }
+
+// ── Offset UTC de `of_airports.timezone_offset` ───────────────────────────
+// Respaldo cuando el mapa IANA hardcodeado no trae el aeropuerto: con ~7700
+// aeropuertos reduce drásticamente el fallback a UTC "a ciegas".
+
+/** Caché de sesión ICAO → offset en horas (null = sin dato). */
+const tzOffsetCache = new Map<string, number | null>();
+
+/**
+ * Offset UTC en horas decimales desde `of_airports.timezone_offset`.
+ * Acepta número ("-3", -3, "-3.5") y "+HH:MM"; devuelve null si es IANA,
+ * vacío o ilegible. OJO: es offset estándar, puede no contemplar DST —
+ * el mapa IANA (`getAirportTimezone`) sigue teniendo prioridad.
+ */
+export async function getAirportUtcOffsetHours(icaoCode: string): Promise<number | null> {
+  const code = (icaoCode || "").toUpperCase().trim();
+  if (!code) return null;
+  if (tzOffsetCache.has(code)) return tzOffsetCache.get(code) ?? null;
+  try {
+    const { data, error } = await supabase
+      .from("of_airports")
+      .select("timezone_offset")
+      .eq("icao", code)
+      .maybeSingle();
+    if (error || !data) {
+      tzOffsetCache.set(code, null);
+      return null;
+    }
+    const raw = (data as { timezone_offset?: unknown }).timezone_offset;
+    const parsed = parseUtcOffsetHours(raw);
+    tzOffsetCache.set(code, parsed);
+    return parsed;
+  } catch {
+    tzOffsetCache.set(code, null);
+    return null;
+  }
+}
+
+function parseUtcOffsetHours(raw: unknown): number | null {
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  const s = String(raw ?? "").trim();
+  if (s === "" || s.includes("/")) return null; // IANA o vacío
+  const m = /^([+-]?)(\d+)(?::(\d{1,2}))?$/.exec(s);
+  if (!m) {
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  }
+  const sign = m[1] === "-" ? -1 : 1;
+  const hours = Number(m[2]);
+  const minutes = m[3] !== undefined ? Number(m[3]) : 0;
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+  return sign * (hours + minutes / 60);
+}

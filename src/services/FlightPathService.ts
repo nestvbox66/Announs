@@ -8,6 +8,10 @@
 import { supabase } from "../lib/supabase";
 import { ServiceResult, ok, okVoid, fail } from "./ServiceResult";
 import type { FlightPathFeature } from "./FlightPathRecorder";
+import {
+  filterParamsToSignature,
+  parseRpcSignatureHint,
+} from "./rpcSignature";
 
 export interface FlightCompletionReward {
   baseXpAwarded: number;
@@ -15,6 +19,8 @@ export interface FlightCompletionReward {
   newTotalXp: number;
   newLevel: number | null;
   newRank: string | null;
+  /** XP otorgada por bonus de campaña (0 si no aplica o el servidor no lo declara). */
+  campaignXpAwarded: number;
 }
 
 /** Bonos de disciplina + entorno para la RPC unificada. */
@@ -32,6 +38,10 @@ export interface FlightCompletionBonuses {
   p_night_flight?: number;
   p_hard_airport?: number;
   p_weather_severity?: number;
+  /** Bonus de pasajeros (proporcional al base, con techo; 0 si el servidor aún no lo acepta). */
+  p_passenger?: number;
+  /** Multiplicador de campaña vigente (1 = sin campaña). */
+  p_campaign_multiplier?: number;
 }
 
 export class FlightPathService {
@@ -67,6 +77,10 @@ export class FlightPathService {
       p_night_flight: b.p_night_flight ?? 0,
       p_hard_airport: b.p_hard_airport ?? 0,
       p_weather_severity: b.p_weather_severity ?? 0,
+      // Bonus de pasajeros (la RPC lo recorta sola si aún no lo acepta).
+      p_passenger: b.p_passenger ?? 0,
+      // Multiplicador de campaña vigente (1 = sin campaña).
+      p_campaign_multiplier: b.p_campaign_multiplier ?? 1,
     };
     const callRpc = async (p: Record<string, unknown>) => supabase.rpc("process_flight_completion", p);
     try {
@@ -74,45 +88,79 @@ export class FlightPathService {
         flightId,
         ...params,
       });
-      let { data, error } = await callRpc(params);
-      if (error) {
-        const full = describePostgrestError(error);
-        // Compatibilidad: si el servidor aún no declara `p_disc_beacon`
-        // (migración pendiente), reintentar sin él para no perder el resto
-        // de la XP del vuelo. El beacon queda en 0 en ese caso.
-        if (/beacon/i.test(full.text)) {
-          console.warn("[FlightPathService] Servidor sin p_disc_beacon; reintentando sin beacon:", full.text);
-          const { p_disc_beacon: _dropped, ...legacyParams } = params;
-          const retry = await callRpc(legacyParams);
-          data = retry.data;
-          error = retry.error;
-          if (!error) {
-            console.log("[FlightPathService] Reintento sin beacon OK (beacon=0).");
+      // Fallback progresivo: el servidor puede no tener los parámetros nuevos
+      // (Parte 2 de beacon/campaña sin aplicar). Ante PGRST202 se recorta a la
+      // firma real del hint y se reintenta (hasta 2 recortes); sin hint
+      // parseable se usan los reintentos legacy de un parámetro.
+      let attemptParams: Record<string, unknown> = { ...params };
+      let lastData: unknown = null;
+      let lastError: { message: string; code?: string; details?: string | null; hint?: string | null } | null = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const { data: attemptData, error: attemptError } = await callRpc(attemptParams);
+        if (!attemptError) {
+          if (attempt > 0) {
+            console.log("[FlightPathService] Reintento con firma recortada OK:", {
+              dropped: Object.keys(params).filter((k) => !(k in attemptParams)),
+            });
           }
+          return buildReward(attemptData, flightId);
         }
+        lastData = attemptData;
+        lastError = attemptError;
+        const full = describePostgrestError(attemptError);
+        const signature = parseRpcSignatureHint(full.text);
+        if (full.code !== "PGRST202" || !signature) break;
+        const filtered = filterParamsToSignature(attemptParams, signature);
+        if (!filtered) break;
+        console.warn("[FlightPathService] Servidor sin parámetros nuevos; recortando y reintentando:", {
+          dropped: Object.keys(attemptParams).filter((k) => !(k in filtered)),
+        });
+        attemptParams = filtered;
+      }
+      // Compatibilidad legacy (sin hint parseable): reintento de un parámetro
+      // sobre el último resultado, sin repetir la llamada fallida.
+      {
+        const data = lastData;
+        const error = lastError;
         if (error) {
-          const retryFull = describePostgrestError(error);
+          const full = describePostgrestError(error);
+          if (/campaign/i.test(full.text)) {
+            console.warn("[FlightPathService] Servidor sin p_campaign_multiplier; reintentando sin él:", full.text);
+            const { p_campaign_multiplier: _dropped, ...legacyParams } = attemptParams;
+            const retry = await callRpc(legacyParams);
+            if (!retry.error) {
+              console.log("[FlightPathService] Reintento sin campaña OK (campaña=0).");
+              return buildReward(retry.data, flightId);
+            }
+            const retryFull = describePostgrestError(retry.error);
+            console.error("[FlightPathService] Error en process_flight_completion:", {
+              ...retryFull,
+              flightId,
+            });
+            return fail(retryFull.text);
+          } else if (/beacon/i.test(full.text)) {
+            console.warn("[FlightPathService] Servidor sin p_disc_beacon; reintentando sin beacon:", full.text);
+            const { p_disc_beacon: _dropped, ...legacyParams } = attemptParams;
+            const retry = await callRpc(legacyParams);
+            if (!retry.error) {
+              console.log("[FlightPathService] Reintento sin beacon OK (beacon=0).");
+              return buildReward(retry.data, flightId);
+            }
+            const retryFull = describePostgrestError(retry.error);
+            console.error("[FlightPathService] Error en process_flight_completion:", {
+              ...retryFull,
+              flightId,
+            });
+            return fail(retryFull.text);
+          }
           console.error("[FlightPathService] Error en process_flight_completion:", {
-            ...retryFull,
+            ...full,
             flightId,
           });
-          return fail(retryFull.text);
+          return fail(full.text);
         }
+        return buildReward(data, flightId);
       }
-      const row: any = Array.isArray(data) ? data[0] : data;
-      const reward: FlightCompletionReward = {
-        baseXpAwarded: Number(row?.base_xp_awarded ?? 0) || 0,
-        totalFlightXp: Number(row?.total_flight_xp ?? 0) || 0,
-        newTotalXp: Number(row?.new_total_xp ?? 0) || 0,
-        newLevel: row?.new_level === null || row?.new_level === undefined
-          ? null
-          : Number(row.new_level) || null,
-        newRank: row?.new_rank !== null && row?.new_rank !== undefined
-          ? String(row.new_rank)
-          : null,
-      };
-      console.log("[FlightPathService] Progresión otorgada:", { flightId, ...reward });
-      return ok(reward);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error("[FlightPathService] Excepción en process_flight_completion:", message);
@@ -283,6 +331,25 @@ function generateUuid(): string {
     const v = c === "x" ? r : (r & 0x3) | 0x8;
     return v.toString(16);
   });
+}
+
+/** Construye el reward desde la fila devuelta por la RPC (array u objeto). */
+function buildReward(data: unknown, flightId: string): ServiceResult<FlightCompletionReward> {
+  const row: any = Array.isArray(data) ? data[0] : data;
+  const reward: FlightCompletionReward = {
+    baseXpAwarded: Number(row?.base_xp_awarded ?? 0) || 0,
+    totalFlightXp: Number(row?.total_flight_xp ?? 0) || 0,
+    newTotalXp: Number(row?.new_total_xp ?? 0) || 0,
+    newLevel: row?.new_level === null || row?.new_level === undefined
+      ? null
+      : Number(row.new_level) || null,
+    newRank: row?.new_rank !== null && row?.new_rank !== undefined
+      ? String(row.new_rank)
+      : null,
+    campaignXpAwarded: Number(row?.campaign_xp_awarded ?? 0) || 0,
+  };
+  console.log("[FlightPathService] Progresión otorgada:", { flightId, ...reward });
+  return ok(reward);
 }
 
 /**

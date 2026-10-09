@@ -1,4 +1,5 @@
 import React from "react";
+import { useTranslation } from "react-i18next";
 import { Radio } from "lucide-react";
 import { AnnouncementInfo } from "../../types";
 
@@ -7,19 +8,6 @@ interface LastAnnouncementBoxProps {
   isPlaying: boolean;
   isGenerating: boolean;
   getSpeakerName: (role: string) => string;
-}
-
-function roleLabel(role: string | undefined): string {
-  switch (role) {
-    case "captain":
-      return "Capitán";
-    case "crew":
-      return "Tripulación de Cabina";
-    case "gate":
-      return "Agente de Puerta";
-    default:
-      return "Desconocido";
-  }
 }
 
 /**
@@ -33,11 +21,24 @@ export default function LastAnnouncementBox({
   isGenerating,
   getSpeakerName,
 }: LastAnnouncementBoxProps) {
+  const { t } = useTranslation();
+  const roleLabel = (role: string | undefined): string => {
+    switch (role) {
+      case "captain":
+        return t("flight_view.role_captain");
+      case "crew":
+        return t("flight_view.role_crew");
+      case "gate":
+        return t("flight_view.role_gate");
+      default:
+        return t("flight_view.role_gate");
+    }
+  };
   return (
     <div className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 shadow-lg space-y-3">
       <div className="flex justify-between items-center border-b border-white/10 pb-2">
         <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider flex items-center gap-1.5 font-bold">
-          <Radio className="w-4 h-4 text-[#43E600]" /> Último anuncio
+          <Radio className="w-4 h-4 text-[#43E600]" /> {t("flight_view.last_announcement")}
         </h3>
       </div>
 
@@ -57,14 +58,14 @@ export default function LastAnnouncementBox({
           {announcement?.text
             ? `"${announcement.text}"`
             : isGenerating
-              ? "Generando anuncio..."
-              : "Sin anuncios recientes"}
+              ? t("flight_view.generating_announcement")
+              : t("flight_view.no_recent_announcements")}
         </p>
 
         {announcement && (
           <div className="mt-3 pt-2.5 border-t border-white/15 flex justify-between items-center text-[9.5px] font-mono text-white/50">
             <span>
-              NARRACIÓN:{" "}
+              {t("flight_view.narration")}{" "}
               <strong className="text-white font-bold">
                 {getSpeakerName(announcement.speaker_role)}
               </strong>

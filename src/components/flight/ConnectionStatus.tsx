@@ -7,6 +7,7 @@
  */
 
 import React, { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Wifi, WifiOff, Activity } from "lucide-react";
 import { ConnectionStatusService, ConnectionStatus as ConnStatus, connectionStatusService } from "../../services/ConnectionStatusService";
 import type { FlightController } from "../../services/FlightController";
@@ -30,8 +31,13 @@ function statusIcon(type: ConnStatus["type"], connected: boolean, className = "w
 }
 
 export default function ConnectionStatus({ flightController, service, compact = false }: ConnectionStatusProps) {
+  const { t } = useTranslation();
   const svc = service ?? connectionStatusService;
   const [status, setStatus] = useState<ConnStatus>(() => svc.getStatus());
+
+  // El servicio devuelve textos en español: se traducen por tipo de conexión.
+  const statusLabel = (type: ConnStatus["type"]): string => t(`connection.label_${type}`);
+  const statusDetail = (type: ConnStatus["type"]): string => t(`connection.detail_${type}`);
 
   useEffect(() => {
     // Sincronizar controlador activo con el servicio
@@ -69,8 +75,8 @@ export default function ConnectionStatus({ flightController, service, compact = 
 
   if (compact) {
     const label = status.connected
-      ? status.label + (isMock ? " (Modo prueba)" : "")
-      : "Sin conexión";
+      ? statusLabel(status.type) + (isMock ? t("connection.test_mode_suffix") : "")
+      : t("connection.no_connection");
     return (
       <div
         id="sim-status-compact"
@@ -90,19 +96,19 @@ export default function ConnectionStatus({ flightController, service, compact = 
   return (
     <div id="sim-status-card" className="bg-[#2C6591]/20 border border-white/20 rounded-[5px] p-3 text-xs mb-3">
       <div className="flex items-center justify-between">
-        <span className="font-mono text-white/70">CONEXIÓN AL SIMULADOR:</span>
+        <span className="font-mono text-white/70">{t("connection.title")}</span>
         {isConnected ? (
           <span
             className={`flex items-center gap-1.5 font-bold ${isMock ? "text-[#94a3b8]" : "text-[#43E600]"}`}
-            title={status.detail}
+            title={statusDetail(status.type)}
           >
             {statusIcon(status.type, true)}
-            {isMock ? "MODO PRUEBA" : "CONECTADO"}
+            {isMock ? t("connection.test_mode") : t("connection.connected")}
           </span>
         ) : (
           <span className="flex items-center gap-1.5 text-[#E68B00] font-bold">
             <WifiOff className="w-3.5 h-3.5" />
-            DESCONECTADO
+            {t("connection.disconnected")}
           </span>
         )}
       </div>
@@ -111,19 +117,19 @@ export default function ConnectionStatus({ flightController, service, compact = 
         <span className="flex items-center gap-1.5">
           <span>{status.icon}</span>
           <span className={isDisconnected ? "text-red-400" : isMock ? "text-slate-300" : "text-white/90"}>
-            {status.label}
+            {statusLabel(status.type)}
           </span>
         </span>
-        <span className="text-white/50 text-[10px]">{status.detail}</span>
+        <span className="text-white/50 text-[10px]">{statusDetail(status.type)}</span>
       </div>
 
       {/* Detalle secundario para Mock / desconexión */}
       <div className="mt-1 flex items-center justify-between text-[10px] font-mono text-white/40">
         <span>
-          {status.type === "msfs" && "SimConnect activo"}
-          {status.type === "xplane" && "X-Plane activo — futuro"}
-          {status.type === "mock" && "MockFlightController"}
-          {status.type === "disconnected" && "Sin simulador disponible"}
+          {status.type === "msfs" && t("connection.active_msfs")}
+          {status.type === "xplane" && t("connection.active_xplane")}
+          {status.type === "mock" && t("connection.active_mock")}
+          {status.type === "disconnected" && t("connection.no_sim")}
         </span>
         <span
           className="w-2 h-2 rounded-full animate-pulse"

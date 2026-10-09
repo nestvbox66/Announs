@@ -64,12 +64,17 @@ export interface PinnedSpeaker {
  * Resolución endurecida del locutor para eventos con pinning (`gate_*`).
  *
  * Cadena de decisión (primera que aplique):
- *  1. Voz actual probada en el idioma global → se respeta tal cual.
- *  2. Primera voz del rol probada en el idioma global → se usa (corrige
- *     selecciones en otro idioma o sin etiquetar pudiendo elegir mejor).
- *  3. Voz actual sin etiquetar y sin alternativa probada → se mantiene
+ *  1. Voz del slot "Agente de Puerta" probada en el idioma global → se
+ *     respeta (es la elección explícita pre-vuelo para estos anuncios; el
+ *     catálogo los declara con rol `crew`, pero el usuario los configura en
+ *     el selector de puerta).
+ *  2. Voz actual del rol probada en el idioma global → se respeta tal cual.
+ *  3. Primera voz del rol (o de puerta) probada en el idioma global → se usa
+ *     (corrige selecciones en otro idioma o sin etiquetar pudiendo elegir
+ *     mejor).
+ *  4. Voz actual sin etiquetar y sin alternativa probada → se mantiene
  *     (fail-open: catálogos sin tags siguen funcionando como antes).
- *  4. Resto → null (no fijar una voz en idioma erróneo; el servidor
+ *  5. Resto → null (no fijar una voz en idioma erróneo; el servidor
  *     resuelve por idioma, mejor que una voz explícita equivocada).
  *
  * Si el idioma global está vacío, se deriva del locutor cuando sus tags lo
@@ -81,14 +86,19 @@ export function resolvePinnedSpeaker(
 ): PinnedSpeaker {
   const key = (eventKey ?? "").trim();
   const role = key && shouldPinSpeaker(key) ? resolveSpeakerRole(key) : null;
+  const isGateEvent = key !== "" && shouldPinSpeaker(key);
   let languageId = resolveGlobalLanguageId(fc);
   if (!role || !fc) return { role, voiceId: null, languageId };
   let current = "";
+  let gateSlot = "";
   let voiceRoles: Record<string, string> = {};
   let voiceLanguages: Record<string, string[]> = {};
   try {
     const voices = fc.getVoices();
     current = (role === "captain" ? voices.captain : role === "crew" ? voices.crew : voices.gateAgent ?? "").trim();
+    // Slot "Agente de Puerta" del pre-vuelo: elección explícita del usuario
+    // para los anuncios de puerta (aunque el catálogo los declare `crew`).
+    gateSlot = (voices.gateAgent ?? "").trim();
     voiceRoles = voices.voiceRoles ?? {};
     voiceLanguages = voices.voiceLanguages ?? {};
   } catch {
@@ -105,14 +115,20 @@ export function resolvePinnedSpeaker(
     const curTags = tagsOf(current) ?? [];
     if (curTags.length > 0) languageId = curTags[0];
   }
-  // 2) Voz actual probada → respeto estricto.
+  // 2) Voz actual probada → respeto estricto. Para eventos de puerta se
+  // prioriza el slot "Agente de Puerta" (elección explícita pre-vuelo).
+  if (isGateEvent && provenFor(gateSlot, languageId)) {
+    return { role, voiceId: gateSlot, languageId };
+  }
   if (provenFor(current, languageId)) {
     return { role, voiceId: current, languageId };
   }
-  // 3) Alternativa del rol probada en el idioma global.
+  // 3) Alternativa probada en el idioma global: mismo rol, o rol `gate`
+  // cuando el evento es de puerta (Amy y el resto de voces de puerta viven
+  // bajo ese rol en el catálogo de voces).
   if (languageId) {
     const alternative = Object.keys(voiceRoles).find(
-      (id) => voiceRoles[id] === role && (tagsOf(id) ?? []).includes(languageId as string)
+      (id) => (voiceRoles[id] === role || (isGateEvent && voiceRoles[id] === "gate")) && (tagsOf(id) ?? []).includes(languageId as string)
     );
     if (alternative) return { role, voiceId: alternative, languageId };
   }

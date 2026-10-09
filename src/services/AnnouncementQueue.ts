@@ -2,11 +2,24 @@ import { AnnouncementInfo } from "../types";
 import { AnnouncementParams, AnnouncementEvent } from "../types/announcement";
 import { AnnouncementService } from "./AnnouncementService";
 import { fileLogger } from "./FileLogger";
+import {
+  safetyVideoPackService,
+  type SafetyVideoPlayRequest,
+} from "./SafetyVideoPackService";
 
 interface QueueItem {
   params: AnnouncementParams;
   resolve: (ann: AnnouncementInfo) => void;
   reject: (err: Error) => void;
+  /**
+   * Vía video de seguridad (PACK): en lugar de `AnnouncementService.play()`
+   * (Edge Function `audio-get`), se solicita la reproducción en el IFE y se
+   * espera a que termine, emitiendo el mismo ciclo de vida para que la
+   * narrativa, los pasajeros y el ducking de música funcionen igual.
+   */
+  safetyVideo?: {
+    request: SafetyVideoPlayRequest;
+  };
 }
 
 export class AnnouncementQueue {
@@ -26,11 +39,27 @@ export class AnnouncementQueue {
     });
     this.service.on("error", (msg: string | null) => {
       this.emit("error", msg);
-      this.emit("announcement:completed");
+      // `AnnouncementService.play()` emite `error(null)` al INICIAR cada
+      // reproducción (limpieza del error previo, ver línea ~96). Ese null NO
+      // es una finalización: si lo propagamos como `announcement:completed`,
+      // los oyentes (pasajeros, música) cobran el anuncio dos veces — una al
+      // empezar (error) y otra al terminar (completed), separadas por ~30s
+      // (lo que tarda audio-get + playback), fuera de la ventana
+      // anti-duplicados de 10s del PassengerEngine. Solo los errores reales
+      // (string) cierran el ciclo.
+      if (msg == null) return;
+      // Sin clave en el error del servicio: se informa la que estaba
+      // procesándose (puede ser null si el fallo fue antes de empezar).
+      fileLogger.log('[AnnouncementQueue] announcement:completed (error)', { eventKey: this.processingEventKey });
+      this.emit("announcement:completed", this.processingEventKey);
     });
-    this.service.on("completed", (...args) => {
-      this.emit("completed", ...args);
-      this.emit("announcement:completed");
+    this.service.on("completed", (eventKey: string) => {
+      this.emit("completed", eventKey);
+      // Q1 pasajeros: el efecto se cobra al COMPLETAR la reproducción, no al
+      // encolar. Se propaga la clave para que los oyentes (motor de
+      // pasajeros) apliquen los efectos del anuncio escuchado.
+      fileLogger.log('[AnnouncementQueue] announcement:completed (completed)', { eventKey });
+      this.emit("announcement:completed", eventKey);
     });
   }
 
@@ -93,6 +122,46 @@ export class AnnouncementQueue {
     });
   }
 
+  /**
+   * Encola un evento de video de seguridad (modo PACK): NO invoca a la Edge
+   * Function `audio-get`; reproduce el archivo cacheado en el IFE y completa
+   * el mismo ciclo de vida (`announcement`, `playing`, `completed`,
+   * `announcement:completed`) para no bloquear la narrativa.
+   */
+  enqueueSafetyVideo(
+    params: AnnouncementParams,
+    request: SafetyVideoPlayRequest
+  ): Promise<AnnouncementInfo> {
+    const isDuplicate =
+      this.queue.some((item) => item.params.eventKey === params.eventKey) ||
+      this.processingEventKey === params.eventKey;
+    if (isDuplicate) {
+      console.warn('[AnnouncementQueue] Duplicado ignorado (safety video):', params.eventKey);
+      fileLogger.warn('[AnnouncementQueue] Duplicado ignorado (safety video)', { eventKey: params.eventKey });
+      return Promise.resolve(null as unknown as AnnouncementInfo);
+    }
+
+    this.queueCallId++;
+    const callId = this.queueCallId;
+
+    console.log("[QUEUE TRACE]");
+    console.log("action: enqueueSafetyVideo");
+    console.log("event: " + params.eventKey);
+    console.log("callId: " + callId);
+
+    fileLogger.log('[AnnouncementQueue] enqueueSafetyVideo', { eventKey: params.eventKey, callId, packageId: request.packageId });
+
+    this.emit("announcement:enqueued", params.eventKey);
+
+    return new Promise((resolve, reject) => {
+      this.queue.push({ params, resolve, reject, safetyVideo: { request } });
+      if (!this.processing) {
+        this.processing = true;
+        this.processNext();
+      }
+    });
+  }
+
   clear(): void {
     const pending = this.queue.splice(0);
     this.service.cancel();
@@ -102,7 +171,9 @@ export class AnnouncementQueue {
       item.reject(new Error("Cancelled"));
     }
     // Si se interrumpió un anuncio, la música debe recuperar su volumen.
-    this.emit("announcement:completed");
+    // Se informa la clave en curso (o null) igual que en error/completed.
+    fileLogger.log('[AnnouncementQueue] announcement:completed (clear)', { eventKey: this.processingEventKey });
+    this.emit("announcement:completed", this.processingEventKey);
   }
 
   isBusy(): boolean {
@@ -118,8 +189,13 @@ export class AnnouncementQueue {
       const item = this.queue.shift()!;
       this.processingEventKey = item.params.eventKey;
       try {
-        const ann = await this.service.play(item.params);
-        item.resolve(ann);
+        if (item.safetyVideo) {
+          const ann = await this.playSafetyVideo(item);
+          item.resolve(ann);
+        } else {
+          const ann = await this.service.play(item.params);
+          item.resolve(ann);
+        }
       } catch (err) {
         console.error('[Audio] ❌ error:', { eventKey: item.params.eventKey, error: (err as Error)?.message ?? String(err) });
         fileLogger.error('[AnnouncementQueue] playback failed', { eventKey: item.params.eventKey, error: (err as Error)?.message ?? String(err) });
@@ -129,5 +205,45 @@ export class AnnouncementQueue {
       }
     }
     this.processing = false;
+  }
+
+  /**
+   * Reproduce un video de seguridad en el IFE en lugar de generar audio.
+   * Emite el ciclo de vida estándar para que oyentes (narrativa, pasajeros,
+   * música) reaccionen igual que ante un anuncio de audio.
+   */
+  private async playSafetyVideo(item: QueueItem): Promise<AnnouncementInfo> {
+    const { params, safetyVideo } = item;
+    const request = safetyVideo!.request;
+    const { eventKey } = params;
+
+    console.log('[Audio] 🎬 safety-video dispatch (sin audio-get):', { eventKey, packageId: request.packageId });
+    fileLogger.log('[AnnouncementQueue] safety-video dispatch', { eventKey, packageId: request.packageId });
+
+    // Anuncio virtual para la UI (LastAnnouncementBox, historial): el audio
+    // real lo sustituye el video del IFE.
+    const virtual: AnnouncementInfo = {
+      audio_url: request.objectUrl ?? request.remoteUrl,
+      text: `Video de seguridad: ${request.packageName}`,
+      speaker_role: params.speakerRole ?? "crew",
+      language_id: params.languageId,
+      is_pre_recorded: true,
+    };
+
+    this.emit("generating", true);
+    this.emit("announcement", virtual);
+    // `playing(true)` al arrancar para el ducking de música durante el video
+    // (también propaga `announcement:started` a los oyentes).
+    this.emit("playing", true);
+
+    const outcome = await safetyVideoPackService.requestPlayAndWait(request);
+
+    this.emit("playing", false);
+    this.emit("generating", false);
+    this.emit("completed", eventKey);
+    fileLogger.log('[AnnouncementQueue] announcement:completed (safety-video)', { eventKey, outcome });
+    this.emit("announcement:completed", eventKey);
+
+    return virtual;
   }
 }

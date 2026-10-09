@@ -68,6 +68,22 @@ export const FlightEvents: Record<string, EventDefinition> = {
     default_delay_ms: 900000,
   },
 
+  // ── TAXI — delay takeoff (WAIT_CONDITION / delay_detection) ──
+  // Clave referenciada por Scheduler/DebugMonitor/UI pero faltante en el
+  // catálogo hasta Fase 1 pasajeros. Fase TAXI, umbral 15 min (igual que taxi).
+  preflight_capt_delay_takeoff: {
+    eventKey: "preflight_capt_delay_takeoff",
+    phase: FlightPhase.TAXI,
+    triggerType: "condition",
+    enabledSwitch: "preflight_capt_delay_takeoff",
+    priority: 10,
+    blocking: false,
+    description: "Aviso de demora antes del despegue — se dispara al superar umbral en TAXI",
+    speakerRole: "captain",
+    preRecorded: false,
+    default_delay_ms: 900000,
+  },
+
   // ── TAXI ──
   taxi_capt_armdoors: defineEvent(
     "taxi_capt_armdoors",
@@ -206,6 +222,34 @@ export const FlightEvents: Record<string, EventDefinition> = {
     "captain",
     "Orden de ocupar los transportines para el aterrizaje"
   ),
+
+  // ── Transversal turbulencia / cinturones ──
+  // Eventos sin fase propia: pueden dispararse en cualquier momento por la
+  // señal de cinturones (el escenario remoto los referencia como steps en
+  // CLIMB/CRUISE/DESCENT/LANDING). Fase nominal CRUISE solo como clasificador;
+  // el trigger real es `condition` (SEATBELT_SWITCH). Registrados en Fase 1
+  // pasajeros: antes solo existían en config/locales pero no en el catálogo,
+  // por lo que EventCatalogService.get() los devolvía undefined.
+  common_capt_seatbelt: {
+    eventKey: "common_capt_seatbelt",
+    phase: FlightPhase.CRUISE,
+    triggerType: "condition",
+    enabledSwitch: "common_capt_seatbelt",
+    priority: 20,
+    blocking: false,
+    description: "Señal de cinturones del capitán por turbulencia o cambios",
+    speakerRole: "captain",
+  },
+  common_crew_seatbelt: {
+    eventKey: "common_crew_seatbelt",
+    phase: FlightPhase.CRUISE,
+    triggerType: "condition",
+    enabledSwitch: "common_crew_seatbelt",
+    priority: 20,
+    blocking: false,
+    description: "Refuerzo verbal de tripulación tras el aviso del capitán",
+    speakerRole: "crew",
+  },
 
   // ── TAXI_IN (TAXI_TO_GATE) ──
   taxitogate_crew_welcome: defineEvent(

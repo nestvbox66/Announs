@@ -4,6 +4,7 @@ import type { FlightContext } from "./FlightContext";
 import {
   resolvePinnedSpeaker,
 } from "./speakerResolver";
+import { telemetryPositionParams } from "./AnnouncementService";
 
 export interface TimerAction {
   id: string;
@@ -104,6 +105,7 @@ export class TimerManager {
             languageId,
             ...(voiceId ? { voiceId } : {}),
             ...(speakerRole ? { speakerRole } : {}),
+            ...telemetryPositionParams(fc),
           }).catch((err) => {
             console.error('[TimerManager] ❌ enqueue fallido:', { event: record.action.event, error: (err as Error)?.message ?? String(err) });
           });

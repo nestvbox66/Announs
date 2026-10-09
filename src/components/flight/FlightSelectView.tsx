@@ -3,35 +3,48 @@
  *
  * Tres secciones apiladas en vertical:
  *  - Arriba (100%): bloque dedicado "Importar desde SimBrief".
- *  - Medio (100%): "Vuelos de la Semana" con las ofertas en una sola línea
- *    (3 columnas seleccionables) y un único botón "Enviar a SimBrief" en
- *    la fila del título, habilitado solo si hay una oferta seleccionada.
+ *  - Medio (100%): "Campaña Activa" con datos reales de `weekly_campaigns` /
+ *    `weekly_campaign_flights`: una fila por campaña (resumen + sus vuelos
+ *    seleccionables), botón único de export en el título y lupa para
+ *    maximizar cada tarjeta en un popup de lectura.
  *  - Abajo (100%): "Rutas Reales" con botones de acción en la fila del
  *    título, boxes de filtros (Salida / Llegada / Aerolínea-Avión) y grilla
  *    de resultados por debajo.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   AlertTriangle,
   Download,
   Eraser,
   Loader2,
+  Maximize2,
   Plane,
   Search,
   Sparkles,
   Trophy,
+  X,
 } from "lucide-react";
 import {
   buildSimbriefDispatchUrl,
   loadAirlineOptions,
   loadEquipmentOptions,
+  randomFlightNumber,
   resolveAircraftIcao,
   searchRealRoutes,
   REAL_ROUTES_PAGE_SIZE,
   type RealRouteFilters,
   type RealRouteResult,
 } from "../../services/RealRoutesService";
+import {
+  formatMultiplier,
+  loadActiveCampaigns,
+  toSimbriefDateTime,
+  type Campaign,
+  type CampaignFlight,
+} from "../../services/CampaignService";
+import { getAirlineLogo, getGenericAirlineLogo } from "../../utils/airlineLogos";
+import { getAircraftSilhouette } from "../../utils/aircraftSilhouettes";
 import { openExternalUrl } from "../../utils/openExternal";
 
 export interface FlightSelectViewProps {
@@ -41,20 +54,6 @@ export interface FlightSelectViewProps {
   onImportSimbrief: () => void;
   onNavigateToAccount: () => void;
 }
-
-interface WeekCard {
-  id: string;
-  titleKey: string;
-  routeKey: string;
-  descKey: string;
-  bonusKey: string;
-}
-
-const WEEK_CARDS: WeekCard[] = [
-  { id: "week-1", titleKey: "week_card_1_title", routeKey: "week_card_1_route", descKey: "week_card_1_desc", bonusKey: "week_card_1_bonus" },
-  { id: "week-2", titleKey: "week_card_2_title", routeKey: "week_card_2_route", descKey: "week_card_2_desc", bonusKey: "week_card_2_bonus" },
-  { id: "week-3", titleKey: "week_card_3_title", routeKey: "week_card_3_route", descKey: "week_card_3_desc", bonusKey: "week_card_3_bonus" },
-];
 
 interface RouteFilters {
   originCity: string;
@@ -93,6 +92,15 @@ function FilterInput({
   listId?: string;
   options?: string[];
 }) {
+  // Sugerencias dinámicas: la lista completa (~6k aerolíneas) no entra en el
+  // DOM (tope 400), así que al tipear se filtra por subcadena — si no, solo
+  // aparecen las primeras 400 alfabéticas y el resto "no existe" en la UI.
+  const shownOptions = useMemo(() => {
+    const all = options ?? [];
+    const needle = value.trim().toLowerCase();
+    if (!needle) return all.slice(0, 400);
+    return all.filter((o) => o.toLowerCase().includes(needle)).slice(0, 400);
+  }, [options, value]);
   return (
     <label className="block">
       <span className="block text-[10px] font-mono font-bold text-white/55 uppercase tracking-wider mb-1">
@@ -109,7 +117,7 @@ function FilterInput({
       />
       {listId && options && (
         <datalist id={listId}>
-          {options.slice(0, 400).map((opt) => (
+          {shownOptions.map((opt) => (
             <option key={opt} value={opt} />
           ))}
         </datalist>
@@ -126,10 +134,6 @@ export default function FlightSelectView({
   onNavigateToAccount,
 }: FlightSelectViewProps) {
   const { t } = useTranslation();
-  // Oferta de la semana seleccionada (la tarjeta es seleccionable y el
-  // botón único del encabezado solo se habilita con selección).
-  const [selectedWeekId, setSelectedWeekId] = useState<string | null>(null);
-  const [weekWarning, setWeekWarning] = useState<string | null>(null);
   const [filters, setFilters] = useState<RouteFilters>(EMPTY_FILTERS);
   // Resultados: null = sin búsqueda (o tras limpiar); [] = sin coincidencias.
   const [results, setResults] = useState<RealRouteResult[] | null>(null);
@@ -153,6 +157,27 @@ export default function FlightSelectView({
     : [];
   const [airlineOptions, setAirlineOptions] = useState<string[]>([]);
   const [equipmentOptions, setEquipmentOptions] = useState<string[]>([]);
+  // Campañas vigentes (null = aún cargando; [] = sin vigentes).
+  const [campaigns, setCampaigns] = useState<Campaign[] | null>(null);
+  const [campaignError, setCampaignError] = useState<string | null>(null);
+  // Vuelo de campaña seleccionado (el botón único del título exporta este).
+  const [selectedCampaignFlightId, setSelectedCampaignFlightId] = useState<string | null>(null);
+  // Tarjeta maximizada en popup de lectura (resumen o vuelo de campaña).
+  const [zoomed, setZoomed] = useState<
+    | { kind: "campaign"; campaign: Campaign }
+    | { kind: "flight"; flight: CampaignFlight }
+    | null
+  >(null);
+
+  // Cerrar el popup con Escape.
+  useEffect(() => {
+    if (!zoomed) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setZoomed(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [zoomed]);
   const set = (key: keyof RouteFilters) => (v: string) =>
     setFilters((prev) => ({ ...prev, [key]: v }));
 
@@ -167,6 +192,25 @@ export default function FlightSelectView({
       if (cancelled) return;
       if (airlinesRes.success && airlinesRes.data) setAirlineOptions(airlinesRes.data);
       if (equipmentRes.success && equipmentRes.data) setEquipmentOptions(equipmentRes.data);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Campañas vigentes (una carga al montar la vista).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const res = await loadActiveCampaigns();
+      if (cancelled) return;
+      if (res.success) {
+        setCampaigns(res.data ?? []);
+        setCampaignError(null);
+      } else {
+        setCampaigns([]);
+        setCampaignError(res.error ?? t("volar.campaign_error"));
+      }
     })();
     return () => {
       cancelled = true;
@@ -206,11 +250,34 @@ export default function FlightSelectView({
     setResolvedIcao(null);
   };
 
+  // Exporta un vuelo de campaña al despacho de SimBrief (redirect con
+  // origen, destino, aerolínea, ICAO de aeronave y n° vuelo/fecha si hay).
+  const handleCampaignExport = async (flight: CampaignFlight) => {
+    const dt = toSimbriefDateTime(flight.departureTime);
+    const url = buildSimbriefDispatchUrl({
+      originCode: flight.originIcao,
+      destCode: flight.destinationIcao,
+      airlineIcao: flight.airlineCode,
+      equipment: flight.aircraftIcao,
+      flightNumber: flight.flightNumber,
+      date: dt?.date,
+      depHour: dt?.deph,
+      depMinute: dt?.depm,
+    });
+    try {
+      await openExternalUrl(url);
+    } catch {
+      setCampaignError(t("volar.send_error"));
+    }
+  };
+
   // Envía la ruta seleccionada al despacho de SimBrief (solo Rutas Reales).
   // El equipo de of_routes viene en formato IATA (ej. "738") y se traduce
   // al código ICAO (ej. "B738") vía of_planes antes de construir la URL,
-  // junto con origen, destino y aerolínea. Sin selección no se envía nada:
-  // se muestra el aviso de validación.
+  // junto con origen, destino y aerolínea. Como las rutas reales no traen
+  // número de vuelo, se asigna uno al azar de 3-4 dígitos para que el
+  // despacho no se genere como "0000" si el usuario no lo modifica.
+  // Sin selección no se envía nada: se muestra el aviso de validación.
   // En desktop se abre el navegador por defecto (window.open no funciona en Tauri).
   const handleSendToSimbrief = async () => {
     const selected = selectedIdx !== null ? results?.[selectedIdx] ?? null : null;
@@ -230,7 +297,9 @@ export default function FlightSelectView({
         originCode: selected.originCode,
         destCode: selected.destCode,
         airlineIcao: selected.airlineIcao,
+        airlineIata: selected.airlineIata,
         equipment,
+        flightNumber: randomFlightNumber(),
       });
       await openExternalUrl(url);
     } catch {
@@ -240,6 +309,9 @@ export default function FlightSelectView({
     }
   };
   const selectedRoute = selectedIdx !== null ? results?.[selectedIdx] ?? null : null;
+  const selectedCampaignFlight = campaigns
+    ?.flatMap((c) => c.flights)
+    .find((f) => f.id === selectedCampaignFlightId) ?? null;
   const selectedEquipment = selectedRoute?.equipment ?? "";
 
   // Al seleccionar una ruta se resuelve el ICAO de la aeronave en segundo
@@ -328,117 +400,329 @@ export default function FlightSelectView({
       </section>
 
       <div className="space-y-6">
-        {/* Primero (100%): Vuelos de la Semana en horizontal */}
+        {/* Campaña Activa (datos reales de weekly_campaigns): una fila por
+            campaña con resumen + sus vuelos (4 columnas en horizontal).
+            Un único botón en el título exporta el vuelo seleccionado. */}
         <section className="bg-[#00172e]/85 border border-[#3B7EB2]/45 rounded-[8px] p-5 shadow-lg space-y-4">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 border-b border-white/10 pb-2">
             <div className="flex items-center gap-2">
               <Trophy className="w-5 h-5 text-[#E68B00]" />
               <div>
                 <h3 className="font-display font-bold text-base text-[#E68B00]">
-                  {t("volar.week_title")}
+                  {t("volar.campaign_title")}
                 </h3>
-                <p className="text-[10px] font-mono text-white/40">{t("volar.week_subtitle")}</p>
+                <p className="text-[10px] font-mono text-white/40">{t("volar.campaign_subtitle")}</p>
               </div>
             </div>
             <div className="shrink-0 flex md:justify-end">
-              {!hasSimbriefId ? (
-                <button
-                  key="btn-week-send"
-                  type="button"
-                  onClick={() => {
-                    if (!selectedWeekId) {
-                      setWeekWarning(t("volar.week_no_selection"));
-                      return;
-                    }
-                    setWeekWarning(null);
-                    onNavigateToAccount();
-                  }}
-                  className="px-6 py-3 rounded-[5px] text-xs font-mono font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/40 disabled:opacity-50 disabled:cursor-not-allowed"
-                  disabled={!selectedWeekId}
-                  title={!selectedWeekId ? t("volar.week_no_selection") : t("volar.week_import_btn")}
-                >
-                  <AlertTriangle className="w-3.5 h-3.5" />
-                  {t("volar.no_id_btn")}
-                </button>
-              ) : (
-                <button
-                  key="btn-week-send"
-                  id="btn-week-send-simbrief"
-                  type="button"
-                  onClick={() => {
-                    if (!selectedWeekId) {
-                      setWeekWarning(t("volar.week_no_selection"));
-                      return;
-                    }
-                    setWeekWarning(null);
-                    onImportSimbrief();
-                  }}
-                  disabled={!selectedWeekId || isFetchingSimbrief}
-                  title={!selectedWeekId ? t("volar.week_no_selection") : t("volar.week_import_btn")}
-                  className="px-6 py-3 rounded-[5px] text-xs font-mono font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-[#45AFFF]/15 hover:bg-[#45AFFF]/30 text-[#45AFFF] border border-[#45AFFF]/40 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {isFetchingSimbrief ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <Download className="w-3.5 h-3.5" />
-                  )}
-                  {isFetchingSimbrief ? t("volar.importing") : t("volar.week_import_btn")}
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedCampaignFlight) void handleCampaignExport(selectedCampaignFlight);
+                }}
+                disabled={!selectedCampaignFlight}
+                title={!selectedCampaignFlight ? t("volar.campaign_no_selection") : t("volar.campaign_send_btn")}
+                className="px-4 py-2 rounded-[5px] text-[11px] font-mono font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer bg-[#45AFFF]/15 hover:bg-[#45AFFF]/30 text-[#45AFFF] border border-[#45AFFF]/40 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Download className="w-3.5 h-3.5" />
+                {t("volar.campaign_send_btn")}
+              </button>
             </div>
           </div>
-          {weekWarning && (
-            <p className="text-[11px] font-mono text-amber-400 font-bold">{weekWarning}</p>
+
+          {campaigns === null ? (
+            <div className="flex items-center justify-center py-6">
+              <Loader2 className="w-5 h-5 text-[#E68B00] animate-spin" />
+            </div>
+          ) : campaignError ? (
+            <p className="py-4 px-3 text-center text-[11px] font-mono text-red-300">
+              {campaignError}
+            </p>
+          ) : campaigns.length === 0 ? (
+            <p className="py-4 px-3 text-center text-[11px] font-mono text-white/40 italic">
+              {t("volar.campaign_empty")}
+            </p>
+          ) : (
+            <div className="space-y-4">
+              {campaigns.map((campaign) => (
+                <div key={campaign.id} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+                  {/* Columna 1: resumen de la campaña */}
+                  <div className="relative bg-black/25 border border-[#E68B00]/40 rounded-[5px] overflow-hidden flex flex-col">
+                    <button
+                      type="button"
+                      onClick={() => setZoomed({ kind: "campaign", campaign })}
+                      title={t("volar.campaign_zoom")}
+                      aria-label={t("volar.campaign_zoom")}
+                      className="absolute top-2 right-2 z-10 bg-black/60 hover:bg-black/80 border border-white/15 rounded-[4px] p-1.5 text-white/70 hover:text-white transition-colors cursor-pointer"
+                    >
+                      <Maximize2 className="w-3.5 h-3.5" />
+                    </button>
+                    {campaign.imageUrl && (
+                      <img
+                        src={campaign.imageUrl}
+                        alt={campaign.title}
+                        loading="lazy"
+                        className="w-full h-32 object-cover"
+                        onError={(e) => {
+                          (e.target as HTMLImageElement).style.display = "none";
+                        }}
+                      />
+                    )}
+                    <div className="p-4 flex flex-col gap-1.5">
+                      <div className="text-sm font-sans font-black text-white uppercase">
+                        {campaign.title}
+                      </div>
+                      <p className="text-[11px] font-sans text-white/60 leading-relaxed">
+                        {campaign.description}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Columnas 2-4: vuelos seleccionables de la campaña */}
+                  {campaign.flights.map((flight) => {
+                    const isSelected = selectedCampaignFlightId === flight.id;
+                    const logo = getAirlineLogo(flight.airlineCode) ?? getGenericAirlineLogo();
+                    return (
+                    <div
+                      key={flight.id}
+                      role="button"
+                      tabIndex={0}
+                      aria-pressed={isSelected}
+                      title={flight.originIcao + " → " + flight.destinationIcao}
+                      onClick={() => {
+                        setSelectedCampaignFlightId(isSelected ? null : flight.id);
+                        setCampaignError(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setSelectedCampaignFlightId(isSelected ? null : flight.id);
+                          setCampaignError(null);
+                        }
+                      }}
+                      className={`relative bg-black/25 rounded-[5px] p-4 transition-all flex flex-col justify-between gap-3 cursor-pointer border ${
+                        isSelected
+                          ? "border-[#E68B00] ring-1 ring-[#E68B00]/60 shadow-[0_0_15px_rgba(230,139,0,0.25)]"
+                          : "border-white/10 hover:border-[#E68B00]/45"
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setZoomed({ kind: "flight", flight });
+                        }}
+                        onKeyDown={(e) => e.stopPropagation()}
+                        title={t("volar.campaign_zoom")}
+                        aria-label={t("volar.campaign_zoom")}
+                        className="absolute top-2 right-2 z-10 bg-black/60 hover:bg-black/80 border border-white/15 rounded-[4px] p-1.5 text-white/70 hover:text-white transition-colors cursor-pointer"
+                      >
+                        <Maximize2 className="w-3.5 h-3.5" />
+                      </button>
+                      <div className="space-y-2.5 pr-7">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="text-[13px] font-mono font-extrabold text-[#45AFFF]">
+                              {flight.originIcao} → {flight.destinationIcao}
+                            </div>
+                            {(flight.originName || flight.destinationName) && (
+                              <div className="text-[10px] font-sans text-white/45 leading-snug mt-0.5">
+                                {flight.originName || flight.originIcao}
+                                {" → "}
+                                {flight.destinationName || flight.destinationIcao}
+                              </div>
+                            )}
+                          </div>
+                          <span className="shrink-0 inline-flex items-center gap-1 bg-[#43E600]/10 border border-[#43E600]/40 rounded-[4px] px-2 py-1 font-mono font-extrabold text-[11px] text-[#43E600] whitespace-nowrap">
+                            <Sparkles className="w-3 h-3" />
+                            {formatMultiplier(flight.xpMultiplier)} XP
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 bg-black/20 border border-white/5 rounded-[4px] px-2 py-1.5">
+                          <span className="flex items-center justify-center bg-white rounded-[4px] h-12 w-12 p-1 shrink-0">
+                            <img
+                              src={logo}
+                              alt={flight.airlineName || flight.airlineCode}
+                              loading="lazy"
+                              className="max-h-full max-w-full object-contain block"
+                              onError={(e) => {
+                                const img = e.target as HTMLImageElement;
+                                if (img.src !== getGenericAirlineLogo()) img.src = getGenericAirlineLogo();
+                              }}
+                            />
+                          </span>
+                          <div className="min-w-0">
+                            <div className="text-[11px] font-sans font-bold text-white/90 truncate">
+                              {flight.airlineName || flight.airlineCode || "—"}
+                            </div>
+                            {(flight.airlineCode || flight.flightNumber) && (
+                              <div className="text-[10px] font-mono text-white/45">
+                                {flight.airlineCode}{flight.flightNumber ? ` ${flight.flightNumber}` : ""}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 bg-black/20 border border-white/5 rounded-[4px] px-2 py-1.5">
+                          <span className="flex items-center justify-center bg-white rounded-[4px] h-12 w-12 p-1 shrink-0">
+                            <img
+                              src={getAircraftSilhouette(flight.aircraftCategory || flight.aircraftIcao)}
+                              alt={flight.aircraftName || flight.aircraftIcao}
+                              loading="lazy"
+                              className="max-h-full max-w-full object-contain block"
+                            />
+                          </span>
+                          <div className="min-w-0">
+                            <div className="text-[11px] font-sans font-bold text-white/90 truncate">
+                              {flight.aircraftName || flight.aircraftIcao || "—"}
+                            </div>
+                            {flight.aircraftName && flight.aircraftIcao && (
+                              <div className="text-[10px] font-mono text-white/45">
+                                {flight.aircraftIcao}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        {flight.description && (
+                          <p className="text-[11px] font-sans text-white/60 leading-relaxed">
+                            {flight.description}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
           )}
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            {WEEK_CARDS.map((card) => {
-              const isSelected = selectedWeekId === card.id;
-              return (
+          {/* Popup de lectura: tarjeta maximizada */}
+          {zoomed && (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 animate-fadeIn"
+              onClick={() => setZoomed(null)}
+              role="dialog"
+              aria-modal="true"
+            >
               <div
-                key={card.id}
-                role="button"
-                tabIndex={0}
-                aria-pressed={isSelected}
-                title={t("volar.week_no_selection")}
-                onClick={() => {
-                  setSelectedWeekId(isSelected ? null : card.id);
-                  setWeekWarning(null);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    setSelectedWeekId(isSelected ? null : card.id);
-                    setWeekWarning(null);
-                  }
-                }}
-                className={`bg-black/25 rounded-[5px] p-4 transition-all flex flex-col justify-between gap-3 cursor-pointer border ${
-                  isSelected
-                    ? "border-[#E68B00] ring-1 ring-[#E68B00]/60 shadow-[0_0_15px_rgba(230,139,0,0.25)]"
-                    : "border-white/10 hover:border-[#E68B00]/45"
-                }`}
+                className="w-full max-w-2xl max-h-[85vh] overflow-y-auto bg-[#00172e] border border-[#3B7EB2]/50 rounded-[8px] shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
               >
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <div className="text-sm font-sans font-black text-white uppercase">
-                      {t(`volar.${card.titleKey}`)}
-                    </div>
-                    <div className="text-[11px] font-mono font-bold text-[#45AFFF] mt-0.5">
-                      {t(`volar.${card.routeKey}`)}
-                    </div>
-                    <p className="text-[11px] font-sans text-white/60 leading-relaxed mt-1.5">
-                      {t(`volar.${card.descKey}`)}
-                    </p>
-                  </div>
-                  <span className="shrink-0 inline-flex items-center gap-1 bg-[#43E600]/10 border border-[#43E600]/40 rounded-[4px] px-2 py-1 font-mono font-extrabold text-[11px] text-[#43E600] whitespace-nowrap">
-                    <Sparkles className="w-3 h-3" />
-                    {t(`volar.${card.bonusKey}`)}
-                  </span>
+                <div className="flex items-center justify-between gap-3 border-b border-white/10 px-6 py-4">
+                  <h4 className="font-display font-bold text-lg text-white uppercase">
+                    {zoomed.kind === "campaign"
+                      ? zoomed.campaign.title
+                      : `${zoomed.flight.originIcao} → ${zoomed.flight.destinationIcao}`}
+                  </h4>
+                  <button
+                    type="button"
+                    onClick={() => setZoomed(null)}
+                    title={t("volar.campaign_close")}
+                    aria-label={t("volar.campaign_close")}
+                    className="bg-white/5 hover:bg-white/15 border border-white/10 rounded-[4px] p-2 text-white/70 hover:text-white transition-colors cursor-pointer shrink-0"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="px-6 py-5 space-y-5">
+                  {zoomed.kind === "campaign" ? (
+                    <>
+                      {zoomed.campaign.imageUrl && (
+                        <img
+                          src={zoomed.campaign.imageUrl}
+                          alt={zoomed.campaign.title}
+                          className="w-full h-56 object-cover rounded-[5px]"
+                          onError={(e) => {
+                            (e.target as HTMLImageElement).style.display = "none";
+                          }}
+                        />
+                      )}
+                      <p className="text-sm font-sans text-white/75 leading-relaxed">
+                        {zoomed.campaign.description}
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="text-2xl font-mono font-extrabold text-[#45AFFF]">
+                            {zoomed.flight.originIcao} → {zoomed.flight.destinationIcao}
+                          </div>
+                          {(zoomed.flight.originName || zoomed.flight.destinationName) && (
+                            <div className="text-sm font-sans text-white/55 mt-1">
+                              {zoomed.flight.originName || zoomed.flight.originIcao}
+                              {" → "}
+                              {zoomed.flight.destinationName || zoomed.flight.destinationIcao}
+                            </div>
+                          )}
+                        </div>
+                        <span className="inline-flex items-center gap-1.5 bg-[#43E600]/10 border border-[#43E600]/40 rounded-[4px] px-3 py-1.5 font-mono font-extrabold text-sm text-[#43E600] whitespace-nowrap">
+                          <Sparkles className="w-4 h-4" />
+                          {formatMultiplier(zoomed.flight.xpMultiplier)} XP
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-3 bg-black/20 border border-white/5 rounded-[5px] px-3 py-2.5">
+                        <span className="flex items-center justify-center bg-white rounded-[4px] h-20 w-20 p-1.5 shrink-0">
+                          <img
+                            src={getAirlineLogo(zoomed.flight.airlineCode) ?? getGenericAirlineLogo()}
+                            alt={zoomed.flight.airlineName || zoomed.flight.airlineCode}
+                            className="max-h-full max-w-full object-contain block"
+                            onError={(e) => {
+                              const img = e.target as HTMLImageElement;
+                              if (img.src !== getGenericAirlineLogo()) img.src = getGenericAirlineLogo();
+                            }}
+                          />
+                        </span>
+                        <div>
+                          <div className="text-base font-sans font-bold text-white">
+                            {zoomed.flight.airlineName || zoomed.flight.airlineCode || "—"}
+                          </div>
+                          {(zoomed.flight.airlineCode || zoomed.flight.flightNumber) && (
+                            <div className="text-xs font-mono text-white/50">
+                              {zoomed.flight.airlineCode}{zoomed.flight.flightNumber ? ` ${zoomed.flight.flightNumber}` : ""}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3 bg-black/20 border border-white/5 rounded-[5px] px-3 py-2.5">
+                        <span className="flex items-center justify-center bg-white rounded-[4px] h-20 w-20 p-1.5 shrink-0">
+                          <img
+                            src={getAircraftSilhouette(zoomed.flight.aircraftCategory || zoomed.flight.aircraftIcao)}
+                            alt={zoomed.flight.aircraftName || zoomed.flight.aircraftIcao}
+                            className="max-h-full max-w-full object-contain block"
+                          />
+                        </span>
+                        <div>
+                          <div className="text-base font-sans font-bold text-white">
+                            {zoomed.flight.aircraftName || zoomed.flight.aircraftIcao || "—"}
+                          </div>
+                          {zoomed.flight.aircraftName && zoomed.flight.aircraftIcao && (
+                            <div className="text-xs font-mono text-white/50">
+                              {zoomed.flight.aircraftIcao}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      {zoomed.flight.description && (
+                        <p className="text-sm font-sans text-white/75 leading-relaxed">
+                          {zoomed.flight.description}
+                        </p>
+                      )}
+                    </>
+                  )}
+                </div>
+                <div className="flex justify-end border-t border-white/10 px-6 py-4">
+                  <button
+                    type="button"
+                    onClick={() => setZoomed(null)}
+                    className="px-6 py-2.5 rounded-[5px] text-xs font-mono font-bold transition-all cursor-pointer bg-white/5 hover:bg-white/15 text-white/80 border border-white/10"
+                  >
+                    {t("volar.campaign_close")}
+                  </button>
                 </div>
               </div>
-              );
-            })}
-          </div>
+            </div>
+          )}
         </section>
 
         {/* Segundo (100%): Rutas Reales — acciones en el título, boxes de filtros, grilla debajo */}
@@ -633,7 +917,11 @@ export default function FlightSelectView({
                 {selectedRoute && (
                   <p className="text-[11px] font-mono text-[#43E600]">
                     {t("volar.selected_route")} {selectedRoute.originCode} → {selectedRoute.destCode}
-                    {" · "}{selectedRoute.airlineName} · {selectedRoute.equipment}
+                    {" · "}{selectedRoute.airlineName}
+                    {(selectedRoute.airlineIcao || selectedRoute.airlineIata) && (
+                      <span> ({selectedRoute.airlineIcao || selectedRoute.airlineIata})</span>
+                    )}
+                    {" · "}{selectedRoute.equipment}
                     {isResolvingIcao ? (
                       <span className="text-white/40"> → …</span>
                     ) : (

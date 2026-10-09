@@ -160,7 +160,48 @@ const AIRPORT_TIMEZONES: Record<string, string> = {
 
 export function getAirportTimezone(icao: string): string {
   const key = (icao || "").toUpperCase().trim();
-  return AIRPORT_TIMEZONES[key] || "UTC";
+  const tz = AIRPORT_TIMEZONES[key];
+  if (!tz && key !== "") {
+    // Sin entrada: se devuelve UTC, lo que deja las horas "locales" en UTC.
+    // Si un aeropuerto real cae acá, agregarlo al mapa (no hay fuente
+    // remota de timezones: `airports` no trae esa columna).
+    console.warn(`[airportMapping] Sin timezone para ${key}, usando UTC`);
+  }
+  return tz || "UTC";
+}
+
+/**
+ * HH:MM local de un timestamp UTC: primero IANA (con DST), si no offset en
+ * horas decimales (`of_airports.timezone_offset`), si no null (el llamador
+ * aplica su fallback, típicamente la hora UTC).
+ */
+export function formatLocalHHMM(
+  tsSeconds: number,
+  iana: string | null,
+  offsetHours: number | null
+): string | null {
+  if (!Number.isFinite(tsSeconds) || tsSeconds <= 0) return null;
+  if (iana) {
+    try {
+      return new Date(tsSeconds * 1000).toLocaleTimeString("es-ES", {
+        hour: "2-digit",
+        minute: "2-digit",
+        timeZone: iana,
+        hour12: false,
+      });
+    } catch {
+      // IANA inválido: cae al offset.
+    }
+  }
+  if (typeof offsetHours === "number" && Number.isFinite(offsetHours)) {
+    return new Date((tsSeconds + offsetHours * 3600) * 1000).toLocaleTimeString("es-ES", {
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZone: "UTC",
+      hour12: false,
+    });
+  }
+  return null;
 }
 
 export function parseMETAR(metar: string): { temperature: string; windSpeed: string; windGust: string; windDir: string } {

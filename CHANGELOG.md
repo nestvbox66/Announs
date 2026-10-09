@@ -5,6 +5,31 @@ Todas las modificaciones notables de este proyecto se documentarán en este arch
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/),
 y este proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0-alpha] - 2026-10-09
+
+### Añadido
+- Sistema de paquetes comunitarios: catálogo Supabase (`20261006_packages_catalog`),
+  `PackagesService`, pestaña `PackagesTab` con `CommunityPackSelector`,
+  `PackageCard`, `PackagePreviewModal` y `UploadPackageModal`, más caché local
+  de paquetes.
+- Packs de audio de embarque y vídeos de seguridad: `BoardingAudioPackService`,
+  `SafetyVideoPackService`, selectores (`BoardingAudioPackSelector`,
+  `SafetyVideoPackSelector`) y migraciones `20261003_flight_audio_deliveries`,
+  `20261004_flight_audio_deliveries_voice`, `20261007_boarding_pace`,
+  `20261008_boarding_music_source`.
+- Políticas de Storage para avatares (`20261005_storage_avatars_policy`,
+  servicio `avatarUrl` + firma RPC `rpcSignature`) y vista de administración/
+  gestión de paquetes.
+- Integración IFE + vídeo de seguridad: `IfeScreen`, `IfeChrome`, `IfeMenu`,
+  `IfeWelcome`, `IfeSafetyVideo`, `IfeFlightMapView`, `ManifestAccordion` y
+  fondos `FondoIFE.jpg` / `FondoIFE2.jpg`.
+- Motor de pasajeros y campaña: `PassengerEngine` (arquetipos, turbulencia,
+  mapa de efectos), `PassengerStatusPanel`, `CampaignService`,
+  `CampaignFlightsView` y XP (`20260929_campaign_xp`,
+  `20261002_passenger_satisfaction_xp`, script `verify:passenger`).
+- Preferencias de distorsión musical: migración `20261007_music_distortion` y
+  `MusicDistortionPreview`.
+
 ## [0.9.0-alpha] - 2026-09-28
 
 ### Añadido

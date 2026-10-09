@@ -20,6 +20,9 @@ import { musicCacheService } from "./MusicCacheService";
 /** Identificador especial para "música al azar" en los selectores. */
 export const RANDOM_MUSIC_ID = "random";
 
+/** Id interno cuando suena el audio de la comunidad (fuente pack). */
+const COMMUNITY_PACK_TRACK_ID = "community-pack";
+
 export type MusicState =
   | "idle"
   | "loading"
@@ -62,6 +65,17 @@ export class MusicController {
   private selectedTrackId: string | null = null;
   private enabled = true;
   private currentTrackId: string | null = null;
+  /**
+   * URL del audio de la comunidad (fuente pack, cacheada o remota). Si está
+   * presente, suena en lugar de la pista del catálogo (mismo loop/ducking).
+   */
+  private packageUrl: string | null = null;
+  /**
+   * Versión a reproducir: procesada del backend (`processed_url`, con efectos
+   * de cabina) o limpia (`clean_url`). Lo gobierna el selector de Settings
+   * ("Efecto de distorsión en música de embarque", default: procesada).
+   */
+  private useProcessedAudio = true;
 
   /** true mientras un anuncio está en reproducción (música silenciada). */
   private ducking = false;
@@ -76,10 +90,19 @@ export class MusicController {
     tracks?: BoardingMusicTrack[];
     selectedTrackId?: string | null;
     enabled?: boolean;
+    /** true = `processed_url` del backend; false = `clean_url`. Default true. */
+    useProcessedAudio?: boolean;
+    /**
+     * Audio de la comunidad (fuente pack): si se provee, suena en lugar de la
+     * pista del catálogo. null = usar catálogo.
+     */
+    packageUrl?: string | null;
   }): void {
     if (options.tracks !== undefined) this.tracks = options.tracks;
     if (options.selectedTrackId !== undefined) this.selectedTrackId = options.selectedTrackId;
     if (options.enabled !== undefined) this.enabled = options.enabled;
+    if (options.useProcessedAudio !== undefined) this.useProcessedAudio = options.useProcessedAudio;
+    if (options.packageUrl !== undefined) this.packageUrl = options.packageUrl;
     // Si se deshabilitó la música mientras sonaba, detenerla (fade out).
     if (
       !this.enabled &&
@@ -140,21 +163,24 @@ export class MusicController {
     const token = this.loadToken;
     this.cancelFade();
 
-    if (!this.enabled || this.tracks.length === 0) {
+    if (!this.enabled) {
       this.stopImmediate();
       return;
     }
 
-    const track = this.resolveTrack();
-    if (!track) {
+    // Fuente pack: audio de la comunidad (URL inyectada); si no, catálogo.
+    const packageUrl = this.packageUrl ?? null;
+    const track = packageUrl ? null : this.resolveTrack();
+    if (!packageUrl && (this.tracks.length === 0 || !track)) {
       this.stopImmediate();
       return;
     }
+    const effectiveId = packageUrl ? COMMUNITY_PACK_TRACK_ID : track!.id;
 
-    // Misma pista ya sonando o en pausa → restaurar volumen.
+    // Mismo audio ya sonando o en pausa → restaurar volumen.
     if (
       this.audio &&
-      this.currentTrackId === track.id &&
+      this.currentTrackId === effectiveId &&
       (this.state === "playing" || this.state === "paused")
     ) {
       if (this.state === "paused" && this.audio.paused) {
@@ -169,7 +195,7 @@ export class MusicController {
     this.cleanupAudio();
     this.setState("loading");
 
-    const url = track.processedUrl ?? track.previewUrl ?? track.cleanUrl;
+    const url = packageUrl ?? this.resolveTrackUrl(track!);
     if (!url) {
       this.setState("error");
       return;
@@ -198,7 +224,7 @@ export class MusicController {
 
       this.audio = audio;
       this.blobUrl = blobUrl;
-      this.currentTrackId = track.id;
+      this.currentTrackId = effectiveId;
 
       await audio.play();
       if (token !== this.loadToken) return;
@@ -271,6 +297,18 @@ export class MusicController {
       return this.tracks[idx];
     }
     return this.tracks.find((t) => t.id === this.selectedTrackId) ?? null;
+  }
+
+  /**
+   * URL a reproducir según el selector de Settings: versión procesada del
+   * backend (`processed_url`) o limpia (`clean_url`), con fallbacks si la
+   * elegida no existe en la pista.
+   */
+  private resolveTrackUrl(track: BoardingMusicTrack): string | null {
+    if (this.useProcessedAudio) {
+      return track.processedUrl ?? track.previewUrl ?? track.cleanUrl ?? null;
+    }
+    return track.cleanUrl ?? track.previewUrl ?? track.processedUrl ?? null;
   }
 
   private setVolume(value: number): void {

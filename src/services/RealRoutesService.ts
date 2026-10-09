@@ -38,6 +38,8 @@ export interface RealRouteResult {
   airlineName: string;
   /** ICAO de la aerolínea para SimBrief ("" si no es utilizable). */
   airlineIcao: string;
+  /** IATA de la aerolínea (2 letras), fallback si no hay ICAO válido. */
+  airlineIata: string;
   originCode: string;
   originName: string;
   originCity: string;
@@ -139,15 +141,36 @@ function escapeIlike(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 }
 
+/** Códigos placeholder que nunca son válidos (aunque pasen el formato). */
+const PLACEHOLDER_CODES = new Set(["NA", "N/A", "-", "--", "UNK", "NUL", "TBA"]);
+
 /** ICAO de aerolínea válido para SimBrief (2-3 alfanuméricos; "" si no sirve). */
 function sanitizeAirlineIcao(raw: unknown): string {
   const code = String(raw ?? "").trim().toUpperCase();
+  if (PLACEHOLDER_CODES.has(code)) return "";
   return /^[A-Z0-9]{2,3}$/.test(code) ? code : "";
+}
+
+/** IATA de aerolínea (2 alfanuméricos; "" si no sirve). Fallback ante ICAO ausente. */
+function sanitizeAirlineIata(raw: unknown): string {
+  const code = String(raw ?? "").trim().toUpperCase();
+  if (PLACEHOLDER_CODES.has(code)) return "";
+  return /^[A-Z0-9]{2}$/.test(code) ? code : "";
 }
 
 /** Código de aeropuerto válido para SimBrief (3-4 alfanuméricos). */
 function isUsableAirportCode(code: string): boolean {
   return /^[A-Z0-9]{3,4}$/.test((code ?? "").trim().toUpperCase());
+}
+
+/**
+ * Genera un número de vuelo aleatorio de 3-4 dígitos (100-9999) para los
+ * envíos a SimBrief de vuelos basados en ruta real (`of_routes` no trae
+ * número de vuelo). Evita que el despacho se genere como `0000` cuando el
+ * usuario no lo modifica manualmente en SimBrief.
+ */
+export function randomFlightNumber(): string {
+  return String(100 + Math.floor(Math.random() * 9900));
 }
 
 /**
@@ -195,21 +218,48 @@ export async function resolveAircraftIcao(equipment: string): Promise<string> {
  *
  * `equipment` debe ser el código ICAO de la aeronave (ej. "B738"); usar
  * `resolveAircraftIcao()` para traducir el formato IATA de `of_routes`.
+ * Aerolínea: se envía el ICAO (3 letras); si no hay uno válido (288
+ * aerolíneas en `of_airlines` tienen `icao` NULL o placeholder), se usa el
+ * IATA (2 letras) como fallback antes de omitir el parámetro.
  */
 export function buildSimbriefDispatchUrl(route: {
   originCode: string;
   destCode: string;
   airlineIcao: string;
+  airlineIata?: string;
   equipment: string;
+  /** N° de vuelo (se combina con la aerolínea). Opcional. */
+  flightNumber?: string;
+  /** Fecha de partida SimBrief (DDMMMYY). Opcional. */
+  date?: string;
+  /** Hora de partida (0-23). Opcional. */
+  depHour?: string;
+  /** Minuto de partida (00-59). Opcional. */
+  depMinute?: string;
 }): string {
   const params = new URLSearchParams();
   if (isUsableAirportCode(route.originCode)) params.set("orig", route.originCode.trim().toUpperCase());
   if (isUsableAirportCode(route.destCode)) params.set("dest", route.destCode.trim().toUpperCase());
-  if (sanitizeAirlineIcao(route.airlineIcao) !== "") {
-    params.set("airline", sanitizeAirlineIcao(route.airlineIcao));
+  // Aerolínea: ICAO primero, IATA como fallback (mejor que omitir).
+  const airline = sanitizeAirlineIcao(route.airlineIcao) !== ""
+    ? sanitizeAirlineIcao(route.airlineIcao)
+    : sanitizeAirlineIata(route.airlineIata ?? "");
+  if (airline !== "") {
+    params.set("airline", airline);
   }
   const type = splitEquipmentTokens(route.equipment)[0] ?? "";
   if (/^[A-Z0-9]{2,4}$/.test(type)) params.set("type", type);
+  // Campos opcionales (vuelos de campaña): n° de vuelo y fecha/hora.
+  const fltnum = (route.flightNumber ?? "").trim().toUpperCase();
+  if (/^[A-Z0-9]{1,4}$/.test(fltnum)) params.set("fltnum", fltnum);
+  const date = (route.date ?? "").trim().toUpperCase();
+  if (/^\d{2}[A-Z]{3}\d{2}$/.test(date)) params.set("date", date);
+  const deph = Number(route.depHour ?? "");
+  if (Number.isInteger(deph) && deph >= 0 && deph <= 23) params.set("deph", String(deph));
+  const depm = Number(route.depMinute ?? "");
+  if (Number.isInteger(depm) && depm >= 0 && depm <= 59) {
+    params.set("depm", String(depm).padStart(2, "0"));
+  }
   return `https://dispatch.simbrief.com/options/custom?${params.toString()}`;
 }
 
@@ -322,7 +372,7 @@ export async function searchRealRoutes(
     const airlineIdList = Array.from(new Set(routes.map((r) => String(r.airline_id))));
     const [airportsRes, airlinesRes] = await Promise.all([
       supabase.from("of_airports").select("airport_id, icao, iata, name, city").in("airport_id", airportIds),
-      supabase.from("of_airlines").select("airline_id, name, icao").in("airline_id", airlineIdList),
+      supabase.from("of_airlines").select("airline_id, name, iata, icao").in("airline_id", airlineIdList),
     ]);
     if (airportsRes.error) return fail(airportsRes.error.message);
     if (airlinesRes.error) return fail(airlinesRes.error.message);
@@ -338,11 +388,12 @@ export async function searchRealRoutes(
       ])
     );
     const airlineById = new Map(
-      ((airlinesRes.data ?? []) as Array<{ airline_id: unknown; name: unknown; icao: unknown }>).map((a) => [
+      ((airlinesRes.data ?? []) as Array<{ airline_id: unknown; name: unknown; iata: unknown; icao: unknown }>).map((a) => [
         String(a.airline_id),
         {
           name: String(a.name ?? "").trim() || "—",
           icao: sanitizeAirlineIcao(a.icao),
+          iata: sanitizeAirlineIata(a.iata),
         },
       ])
     );
@@ -351,10 +402,11 @@ export async function searchRealRoutes(
       routes.map((r) => {
         const origin = airportById.get(String(r.source_airport_id)) ?? { code: "—", name: "—", city: "" };
         const dest = airportById.get(String(r.destination_airport_id)) ?? { code: "—", name: "—", city: "" };
-        const airline = airlineById.get(String(r.airline_id)) ?? { name: "—", icao: "" };
+        const airline = airlineById.get(String(r.airline_id)) ?? { name: "—", icao: "", iata: "" };
         return {
           airlineName: airline.name,
           airlineIcao: airline.icao,
+          airlineIata: airline.iata,
           originCode: origin.code,
           originName: origin.name,
           originCity: origin.city,

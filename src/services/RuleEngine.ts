@@ -24,8 +24,7 @@ export type RuleAction = AnnouncementAction | TimerAction;
 type WaitDetailRow = { label: string; ok: boolean | null; value: string };
 
 /** AND de los checks evaluables; null si ninguno tiene dato. */
-function andOk(rows: WaitDetailRow[]): boolean | null {
-  let saw = false;
+function andOk(rows: WaitDetailRow[]): boolean | null {  let saw = false;
   for (const r of rows) {
     if (r.ok === null || r.ok === undefined) continue;
     saw = true;
@@ -44,9 +43,17 @@ function safeJson(v: unknown): string {
   }
 }
 
+/**
+ * Tolerancia de sanidad para la distancia restante al destino: si el
+ * Haversine supera FACTOR × distancia total, se considera dato corrupto
+ * (coords de un lado) y se usa el fallback por tiempo en vez de clavar
+ * progreso 0 / faltante 1 (incidente 2026-10-03: Dist Dest 8000+ NM con
+ * total 589 NM bloqueó `cruise_progress` para siempre).
+ */
+export const CRUISE_DISTANCE_SANITY_FACTOR = 1.5;
+
 export class RuleEngine {
   private timerCounter = 0;
-
   // Compatibilidad con spec: permite inyección opcional para isDelayThresholdExceeded sin parámetro
   private flightContext?: FlightContext;
   private eventCatalog: typeof EventCatalogService = EventCatalogService as any;
@@ -268,6 +275,12 @@ export class RuleEngine {
    * `getDistanceToDestination()` (Haversine posición→destino). Sin datos de
    * distancia se usa el fallback legacy por tiempo (cruiseEntryTime /
    * cruiseTimeSeconds vs zuluTime). Fuera de CRUISE o sin datos devuelve 0.
+   *
+   * Defensa (incidente 2026-10-03): si la distancia restante supera 1.5× el
+   * total (coords corruptas de un lado —p. ej. destino mal resuelto— o desvío
+   * extremo), la vía por distancia se clava en progreso 0 / faltante 1 para
+   * siempre y bloquea los eventos `cruise_progress`. En ese caso se prefiere
+   * el fallback por tiempo cuando hay datos, y se loguea WARN para el log.
    */
   public getCruiseProgress(context?: FlightContext): number {
     const ctx: FlightContext | undefined = context ?? this.flightContext;
@@ -312,7 +325,11 @@ export class RuleEngine {
     const totalNum = Number(flight.totalDistanceNm);
     if (flight.totalDistanceNm != null && !Number.isNaN(totalNum) && totalNum > 0) {
       const remaining = this.getDistanceToDestination(ctx);
-      if (Number.isFinite(remaining) && remaining >= 0) {
+      const sane =
+        Number.isFinite(remaining) &&
+        remaining >= 0 &&
+        remaining <= totalNum * CRUISE_DISTANCE_SANITY_FACTOR;
+      if (sane) {
         const progress = 1 - remaining / totalNum;
         logger.ruleEvaluation('getCruiseProgress cálculo (distancia):', {
           remainingNm: remaining,
@@ -321,19 +338,25 @@ export class RuleEngine {
         });
         return Math.min(Math.max(progress, 0), 1);
       }
-      logger.ruleEvaluation('getCruiseProgress: sin posición/destino para distancia', {
+      // Distancia ausente o físicamente inverosímil: no clavarse en 0,
+      // intentar el fallback por tiempo (misma fuente que sin SimBrief).
+      logger.ruleEvaluation('getCruiseProgress: distancia no sane, fallback por tiempo', {
+        remainingNm: remaining,
         totalDistanceNm: totalNum,
       });
+      const byTime = this.getCruiseTimeProgress(flight, telemetry);
+      if (byTime !== null) return byTime;
+      if (!Number.isFinite(remaining) || remaining < 0) {
+        logger.ruleEvaluation('getCruiseProgress: sin posición/destino para distancia', {
+          totalDistanceNm: totalNum,
+        });
+      }
       return 0;
     }
 
     // Fallback legacy por tiempo (compatibilidad sin SimBrief/distancia).
-    const entryNum = Number(flight.cruiseEntryTime);
-    const totalTimeNum = Number(flight.cruiseTimeSeconds);
-    if (
-      flight.cruiseTimeSeconds == null || flight.cruiseEntryTime == null ||
-      Number.isNaN(totalTimeNum) || Number.isNaN(entryNum) || totalTimeNum <= 0
-    ) {
+    const byTime = this.getCruiseTimeProgress(flight, telemetry);
+    if (byTime === null) {
       logger.ruleEvaluation('getCruiseProgress: faltan datos', {
         totalDistanceNm: flight.totalDistanceNm,
         cruiseTimeSeconds: flight.cruiseTimeSeconds,
@@ -341,11 +364,27 @@ export class RuleEngine {
       });
       return 0;
     }
+    return byTime;
+  }
+
+  /**
+   * Progreso del crucero por tiempo: (zulu - cruiseEntryTime) / cruiseTimeSeconds,
+   * con wrap de medianoche. null si faltan datos (el llamador decide el default).
+   */
+  private getCruiseTimeProgress(flight: any, telemetry: any): number | null {
+    const entryNum = Number(flight.cruiseEntryTime);
+    const totalTimeNum = Number(flight.cruiseTimeSeconds);
+    if (
+      flight.cruiseTimeSeconds == null || flight.cruiseEntryTime == null ||
+      Number.isNaN(totalTimeNum) || Number.isNaN(entryNum) || totalTimeNum <= 0
+    ) {
+      return null;
+    }
 
     const zuluTime = Number(telemetry.zuluTime ?? telemetry.zulu_time);
     const entry = entryNum;
     const total = totalTimeNum;
-    if (Number.isNaN(zuluTime) || total <= 0) return 0;
+    if (Number.isNaN(zuluTime) || total <= 0) return null;
 
     let elapsed = zuluTime - entry;
     // Wrap de medianoche: zuluTime son segundos del día UTC (0-86400). Si el
@@ -369,6 +408,8 @@ export class RuleEngine {
    *   faltante = distancia_restante / distancia_total.
    * Sin distancia total devuelve 1 (nada consumido). Los eventos con
    * `max_remaining` disparan cuando faltante <= max_remaining.
+   * Misma defensa que getCruiseProgress: distancia inverosímil (>1.5× total)
+   * usa el fallback por tiempo; sin tiempo, 1 como antes.
    */
   public getCruiseProgressRemaining(context?: FlightContext): number {
     const ctx: FlightContext | undefined = context ?? this.flightContext;
@@ -377,8 +418,18 @@ export class RuleEngine {
     const totalNum = Number(flight.totalDistanceNm);
     if (flight.totalDistanceNm == null || Number.isNaN(totalNum) || totalNum <= 0) return 1;
     const remaining = this.getDistanceToDestination(ctx);
+    if (
+      Number.isFinite(remaining) &&
+      remaining >= 0 &&
+      remaining <= totalNum * CRUISE_DISTANCE_SANITY_FACTOR
+    ) {
+      return Math.min(remaining / totalNum, 1);
+    }
+    const telemetry: any = ctx.getTelemetry?.() ?? {};
+    const byTime = this.getCruiseTimeProgress(flight, telemetry);
+    if (byTime !== null) return Math.min(Math.max(1 - byTime, 0), 1);
     if (!Number.isFinite(remaining) || remaining < 0) return 1;
-    return Math.min(remaining / totalNum, 1);
+    return 1;
   }
 
   /**
@@ -483,6 +534,9 @@ export class RuleEngine {
    * Sin coordenadas devuelve NaN (desconocido), NO 0: 0 significaría "en
    * destino" y dispararía reglas tipo DISTANCE_TO_DESTINATION <= 70 a ciegas.
    * Los llamadores tratan NaN como "sin dato" (isFinite / || 0 en display).
+   * Coordenadas fuera de rango (±90 lat, ±180 lon) también dan NaN: son
+   * valores corruptos de un lado (p. ej. altitud como latitud) y un Haversine
+   * con ellos devuelve miles de NM que clavan el progreso en 0.
    */
   public getDistanceToDestination(context?: FlightContext): number {
     const ctx: FlightContext | undefined = context ?? this.flightContext;
@@ -497,6 +551,8 @@ export class RuleEngine {
     if ([lat1d, lon1d, lat2d, lon2d].some((v) => Number.isNaN(v))) return NaN;
     if (!lat1d && !lon1d) return NaN;
     if (!lat2d && !lon2d) return NaN;
+    if (Math.abs(lat1d) > 90 || Math.abs(lon1d) > 180) return NaN;
+    if (Math.abs(lat2d) > 90 || Math.abs(lon2d) > 180) return NaN;
 
     const R = 3440.065; // Radio de la Tierra en NM
     const lat1 = lat1d * Math.PI / 180;

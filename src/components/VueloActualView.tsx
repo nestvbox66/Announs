@@ -7,9 +7,9 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 import { useTranslation } from "react-i18next";
 import { supabase } from "../lib/supabase";
 import { generateManifest, getRegionFromICAO } from "../engine/PassengerManifest";
-import { getAirportName, parseMETAR, getAirportTimezone } from "../utils/airportMapping";
+import { getAirportName, parseMETAR, getAirportTimezone, formatLocalHHMM } from "../utils/airportMapping";
 import { getAirlineName } from "../utils/airlineMapping";
-import { getAirportByIcao, type CachedAirport } from "../services/airportService";
+import { getAirportByIcao, getAirportUtcOffsetHours, type CachedAirport } from "../services/airportService";
 import { useToast } from "./Toast";
 import { 
   Plane, 
@@ -72,9 +72,21 @@ import { FlightEventConfigService } from "../services/FlightEventConfigService";
 import { ScenarioConfigService } from "../services/ScenarioConfigService";
 import { FlightPathRecorder } from "../services/FlightPathRecorder";
 import { XpBonusTracker } from "../services/XpBonusTracker";
+import { PassengerEngine } from "../passengers/PassengerEngine";
+import {
+  TURBULENCE_DAMAGE,
+  TURBULENCE_FLASH_TEXT,
+  TURBULENCE_MITIGATED_FLASH_TEXT,
+  TurbulenceDetector,
+  type TurbulenceLevel,
+} from "../passengers/turbulence";
+import type { AttributeState, FlightPassengerSummary } from "../passengers/types";
+import { getEventEffects } from "../passengers/effectsMap";
 import {
   resolveHardAirportBonus,
   resolveWeatherSeverityBonus,
+  resolvePassengerBonus,
+  toPassengerAttributesSummary,
 } from "../services/FlightCompletionBonuses";
 import {
   explainXpBreakdown,
@@ -83,19 +95,50 @@ import {
   type XpCompletionSummary,
 } from "../services/XpBonusExplanations";
 import { FlightPathService } from "../services/FlightPathService";
+import {
+  findCampaignFlightMatch,
+  formatMultiplier,
+  loadActiveCampaigns,
+  type CampaignMatch,
+} from "../services/CampaignService";
 import { BoardingMusicService, BoardingMusicTrack } from "../services/BoardingMusicService";
 import { musicController, RANDOM_MUSIC_ID } from "../services/MusicController";
 import { fileLogger } from "../services/FileLogger";
 import { secondsToHHMM } from "../utils/timeUtils";
 import { isInternationalFlight, getCountryKey, resolveCruiseTimeSeconds, resolveTotalDistanceNm } from "../utils/flightUtils";
+import {
+  BOARDING_PACE_DEFAULT_PPM,
+  BOARDING_PACE_MAX_PPM,
+  BOARDING_PACE_MIN_PPM,
+  BOARDING_PACE_STORAGE_KEY,
+  boardingPaxPerTick,
+  clampBoardingPace,
+  estimateBoardingSeconds,
+  formatEtaMinSec,
+} from "../utils/flightUtils";
 import { getAircraftType } from "../services/aircraftService";
 import MusicPreview from "./music/MusicPreview";
+import PassengerStatusPanel from "./flight/PassengerStatusPanel";
+import IfeScreen from "./ife/IfeScreen";
+import ManifestAccordion from "./ife/ManifestAccordion";
+import SafetyVideoPackSelector from "./packages/SafetyVideoPackSelector";
+import BoardingAudioPackSelector from "./packages/BoardingAudioPackSelector";
+import { safetyVideoPackService } from "../services/SafetyVideoPackService";
+import {
+  BOARDING_AUDIO_PACKAGE_STORAGE_KEY,
+  BOARDING_AUDIO_SOURCE_STORAGE_KEY,
+  boardingAudioPackService,
+  toBoardingAudioSource,
+  type BoardingAudioSource,
+} from "../services/BoardingAudioPackService";
+import type { PackageRecord } from "../services/PackagesService";
+import { buildIfeFlightInfo, pickIfeGuest } from "./ife/IfeTypes";
 import type {
   ScenarioConfigSnapshot,
   ScenarioEventConfig,
   ScenarioOption,
 } from "../services/ScenarioConfigService";
-import { EVENT_CONFIG_FLAVOR_KEY, EVENT_CONFIG_PACKAGE_KEY, NORMAL_SCENARIO_KEY, EventSwitchValue, isConfigurableEvent, isEventSwitchValue } from "../services/eventConfigConstants";
+import { EVENT_CONFIG_FLAVOR_KEY, EVENT_CONFIG_PACKAGE_KEY, NORMAL_SCENARIO_KEY, SAFETY_VIDEO_EVENT_KEY, SAFETY_VIDEO_PACKAGE_STORAGE_KEY, EventSwitchValue, isConfigurableEvent, isEventSwitchValue } from "../services/eventConfigConstants";
 import {
   StepPendingEvent,
   StepExecutedEvent,
@@ -291,6 +334,23 @@ export default function VueloActualView({
   onNavigateToAccount
 }: VueloActualViewProps) {
   const { t } = useTranslation();
+  // Traduce los identificadores internos de sub-etapa (claves de lógica y
+  // `stageMockData`) sin renombrarlos, para no romper comparaciones de estado.
+  const tStage = (stage: string): string => {
+    const map: Record<string, string> = {
+      "No iniciado": "no_iniciado",
+      "Embarque": "embarque",
+      "Pre-vuelo": "pre_vuelo",
+      "Pre-Vuelo": "pre_vuelo",
+      "Rodaje": "rodaje",
+      "Crucero": "crucero",
+      "Descenso": "descenso",
+      "Rodaje a Puerta": "rodaje_puerta",
+      "Plataforma": "plataforma",
+    };
+    const k = map[stage];
+    return k ? t(`flight.stage.${k}`) : stage;
+  };
   const [flightCode, setFlightCode] = useState(simBriefData.vueloCodigo);
   const [originICAO, setOriginICAO] = useState(simBriefData.origen);
   const [destICAO, setDestICAO] = useState(simBriefData.destino);
@@ -321,6 +381,11 @@ export default function VueloActualView({
   // Phase 7 States
   const [isReportGenerating, setIsReportGenerating] = useState<boolean>(true);
   const [isManifestCollapsed, setIsManifestCollapsed] = useState<boolean>(false);
+  // Fase 1 pasajeros: snapshot agregado para el panel (se refresca 1Hz).
+  const [paxAverages, setPaxAverages] = useState<AttributeState | null>(null);
+  const [paxStarted, setPaxStarted] = useState<boolean>(false);
+  // Resumen final conservado al cerrar el vuelo (el engine se resetea).
+  const [paxFinal, setPaxFinal] = useState<FlightPassengerSummary | null>(null);
 
   // Flight Plan Import local state matching the new flow
   const [isBriefImported, setIsBriefImported] = useState<boolean>(false);
@@ -337,6 +402,15 @@ export default function VueloActualView({
   const [activeGroupTab, setActiveGroupTab] = useState<string>("immersion");
   const [selectedPackage, setSelectedPackage] = useState<string>("aerolineas");
   const [showPackageManager, setShowPackageManager] = useState<boolean>(false);
+  // Video de seguridad de la comunidad (modo PACK de `taxi_crew_safety_brief`).
+  const [safetyPackage, setSafetyPackage] = useState<PackageRecord | null>(null);
+  const [storedSafetyPackageId] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(SAFETY_VIDEO_PACKAGE_STORAGE_KEY);
+    } catch {
+      return null;
+    }
+  });
   const [selectedPasajero, setSelectedPasajero] = useState<Pasajero | null>(null);
   
   // --- DEBUG MONITOR ---
@@ -367,9 +441,32 @@ export default function VueloActualView({
   const [boardingMusicTrackId, setBoardingMusicTrackId] = useState<string>("");
   const [musicTracks, setMusicTracks] = useState<BoardingMusicTrack[]>([]);
   const [musicTracksLoading, setMusicTracksLoading] = useState<boolean>(false);
+  // Versión de música en vuelo: procesada del backend (`processed_url`) o
+  // limpia (`clean_url`). Default global de Settings (default: procesada).
+  const [boardingMusicProcessed, setBoardingMusicProcessed] = useState<boolean>(true);
+
+  // Fuente de música de embarque del vuelo (`ia` = catálogo, `pack` = audio
+  // de la comunidad). Override por vuelo (null = default global de Settings).
+  const [boardingAudioSourceGlobal, setBoardingAudioSourceGlobal] = useState<BoardingAudioSource>("ia");
+  const [boardingAudioSourceOverride, setBoardingAudioSourceOverride] = useState<BoardingAudioSource | null>(null);
+  const effectiveBoardingAudioSource = boardingAudioSourceOverride ?? boardingAudioSourceGlobal;
+  const [boardingAudioPackage, setBoardingAudioPackage] = useState<PackageRecord | null>(null);
+  const [storedBoardingAudioPackageId] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(BOARDING_AUDIO_PACKAGE_STORAGE_KEY);
+    } catch {
+      return null;
+    }
+  });
+  /** URL efectiva del audio del vuelo (cacheada o remota; null = catálogo). */
+  const [boardingAudioUrl, setBoardingAudioUrl] = useState<string | null>(null);
   const [showSecondaryLang, setShowSecondaryLang] = useState<boolean>(false);
   // Evita sobrescribir los valores guardados antes de que termine la carga.
   const musicSettingsLoadedRef = useRef(false);
+  // Marca qué selectores pre-vuelo tocó el usuario: las cargas async de
+  // setting_general (montaje) solo pre-seleccionan; si su respuesta llega
+  // tarde (red lenta) no deben pisar una elección ya hecha en "Volar".
+  const userPickedRef = useRef({ lang: false, captain: false, crew: false, gate: false });
 
   // Alternating bilingual display for GateMonitor (15s cycle)
   const [showEnglish, setShowEnglish] = useState<boolean>(true);
@@ -478,17 +575,17 @@ export default function VueloActualView({
   const getSpeakerName = (role: string): string => {
     if (role === "captain") {
       const v = availableVoices.find((v) => v.id === captainVoice);
-      return v?.name || simBriefData.nombrePiloto || "Capitán";
+      return v?.name || simBriefData.nombrePiloto || t("narrator.captain");
     }
     if (role === "crew") {
       const v = availableVoices.find((v) => v.id === crewVoice);
-      return v?.name || "Tripulación";
+      return v?.name || t("narrator.crew");
     }
     if (role === "gate") {
       const v = availableVoices.find((v) => v.id === gateAgentVoiceId);
-      return v?.name || "Agente de Puerta";
+      return v?.name || t("current_flight.not_started.events.narrator_gate");
     }
-    return "Desconocido";
+    return t("flight_view.role_gate");
   };
 
   // Auto-clear generating error after 6 seconds
@@ -611,6 +708,64 @@ export default function VueloActualView({
   // Tracker de bonos XP de disciplina (se alimenta muestra a muestra junto al recorder)
   const xpBonusTrackerRef = useRef<XpBonusTracker | null>(null);
   if (!xpBonusTrackerRef.current) xpBonusTrackerRef.current = new XpBonusTracker();
+  // Motor de pasajeros Fase 1 (muestra de 10, tick por telemetría + efectos
+  // al completar anuncios). Mismo patrón de refs que el tracker de XP.
+  const passengerEngineRef = useRef<PassengerEngine | null>(null);
+  if (!passengerEngineRef.current) passengerEngineRef.current = new PassengerEngine();
+  // Timestamp de la última muestra para el dt real del tick de pasajeros.
+  const passengerLastTickMsRef = useRef<number | null>(null);
+  // Detector de turbulencia (edge-triggered): alimenta applyNegativeEvent.
+  const turbulenceRef = useRef<TurbulenceDetector | null>(null);
+  if (!turbulenceRef.current) turbulenceRef.current = new TurbulenceDetector();
+  // Etiqueta transitoria del panel de cabina (daño o mitigación): se muestra
+  // ~3.4s y se desvanece sola, sin interacción.
+  const [paxFlash, setPaxFlash] = useState<{
+    id: number;
+    text: string;
+    tone: "neg" | "pos";
+    fading: boolean;
+  } | null>(null);
+  const paxFlashTimerRef = useRef<number | null>(null);
+  const flashPax = useCallback((text: string, tone: "neg" | "pos") => {
+    if (paxFlashTimerRef.current !== null) {
+      window.clearTimeout(paxFlashTimerRef.current);
+      paxFlashTimerRef.current = null;
+    }
+    const id = Date.now();
+    setPaxFlash({ id, text, tone, fading: false });
+    paxFlashTimerRef.current = window.setTimeout(() => {
+      setPaxFlash((prev) => (prev && prev.id === id ? { ...prev, fading: true } : prev));
+      paxFlashTimerRef.current = window.setTimeout(() => {
+        setPaxFlash((prev) => (prev && prev.id === id ? null : prev));
+        paxFlashTimerRef.current = null;
+      }, 500);
+    }, 2900);
+  }, []);
+
+  // Gancho de depuración SOLO en navegador local (mock): permite forzar los
+  // 3 niveles de turbulencia y la etiqueta de mitigación sin simular VS real
+  // (p. ej. `__announsDebug.forceTurbulence('severa')` en consola).
+  // No existe en el build de escritorio (protocolo tauri://, no localhost).
+  useEffect(() => {
+    try {
+      if (typeof window === "undefined" || window.location.hostname !== "localhost") return;
+      const w = window as unknown as Record<string, unknown>;
+      const prev = (w.__announsDebug ?? {}) as Record<string, unknown>;
+      w.__announsDebug = {
+        ...prev,
+        forceTurbulence: (level: TurbulenceLevel) => {
+          const lv: TurbulenceLevel =
+            level === "severa" || level === "moderada" ? level : "leve";
+          passengerEngineRef.current?.applyNegativeEvent({
+            attribute: "calma",
+            amount: TURBULENCE_DAMAGE[lv],
+          });
+          flashPax(TURBULENCE_FLASH_TEXT[lv], "neg");
+        },
+        forceMitigated: () => flashPax(TURBULENCE_MITIGATED_FLASH_TEXT, "pos"),
+      };
+    } catch {}
+  }, [flashPax]);
   // `flightId` como ref para leerlo desde el bucle de telemetría y los handlers
   // sin depender de closures con estado obsoleto.
   const flightIdRef = useRef<string | null>(null);
@@ -667,6 +822,40 @@ export default function VueloActualView({
         );
       } catch (err) {
         console.warn("[VueloActualView] Error acumulando evidencia XP:", err);
+      }
+
+      // Tick del motor de pasajeros (deterioro por tiempo según fase).
+      // dt real entre muestras: absorbe 10Hz MSFS y 1Hz mock por igual.
+      try {
+        const nowMs = Date.now();
+        const prevMs = passengerLastTickMsRef.current;
+        passengerLastTickMsRef.current = nowMs;
+        const rawPhase = scheduler.getCurrentPhase();
+        const phase = rawPhase !== null && (Object.values(FlightPhase) as string[]).includes(rawPhase)
+          ? (rawPhase as FlightPhase)
+          : null;
+        if (prevMs !== null && phase !== null) {
+          const dtSec = (nowMs - prevMs) / 1000;
+          passengerEngineRef.current?.tick(dtSec, phase);
+          // Detector de turbulencia (edge-triggered): un evento de daño real
+          // = una etiqueta de UI, nunca una por tick.
+          const outcome = turbulenceRef.current?.sample(snap.verticalSpeed, dtSec, phase) ?? null;
+          if (outcome) {
+            passengerEngineRef.current?.applyNegativeEvent({
+              attribute: "calma",
+              amount: outcome.amount,
+            });
+            console.log("[Pasajeros] turbulencia:", outcome.level, `calma −${outcome.amount}`);
+            fileLogger.log("[Pasajeros] turbulencia", {
+              level: outcome.level,
+              amount: outcome.amount,
+              phase,
+            });
+            flashPax(TURBULENCE_FLASH_TEXT[outcome.level], "neg");
+          }
+        }
+      } catch (err) {
+        console.warn("[VueloActualView] Error en tick de pasajeros:", err);
       }
 
       // Transición automática vía detector con histéresis (evita saltos por ruido)
@@ -932,6 +1121,9 @@ export default function VueloActualView({
   // con los bonus capturados ANTES de liberar el tracker y con la respuesta
   // de la RPC. Sobrevive al reset porque son valores planos, no el tracker.
   const [xpCompletion, setXpCompletion] = useState<XpCompletionSummary | null>(null);
+  // Vuelo de campaña vigente asociado al plan importado (match blando por
+  // origen + destino). Se reserva al importar y se aplica al cerrar.
+  const [campaignMatch, setCampaignMatch] = useState<CampaignMatch | null>(null);
 
   /** Clave del stash de emergencia en localStorage (cierres abruptos). */
   const FLIGHT_PATH_STASH_KEY = "announs_flightpath_stash_v1";
@@ -997,6 +1189,9 @@ export default function VueloActualView({
         fileLogger.log(`${tag} sin puntos`, { reason });
         recorder.reset();
         xpBonusTrackerRef.current?.reset();
+        passengerEngineRef.current?.reset();
+        turbulenceRef.current?.reset();
+        passengerLastTickMsRef.current = null;
         return true;
       }
 
@@ -1080,6 +1275,12 @@ export default function VueloActualView({
         let capturedDayNight = { dayHours: 0, nightHours: 0 };
         let capturedDestIcao = "";
         let capturedMetar: string | null = null;
+        // Cierre de pasajeros (resumen + XP), calculado en 5b antes del reset.
+        let paxCloseout: {
+          summary: FlightPassengerSummary | null;
+          baseTimeXp: number;
+          bonus: number;
+        } | null = null;
         if (status === "ended") {
           // Llamada única a la RPC unificada: disciplina operativa +
           // los 4 bonus de entorno/sinergia. Cada bonus es fail-closed
@@ -1099,6 +1300,20 @@ export default function VueloActualView({
             resolveHardAirportBonus(destIcaoForBonus).catch(() => 0),
             Promise.resolve(resolveWeatherSeverityBonus(destMetar)),
           ]);
+          // Pasajeros: resumen final ANTES del reset del paso 6 (si se
+          // calculara después, el engine ya estaría en cero). Bonus
+          // proporcional al base con techo + piso (fail-closed → 0).
+          try {
+            const paxSummary = passengerEngineRef.current?.getSummary(id) ?? null;
+            const paxBase = tracker?.getResults()?.base_time_xp ?? 0;
+            paxCloseout = {
+              summary: paxSummary,
+              baseTimeXp: paxBase,
+              bonus: resolvePassengerBonus(paxSummary?.overallScore ?? null, paxBase),
+            };
+          } catch {
+            paxCloseout = null;
+          }
           capturedRpc = {
             p_disc_taxi: tracker?.getTaxiBonus() ?? 0,
             p_disc_strobe: tracker?.getStrobeBonus() ?? 0,
@@ -1112,6 +1327,10 @@ export default function VueloActualView({
             p_night_flight: nightFlight,
             p_hard_airport: hardAirport,
             p_weather_severity: weatherSeverity,
+            // Multiplicador de campaña reservado al importar (1 = sin campaña).
+            p_campaign_multiplier: campaignMatch?.xpMultiplier ?? 1,
+            // Bonus de pasajeros (la RPC lo recorta sola si aún no lo acepta).
+            p_passenger: paxCloseout?.bonus ?? 0,
           };
           capturedSynergy = tracker?.getSynergyEventKeys() ?? [];
           capturedNightFraction = tracker?.getNightFraction() ?? null;
@@ -1129,6 +1348,9 @@ export default function VueloActualView({
             p_hard_airport: hardAirport,
             destMetar: destMetar ?? null,
             p_weather_severity: weatherSeverity,
+            paxScore: paxCloseout?.summary?.overallScore ?? null,
+            paxBaseTimeXp: paxCloseout?.baseTimeXp ?? 0,
+            p_passenger: paxCloseout?.bonus ?? 0,
           });
           fileLogger.log(`${tag} bonus capturados (pre-reset)`, { flightId: id, ...capturedRpc });
           setXpCompletion({
@@ -1137,12 +1359,57 @@ export default function VueloActualView({
             bonuses: toColumnBonusItems(capturedRpc),
             baseXpAwarded: null,
             totalFlightXp: null,
+            campaignMultiplier: campaignMatch?.xpMultiplier ?? null,
+            campaignXp: null,
           });
         }
 
         // 6) Todo persistido → liberar el buffer en memoria y el stash.
+        // Fase 1 pasajeros (Q4: solo log local, nada a Supabase): resumen final
+        // al archivo antes de descartar el estado en memoria. Se conserva en
+        // estado para la pantalla de cierre (el engine se resetea).
+        // En cierre normal además se persisten satisfacción + XP en `flights`
+        // (migración de satisfacción; solo vuelos finalizados).
+        try {
+          const paxSummary = status === "ended" && paxCloseout
+            ? paxCloseout.summary
+            : passengerEngineRef.current?.getSummary(id) ?? null;
+          if (paxSummary) {
+            fileLogger.log("[Pasajeros] resumen final del vuelo", paxSummary);
+            setPaxFinal(paxSummary);
+          } else {
+            setPaxFinal(null);
+          }
+          if (status === "ended" && paxSummary && paxCloseout) {
+            try {
+              const { error: paxPersistErr } = await supabase.from("flights").update({
+                global_satisfaction: Math.round(paxSummary.overallScore),
+                passenger_attributes_summary: toPassengerAttributesSummary(paxSummary.globalAttributeAverages),
+                passenger_xp_awarded: paxCloseout.bonus,
+              }).eq("id", id);
+              if (paxPersistErr) {
+                console.warn(`${tag} persistencia de satisfacción omitida:`, paxPersistErr.message);
+                fileLogger.warn(`${tag} persistencia de satisfacción omitida`, { reason, error: paxPersistErr.message });
+              } else {
+                fileLogger.log(`${tag} satisfacción persistida`, {
+                  flightId: id,
+                  global_satisfaction: Math.round(paxSummary.overallScore),
+                  passenger_xp_awarded: paxCloseout.bonus,
+                });
+              }
+            } catch (paxPersistExc) {
+              console.warn(`${tag} persistencia de satisfacción omitida:`, String(paxPersistExc));
+            }
+          }
+        } catch (err) {
+          console.warn(`${tag} resumen de pasajeros no disponible:`, err);
+          setPaxFinal(null);
+        }
         recorder.reset();
         xpBonusTrackerRef.current?.reset();
+        passengerEngineRef.current?.reset();
+        turbulenceRef.current?.reset();
+        passengerLastTickMsRef.current = null;
         clearFlightPathStash();
         lastFlushErrorRef.current = null;
         console.log(`${tag} ✅ OK: vuelo cerrado (status=${status}) y buffer liberado`);
@@ -1164,6 +1431,8 @@ export default function VueloActualView({
                 bonuses: capturedRpc ? toColumnBonusItems(capturedRpc) : [],
                 baseXpAwarded: null,
                 totalFlightXp: null,
+                campaignMultiplier: campaignMatch?.xpMultiplier ?? null,
+                campaignXp: null,
                 error: "Sin usuario autenticado: no se pudo otorgar XP.",
               });
             } else if (!capturedRpc) {
@@ -1176,6 +1445,8 @@ export default function VueloActualView({
                 bonuses: [],
                 baseXpAwarded: null,
                 totalFlightXp: null,
+                campaignMultiplier: campaignMatch?.xpMultiplier ?? null,
+                campaignXp: null,
                 error: "No se pudieron capturar los bonus antes del cierre.",
               });
             } else {
@@ -1199,10 +1470,15 @@ export default function VueloActualView({
                   bonuses: toColumnBonusItems(capturedRpc),
                   baseXpAwarded: reward.baseXpAwarded,
                   totalFlightXp: reward.totalFlightXp,
+                  campaignMultiplier: campaignMatch?.xpMultiplier ?? null,
+                  campaignXp: reward.campaignXpAwarded > 0 ? reward.campaignXpAwarded : null,
                 });
                 showToast(
                   `Vuelo completado: +${reward.totalFlightXp} XP ` +
                   `(${reward.baseXpAwarded} base)` +
+                  (reward.campaignXpAwarded > 0 && campaignMatch
+                    ? ` · Campaña ${formatMultiplier(campaignMatch.xpMultiplier)} (+${reward.campaignXpAwarded})`
+                    : "") +
                   `${reward.newRank ? ` · Rango ${reward.newRank}` : ""}`,
                   "success"
                 );
@@ -1215,6 +1491,8 @@ export default function VueloActualView({
                   bonuses: toColumnBonusItems(capturedRpc),
                   baseXpAwarded: null,
                   totalFlightXp: null,
+                  campaignMultiplier: campaignMatch?.xpMultiplier ?? null,
+                  campaignXp: null,
                   error: rewardResult.error ?? "La RPC no devolvió recompensa.",
                 });
               }
@@ -1229,6 +1507,8 @@ export default function VueloActualView({
               bonuses: capturedRpc ? toColumnBonusItems(capturedRpc) : [],
               baseXpAwarded: null,
               totalFlightXp: null,
+              campaignMultiplier: campaignMatch?.xpMultiplier ?? null,
+              campaignXp: null,
               error: progErr instanceof Error ? progErr.message : String(progErr),
             });
           }
@@ -1306,6 +1586,9 @@ export default function VueloActualView({
       fileLogger.log(`${tag} descarte en fase temprana`, { phase });
       recorder.reset();
       xpBonusTrackerRef.current?.reset();
+      passengerEngineRef.current?.reset();
+      turbulenceRef.current?.reset();
+      passengerLastTickMsRef.current = null;
       return;
     }
     // Congelar el segmento, volcar como 'saved' y reanudar por si vuelve la señal.
@@ -1570,6 +1853,28 @@ export default function VueloActualView({
       xpBonusTrackerRef.current?.noteVoiceEvent(eventKey);
     });
 
+    // Fase 1 pasajeros (Q1): el efecto se cobra al COMPLETAR la reproducción,
+    // no al encolar. La cola ahora propaga la clave (null si se canceló antes
+    // de empezar: se ignora). Cubre todas las vías igual que la sinergia XP.
+    const unsubPaxCompleted = announcementQueueRef.current?.on("announcement:completed", (eventKey: string | null) => {
+      if (typeof eventKey !== "string" || eventKey === "") return;
+      try {
+        // Traza anti-doble-cobro: cada aplicación queda con timestamp para
+        // auditar en consola si un anuncio se cobra más de una vez.
+        console.log("[Pasajeros] aplicando efectos:", eventKey);
+        const applied = passengerEngineRef.current?.applyAnnouncementEffects(getEventEffects(eventKey), eventKey);
+        fileLogger.log("[Pasajeros] efectos aplicados", { eventKey, mitigated: applied?.mitigated ?? false });
+        // Mitigación exitosa dentro de la ventana (p. ej. cinturones tras
+        // turbulencia): etiqueta positiva transitoria. Si el evento expiró,
+        // el silencio es la señal (sin etiqueta).
+        if (applied?.mitigated === true) {
+          flashPax(TURBULENCE_MITIGATED_FLASH_TEXT, "pos");
+        }
+      } catch (err) {
+        console.warn("[VueloActualView] Error aplicando efectos de pasajeros:", err);
+      }
+    });
+
     return () => {
       unsubPending();
       unsubExecuted();
@@ -1577,6 +1882,7 @@ export default function VueloActualView({
       unsubCompleted();
       unsubClear();
       unsubEnqueued?.();
+      unsubPaxCompleted?.();
     };
   }, []);
 
@@ -1584,6 +1890,22 @@ export default function VueloActualView({
   useEffect(() => {
     timerManagerRef.current?.setEventContext(flightId, captainPrimaryLang);
   }, [flightId, captainPrimaryLang]);
+
+  // Fase 1 pasajeros: snapshot agregado 1Hz para el panel (no 10Hz, la UI no
+  // necesita más). Lee el engine directo; si no hay muestra, panel apagado.
+  useEffect(() => {
+    const id = setInterval(() => {
+      const engine = passengerEngineRef.current;
+      if (engine?.isStarted()) {
+        setPaxStarted(true);
+        setPaxAverages(engine.getAverages());
+      } else {
+        setPaxStarted(false);
+        setPaxAverages(null);
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
 
   // TODO Migration:
   //
@@ -1675,20 +1997,22 @@ export default function VueloActualView({
 
         console.log("[VueloActualView] setting_general cargado (Personal de Vuelo):", settings);
 
-        // Pre-seleccionar en los selectores si existen y son válidos
-        if (settings.language_id) {
+        // Pre-seleccionar en los selectores si existen y son válidos.
+        // No pisar lo que el usuario ya eligió en "Volar" (la respuesta de
+        // setting_general puede llegar después de su selección).
+        if (settings.language_id && !userPickedRef.current.lang) {
           setCaptainPrimaryLang(settings.language_id);
           console.log("[VueloActualView] language_id pre-seleccionado:", settings.language_id);
         }
-        if (settings.captain_voice_id) {
+        if (settings.captain_voice_id && !userPickedRef.current.captain) {
           setCaptainVoice(settings.captain_voice_id);
           console.log("[VueloActualView] captain_voice_id pre-seleccionado:", settings.captain_voice_id);
         }
-        if (settings.crew_voice_id) {
+        if (settings.crew_voice_id && !userPickedRef.current.crew) {
           setCrewVoice(settings.crew_voice_id);
           console.log("[VueloActualView] crew_voice_id pre-seleccionado:", settings.crew_voice_id);
         }
-        if (settings.gate_agent_voice_id) {
+        if (settings.gate_agent_voice_id && !userPickedRef.current.gate) {
           setGateAgentVoiceId(settings.gate_agent_voice_id);
           console.log("[VueloActualView] gate_agent_voice_id pre-seleccionado:", settings.gate_agent_voice_id);
         }
@@ -1778,6 +2102,15 @@ export default function VueloActualView({
     speed_kph: true,
   });
 
+  // Ritmo de embarque (pax/min): default global del piloto (Settings →
+  // `setting_general.boarding_pax_per_minute` / localStorage) + override
+  // opcional por vuelo (null = usar el global).
+  const [boardingPaceGlobal, setBoardingPaceGlobal] = useState<number>(BOARDING_PACE_DEFAULT_PPM);
+  const [boardingPaceOverride, setBoardingPaceOverride] = useState<number | null>(null);
+  const effectiveBoardingPace = boardingPaceOverride ?? boardingPaceGlobal;
+  /** Acumulador fraccionario de pasajeros entre ticks de 1s. */
+  const boardingCarryRef = useRef<number>(0);
+
   interface ImmersionOption {
     key: string;
     briefKey: string;
@@ -1785,47 +2118,14 @@ export default function VueloActualView({
     defaultVal: boolean;
   }
 
+  // Inmersión pre-vuelo: solo opciones activas (música de embarque + tarjeta
+  // de ritmo, esta última render aparte). El resto eran mockups y se
+  // eliminaron de la UI (la config conserva sus defaults).
   const immersionOptions: ImmersionOption[] = [
-    {
-      key: "play_chime_sound_before_ann",
-      briefKey: "current_flight.not_started.immersion.chime.brief",
-      deepKey: "current_flight.not_started.immersion.chime.deep",
-      defaultVal: true
-    },
-    {
-      key: "play_ambient_sound_during_flight",
-      briefKey: "current_flight.not_started.immersion.ambient.brief",
-      deepKey: "current_flight.not_started.immersion.ambient.deep",
-      defaultVal: true
-    },
-    {
-      key: "crew_greeting_passengers_at_gate",
-      briefKey: "current_flight.not_started.immersion.greeting.brief",
-      deepKey: "current_flight.not_started.immersion.greeting.deep",
-      defaultVal: true
-    },
-    {
-      key: "passenger_reaction_to_planes_movement",
-      briefKey: "current_flight.not_started.immersion.reaction.brief",
-      deepKey: "current_flight.not_started.immersion.reaction.deep",
-      defaultVal: true
-    },
-    {
-      key: "play_passenger_reaction_during_landing",
-      briefKey: "current_flight.not_started.immersion.landing.brief",
-      deepKey: "current_flight.not_started.immersion.landing.deep",
-      defaultVal: true
-    },
     {
       key: "play_boarding_music",
       briefKey: "current_flight.not_started.immersion.music.brief",
       deepKey: "current_flight.not_started.immersion.music.deep",
-      defaultVal: true
-    },
-    {
-      key: "speed_kph",
-      briefKey: "current_flight.not_started.immersion.speed.brief",
-      deepKey: "current_flight.not_started.immersion.speed.deep",
       defaultVal: true
     }
   ];
@@ -1913,16 +2213,52 @@ export default function VueloActualView({
           }
           if (stockResult.error) throw stockResult.error;
           if (cancelled) return;
-          mapped = (stockResult.data || []).map((vs: any) => ({
-            id: vs.id,
-            name: vs.voice_name,
-            role: vs.voice_role,
-            languages: Array.isArray(vs.languages)
+          // Tags de idioma por voz: la columna `voices_stock.languages` puede
+          // no existir (400 en el log) o venir vacía; la fuente canónica es la
+          // tabla `voice_languages` (voice_id → language_id). Sin tags, cada
+          // voz vale para cualquier idioma y la re-sincronización conserva una
+          // voz española con texto inglés (TTS con acento cruzado) o el
+          // servidor resuelve un pregrabado inexistente (404).
+          let langTags = new Map<string, string[]>();
+          try {
+            const { data: vl, error: vlErr } = await supabase
+              .from('voice_languages')
+              .select('voice_id, language_id')
+              .in('voice_id', stockIds);
+            if (!vlErr && Array.isArray(vl)) {
+              for (const row of vl as any[]) {
+                if (!row?.voice_id || !row?.language_id) continue;
+                const list = langTags.get(row.voice_id) ?? [];
+                if (!list.includes(row.language_id)) list.push(row.language_id);
+                langTags.set(row.voice_id, list);
+              }
+            }
+          } catch {
+            // Tabla opcional: se sigue con los tags de la columna si existen.
+          }
+          if (cancelled) return;
+          mapped = (stockResult.data || []).map((vs: any) => {
+            const colTags: string[] = Array.isArray(vs.languages)
               ? vs.languages
               : vs.languages
                 ? [vs.languages]
-                : [],
-          }));
+                : [];
+            const joinTags = langTags.get(vs.id) ?? [];
+            const merged = [...colTags];
+            for (const t of joinTags) if (!merged.includes(t)) merged.push(t);
+            if (merged.length === 0) {
+              console.warn(
+                "[VueloActualView] Voz sin idiomas etiquetados (vale para cualquiera):",
+                { id: vs.id, name: vs.voice_name, role: vs.voice_role }
+              );
+            }
+            return {
+              id: vs.id,
+              name: vs.voice_name,
+              role: vs.voice_role,
+              languages: merged,
+            };
+          });
         }
         if (mapped.length > 0) {
           setAvailableVoices(mapped);
@@ -1994,7 +2330,42 @@ export default function VueloActualView({
         if ((d as any).active_package != null) {
           setSelectedPackage((d as any).active_package);
         }
-        if ((d as any).gate_agent_voice_id != null) {
+        // Versión de música en vuelo (columna nueva, migración 20261007) con
+        // fallback a localStorage (Settings guarda ahí siempre).
+        if ((d as any).boarding_music_distortion != null) {
+          setBoardingMusicProcessed(Boolean((d as any).boarding_music_distortion));
+        } else {
+          try {
+            const stored = localStorage.getItem("cfg_boarding_music_distortion");
+            if (stored != null) setBoardingMusicProcessed(stored !== "false");
+          } catch {
+            // almacenamiento no disponible: queda procesada (default)
+          }
+        }
+        // Fuente de música global (`ia` | `pack`; default `ia`).
+        if ((d as any).boarding_music_source != null) {
+          setBoardingAudioSourceGlobal(toBoardingAudioSource((d as any).boarding_music_source));
+        } else {
+          try {
+            const storedSource = localStorage.getItem(BOARDING_AUDIO_SOURCE_STORAGE_KEY);
+            if (storedSource != null) setBoardingAudioSourceGlobal(toBoardingAudioSource(storedSource));
+          } catch {
+            // almacenamiento no disponible: queda `ia`
+          }
+        }
+        // Ritmo de embarque global: columna nueva (migración 20261007) con
+        // fallback a localStorage (Settings guarda ahí siempre).
+        if ((d as any).boarding_pax_per_minute != null) {
+          setBoardingPaceGlobal(clampBoardingPace((d as any).boarding_pax_per_minute));
+        } else {
+          try {
+            const stored = localStorage.getItem(BOARDING_PACE_STORAGE_KEY);
+            if (stored != null) setBoardingPaceGlobal(clampBoardingPace(Number(stored)));
+          } catch {
+            // almacenamiento no disponible: queda el default (60 pax/min)
+          }
+        }
+        if ((d as any).gate_agent_voice_id != null && !userPickedRef.current.gate) {
           setGateAgentVoiceId((d as any).gate_agent_voice_id);
         }
       }
@@ -2073,13 +2444,17 @@ export default function VueloActualView({
 
   // Mantiene configurado el MusicController con las pistas y la selección del
   // usuario antes de que el Scheduler inicie/detenga la música ambiental.
+  // En fuente `pack` se inyecta la URL del audio de la comunidad (cacheada o
+  // remota); en `ia` (o sin audio) suena la pista del catálogo.
   useEffect(() => {
     musicController.configure({
       tracks: musicTracks,
       selectedTrackId: boardingMusicTrackId || null,
       enabled: immersionConfig.play_boarding_music ?? true,
+      useProcessedAudio: boardingMusicProcessed,
+      packageUrl: effectiveBoardingAudioSource === "pack" ? boardingAudioUrl : null,
     });
-  }, [musicTracks, boardingMusicTrackId, immersionConfig.play_boarding_music]);
+  }, [musicTracks, boardingMusicTrackId, immersionConfig.play_boarding_music, boardingMusicProcessed, effectiveBoardingAudioSource, boardingAudioUrl]);
 
   // Al cargar un vuelo, resuelve su escenario (flights.scenario_key o el del
   // usuario) y lo selecciona en el selector. Al cambiar el selector, el efecto
@@ -2223,6 +2598,7 @@ export default function VueloActualView({
     setIsBriefImported(false);
     setCanStartFlight(false);
     setIsFlightSettingsOpen(false);
+    setCampaignMatch(null);
   }, []);
 
   // ── Vista previa pre-vuelo: ciudad legible inmediata desde `airports` ──
@@ -2245,6 +2621,7 @@ export default function VueloActualView({
       dbCity ||
       (sbOriginIcao ? getAirportName(sbOriginIcao) : "") ||
       ((simbriefRawData as any)?.origin?.city ?? "") ||
+      ((simbriefRawData as any)?.origin?.name ?? "") ||
       (sbOriginMatchesState ? originCityName : "") ||
       sbOriginIcao ||
       ""
@@ -2258,20 +2635,32 @@ export default function VueloActualView({
       dbCity ||
       (sbDestIcao ? getAirportName(sbDestIcao) : "") ||
       ((simbriefRawData as any)?.destination?.city ?? "") ||
+      ((simbriefRawData as any)?.destination?.name ?? "") ||
       (sbDestMatchesState ? destCityName : "") ||
       sbDestIcao ||
       ""
     );
   }, [resolvedAirports.dest, sbDestIcao, simbriefRawData, destCityName, sbDestMatchesState]);
 
+  const prevSimbriefIcaosRef = useRef<{ o: string; d: string }>({ o: "", d: "" });
   React.useEffect(() => {
     setFlightCode(simBriefData.vueloCodigo);
     setOriginICAO(simBriefData.origen);
     setDestICAO(simBriefData.destino);
     setAirline(simBriefData.aerolinea);
-    const initialRoute = getRouteDetails(simBriefData.origen, simBriefData.destino);
-    setOriginCityName(initialRoute.orgCity);
-    setDestCityName(initialRoute.destCity);
+    // Solo resetear ciudades si cambiaron los ICAOs: en una re-importación del
+    // mismo plan (misma u otra sesión) el fallback getRouteDetails devolvería
+    // el código ICAO y pisaría el municipality ya resuelto (bug: 1ª sesión con
+    // nombres, 2ª con códigos). El resolver async corrige el caso de ICAOs
+    // nuevos; acá simplemente no se destruye lo ya resuelto.
+    const o = simBriefData.origen ?? "";
+    const d = simBriefData.destino ?? "";
+    if (o !== prevSimbriefIcaosRef.current.o || d !== prevSimbriefIcaosRef.current.d) {
+      prevSimbriefIcaosRef.current = { o, d };
+      const initialRoute = getRouteDetails(o, d);
+      setOriginCityName(initialRoute.orgCity);
+      setDestCityName(initialRoute.destCity);
+    }
   }, [simBriefData]);
 
   // Generate passenger manifest when simBriefData or PreEmbarque state is ready
@@ -2303,26 +2692,33 @@ export default function VueloActualView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [simbriefRawData]);
 
-  // Phase 1 boarding simulation timer effect
+  // Phase 1 boarding simulation timer effect (ritmo configurable en pax/min:
+  // override del vuelo o default global; 60 = 1 pax/s, comportamiento clásico).
+  // Tick fijo de 1s con acumulador fraccionario para ritmos no divisibles.
   React.useEffect(() => {
     let intervalId: any = null;
     const targetLength = boardingManifest.length > 0 ? boardingManifest.length : passengers.length;
+    const paxPerTick = boardingPaxPerTick(effectiveBoardingPace);
     if (isBoardingActive && boardedCount < targetLength) {
       intervalId = setInterval(() => {
+        boardingCarryRef.current += paxPerTick;
+        const batch = Math.floor(boardingCarryRef.current);
+        if (batch <= 0) return;
+        boardingCarryRef.current -= batch;
         setBoardedCount(prev => {
           if (prev >= targetLength) {
             setIsBoardingActive(false);
             clearInterval(intervalId);
             return targetLength;
           }
-          return prev + 1;
+          return Math.min(prev + batch, targetLength);
         });
       }, 1000);
     }
     return () => {
       if (intervalId) clearInterval(intervalId);
     };
-  }, [isBoardingActive, boardedCount, boardingManifest.length, passengers.length]);
+  }, [isBoardingActive, boardedCount, boardingManifest.length, passengers.length, effectiveBoardingPace]);
 
   // Check when boarding is complete to deactivate active boarding state.
   // IMPORTANTE: el objetivo es el mismo que el del intervalo (manifiesto si
@@ -2340,6 +2736,7 @@ export default function VueloActualView({
   React.useEffect(() => {
     if (currentState === FlightState.PreEmbarque) {
       setBoardedCount(0);
+      boardingCarryRef.current = 0;
       setIsBoardingActive(false);
       setBoardingStarted(false);
       setShowCancelConfirm(false);
@@ -2352,6 +2749,62 @@ export default function VueloActualView({
       [key]: value
     }));
   };
+
+  // ICAO de la aerolínea del vuelo actual (SimBrief o campo editable) para
+  // filtrar los videos de seguridad de la comunidad (+ genéricos).
+  const safetyAirlineIcao: string | null = useMemo(() => {
+    const raw =
+      ((simbriefRawData as any)?.general?.icao_airline as unknown) ?? airline ?? "";
+    const icao = String(raw).toUpperCase().trim();
+    return icao !== "" ? icao : null;
+  }, [simbriefRawData, airline]);
+
+  // Selección del video de seguridad (modo PACK): guarda el id por defecto y
+  // lo deja activo en el servicio para la pre-descarga al iniciar el vuelo.
+  const handleSafetyPackageChange = useCallback((pkg: PackageRecord | null) => {
+    setSafetyPackage(pkg);
+    if (pkg) {
+      try {
+        localStorage.setItem(SAFETY_VIDEO_PACKAGE_STORAGE_KEY, pkg.id);
+      } catch {
+        // almacenamiento no disponible: la selección sigue en memoria
+      }
+      safetyVideoPackService.setActivePackage(pkg);
+    } else {
+      try {
+        localStorage.removeItem(SAFETY_VIDEO_PACKAGE_STORAGE_KEY);
+      } catch {
+        // ignorar
+      }
+    }
+  }, []);
+
+  // Fuente de música del vuelo + package de audio de la comunidad.
+  const handleBoardingAudioSourceChange = useCallback((source: BoardingAudioSource) => {
+    setBoardingAudioSourceOverride(source);
+    try {
+      localStorage.setItem(BOARDING_AUDIO_SOURCE_STORAGE_KEY, source);
+    } catch {
+      // almacenamiento no disponible: la selección sigue en memoria
+    }
+  }, []);
+  const handleBoardingAudioPackageChange = useCallback((pkg: PackageRecord | null) => {
+    setBoardingAudioPackage(pkg);
+    if (pkg) {
+      try {
+        localStorage.setItem(BOARDING_AUDIO_PACKAGE_STORAGE_KEY, pkg.id);
+      } catch {
+        // almacenamiento no disponible: la selección sigue en memoria
+      }
+      boardingAudioPackService.setActivePackage(pkg);
+    } else {
+      try {
+        localStorage.removeItem(BOARDING_AUDIO_PACKAGE_STORAGE_KEY);
+      } catch {
+        // ignorar
+      }
+    }
+  }, []);
 
   // Delay de gate_crew_started (solo en memoria, para el vuelo actual).
   const [gateStartedDelaySec, setGateStartedDelaySec] = useState<number>(GATE_STARTED_DELAY_DEFAULT);
@@ -2437,6 +2890,7 @@ export default function VueloActualView({
         lang_secondary_id: captainSecondaryLang === LANG_NONE || captainSecondaryLang === "" ? null : captainSecondaryLang,
         voice_captain_id: captainVoice,
         voice_crew_id: crewVoice,
+        voice_gate_id: gateAgentVoiceId || null,
       };
       console.log("[handleStartFlight] flights.update payload:", JSON.stringify(flightUpdatePayload, null, 2));
 
@@ -2450,6 +2904,112 @@ export default function VueloActualView({
       setExecutionMode(mode);
       if (mode === "test") {
         setIsTestMode(true);
+      }
+      // ── Safety Video PACK: caché local en segundo plano ──────────
+      // Si el evento `taxi_crew_safety_brief` está en modo PACK y hay un
+      // package elegido, se deja activo en el servicio y se pre-descarga su
+      // `package_url` de forma silenciosa (sin bloquear el inicio del vuelo)
+      // para una reproducción instantánea en el IFE.
+      // OJO: el dropdown solo vive montado en su pestaña; si el usuario
+      // configuró PACK en Settings (o el catálogo aún cargaba), el estado
+      // local puede venir null: se resuelve aquí el package por defecto (id
+      // guardado → primero disponible) y NUNCA se pisa con null.
+      const safetyMode = eventConfig[SAFETY_VIDEO_EVENT_KEY];
+      let activeSafetyPack = safetyPackage;
+      if (safetyMode === "PACK" && !activeSafetyPack) {
+        try {
+          activeSafetyPack = await safetyVideoPackService.resolveActivePackage(
+            safetyAirlineIcao,
+            safetyVideoPackService.getStoredPackageId()
+          );
+          if (activeSafetyPack) setSafetyPackage(activeSafetyPack);
+        } catch (err) {
+          console.warn("[SafetyVideo] resolve al iniciar vuelo falló:", err);
+        }
+      }
+      if (activeSafetyPack) {
+        safetyVideoPackService.setActivePackage(activeSafetyPack);
+      }
+      console.log("[SafetyVideo] Estado al iniciar vuelo:", {
+        mode: safetyMode,
+        airlineIcao: safetyAirlineIcao,
+        packageId: activeSafetyPack?.id ?? null,
+        packageName: activeSafetyPack?.package_name ?? null,
+      });
+      fileLogger.log("[SafetyVideo] Estado al iniciar vuelo", {
+        mode: safetyMode,
+        airlineIcao: safetyAirlineIcao,
+        packageId: activeSafetyPack?.id ?? null,
+        packageName: activeSafetyPack?.package_name ?? null,
+      });
+      if (safetyMode === "PACK" && activeSafetyPack?.package_url) {
+        const packToCache = activeSafetyPack;
+        void safetyVideoPackService.precacheSafetyVideo(packToCache).then((cached) => {
+          if (cached.error) {
+            showToast(`Video de seguridad: se usará streaming (${cached.error}).`, "info");
+          }
+        });
+      } else if (safetyMode === "PACK") {
+        console.warn("[SafetyVideo] PACK sin package disponible: el evento usará audio IA.");
+        fileLogger.warn("[SafetyVideo] PACK sin package: fallback a audio IA", {
+          airlineIcao: safetyAirlineIcao,
+        });
+        showToast("Sin video de seguridad para esta aerolínea: se usará audio IA.", "info");
+      }
+      // ── Boarding audio PACK: caché local en segundo plano ─────────
+      // Si la fuente de música es `pack` y hay un audio elegido, se deja
+      // activo en el servicio y se pre-descarga (igual que el safety video).
+      // Sin package disponible, la música del vuelo usa el catálogo (IA).
+      // Igual que arriba: nunca se pisa con null una selección previa.
+      const audioSource = effectiveBoardingAudioSource;
+      let activeAudioPack = boardingAudioPackage;
+      if (audioSource === "pack" && !activeAudioPack) {
+        try {
+          activeAudioPack = await boardingAudioPackService.resolveActivePackage(
+            safetyAirlineIcao,
+            boardingAudioPackService.getStoredPackageId()
+          );
+          if (activeAudioPack) setBoardingAudioPackage(activeAudioPack);
+        } catch (err) {
+          console.warn("[BoardingAudio] resolve al iniciar vuelo falló:", err);
+        }
+      }
+      if (activeAudioPack) {
+        boardingAudioPackService.setActivePackage(activeAudioPack);
+      }
+      console.log("[BoardingAudio] Estado al iniciar vuelo:", {
+        source: audioSource,
+        airlineIcao: safetyAirlineIcao,
+        packageId: activeAudioPack?.id ?? null,
+        packageName: activeAudioPack?.package_name ?? null,
+      });
+      fileLogger.log("[BoardingAudio] Estado al iniciar vuelo", {
+        source: audioSource,
+        airlineIcao: safetyAirlineIcao,
+        packageId: activeAudioPack?.id ?? null,
+        packageName: activeAudioPack?.package_name ?? null,
+      });
+      if (audioSource === "pack" && activeAudioPack?.package_url) {
+        // URL remota de inmediato (streaming) y se reemplaza por la cacheada
+        // en cuanto termina la pre-descarga (antes del embarque).
+        setBoardingAudioUrl(activeAudioPack.package_url);
+        const packToCache = activeAudioPack;
+        void boardingAudioPackService.precacheBoardingAudio(packToCache).then((cached) => {
+          if (cached.objectUrl) {
+            setBoardingAudioUrl(cached.objectUrl);
+          } else if (cached.error) {
+            showToast(`Audio de embarque: se usará streaming (${cached.error}).`, "info");
+          }
+        });
+      } else {
+        setBoardingAudioUrl(null);
+        if (audioSource === "pack") {
+          console.warn("[BoardingAudio] pack sin package disponible: la música usará el catálogo.");
+          fileLogger.warn("[BoardingAudio] pack sin package: fallback a catálogo", {
+            airlineIcao: safetyAirlineIcao,
+          });
+          showToast("Sin audio de embarque para esta aerolínea: se usará música del catálogo.", "info");
+        }
       }
       // Almacenar preferencias de inicio en FlightContext
       flightContextRef.current?.setFlightStartPreferences(preferences);
@@ -2516,6 +3076,11 @@ export default function VueloActualView({
       // Arrancar el tracker de bonos XP y vincularle los minutos de vuelo para
       // proyectar base_time_xp en el monitor.
       xpBonusTrackerRef.current?.start();
+      // Fase 1 pasajeros: nueva muestra trackeada por vuelo + dt desde cero.
+      passengerEngineRef.current?.startFlight();
+      turbulenceRef.current?.reset();
+      passengerLastTickMsRef.current = null;
+      setPaxFinal(null);
       // Nuevo vuelo: descartar el resumen de XP del anterior.
       setXpCompletion(null);
       xpBonusTrackerRef.current?.setAirMinutesProvider(
@@ -2674,6 +3239,7 @@ export default function VueloActualView({
     setSimbriefError(null);
     setSimbriefRawData(null);
     setSimbriefAircraft(null);
+    setCampaignMatch(null);
     try {
       const response = await fetch(`https://www.simbrief.com/api/xml.fetcher.php?userid=${simbriefId}&json=1`);
       if (response.status === 400) {
@@ -2843,7 +3409,51 @@ export default function VueloActualView({
         lang_secondary_id: captainSecondaryLang === LANG_NONE || captainSecondaryLang === "" ? null : captainSecondaryLang,
         voice_captain_id: captainVoice,
         voice_crew_id: crewVoice,
+        voice_gate_id: gateAgentVoiceId || null,
       };
+
+      // Match blando con vuelos de campañas vigentes (solo origen + destino).
+      // Se reserva el multiplicador para aplicarlo al cerrar el vuelo.
+      let importCampaignMatch: CampaignMatch | null = null;
+      try {
+        const campaignsRes = await loadActiveCampaigns();
+        if (campaignsRes.success && campaignsRes.data) {
+          importCampaignMatch = findCampaignFlightMatch(
+            campaignsRes.data,
+            origin.icao_code || "",
+            dest.icao_code || ""
+          );
+          if (importCampaignMatch) {
+            console.log('[SimBrief] Vuelo de campaña detectado:', {
+              campaign: importCampaignMatch.campaignTitle,
+              multiplier: importCampaignMatch.xpMultiplier,
+            });
+            fileLogger.log('[SimBrief] Match de campaña', { ...importCampaignMatch });
+          }
+        }
+      } catch (campaignErr) {
+        console.warn('[SimBrief] No se pudo verificar campaña (no bloqueante):', campaignErr);
+      }
+      setCampaignMatch(importCampaignMatch);
+
+      // Columnas de campaña (migración 20260929_campaign_xp) y voz de puerta:
+      // si la DB aún no las tiene, se reintenta sin ellas para no romper la
+      // importación.
+      const CAMPAIGN_ROW_KEYS = ["campaign_id", "campaign_flight_id", "campaign_xp_multiplier"] as const;
+      const VOICE_GATE_ROW_KEYS = ["voice_gate_id"] as const;
+      const flightRowWithCampaign = {
+        ...flightRow,
+        campaign_id: importCampaignMatch?.campaignId ?? null,
+        campaign_flight_id: importCampaignMatch?.campaignFlightId ?? null,
+        campaign_xp_multiplier: importCampaignMatch?.xpMultiplier ?? null,
+      };
+      const stripOptionalColumns = (row: Record<string, unknown>) => {
+        const copy = { ...row };
+        for (const key of CAMPAIGN_ROW_KEYS) delete copy[key];
+        for (const key of VOICE_GATE_ROW_KEYS) delete copy[key];
+        return copy;
+      };
+      const isOptionalColumnError = (message: string) => /campaign|voice_gate/i.test(message ?? "");
 
       let currentFlightId: string | null = null;
 
@@ -2855,20 +3465,42 @@ export default function VueloActualView({
         .maybeSingle();
 
       if (existingFlight?.id) {
-        const { error: updateError } = await supabase
-          .from("flights")
-          .update(flightRow)
-          .eq("id", existingFlight.id);
-        if (updateError) throw new Error(updateError.message);
+        try {
+          const { error: updateError } = await supabase
+            .from("flights")
+            .update(flightRowWithCampaign)
+            .eq("id", existingFlight.id);
+          if (updateError) throw new Error(updateError.message);
+        } catch (persistErr: any) {
+          if (!isOptionalColumnError(persistErr?.message ?? "")) throw persistErr;
+          console.warn('[SimBrief] flights sin columnas opcionales; reintentando sin ellas');
+          const { error: retryError } = await supabase
+            .from("flights")
+            .update(stripOptionalColumns(flightRowWithCampaign))
+            .eq("id", existingFlight.id);
+          if (retryError) throw new Error(retryError.message);
+        }
         currentFlightId = existingFlight.id;
       } else {
-        const { data: insertedFlight, error: insertError } = await supabase
-          .from("flights")
-          .insert(flightRow)
-          .select("id")
-          .single();
-        if (insertError) throw new Error(insertError.message);
-        currentFlightId = insertedFlight?.id || null;
+        try {
+          const { data: insertedFlight, error: insertError } = await supabase
+            .from("flights")
+            .insert(flightRowWithCampaign)
+            .select("id")
+            .single();
+          if (insertError) throw new Error(insertError.message);
+          currentFlightId = insertedFlight?.id || null;
+        } catch (persistErr: any) {
+          if (!isOptionalColumnError(persistErr?.message ?? "")) throw persistErr;
+          console.warn('[SimBrief] flights sin columnas opcionales; reintentando sin ellas');
+          const { data: insertedFlight, error: retryError } = await supabase
+            .from("flights")
+            .insert(stripOptionalColumns(flightRowWithCampaign))
+            .select("id")
+            .single();
+          if (retryError) throw new Error(retryError.message);
+          currentFlightId = insertedFlight?.id || null;
+        }
       }
 
       if (currentFlightId) {
@@ -2923,7 +3555,8 @@ export default function VueloActualView({
   };
 
   const eventGroups = useMemo(() => [
-    { id: "immersion", label: t("current_flight.not_started.events.group_immersion"), count: immersionOptions.length },
+    // Inmersión: tarjeta de música + tarjeta de ritmo de embarque.
+    { id: "immersion", label: t("current_flight.not_started.events.group_immersion"), count: immersionOptions.length + 1 },
     ...(scenarioSnapshot?.phases ?? []).map((phase) => ({
       id: phase.key,
       label: phase.name,
@@ -3163,6 +3796,52 @@ export default function VueloActualView({
   // los omite automáticamente.
   const canCloseDoors = boardingComplete;
 
+  // ── IFE (fase 1): resumen de vuelo + invitado aleatorio ──────────
+  // Se calcula una sola vez por vuelo (clave estable) para que el
+  // pasajero destacado no cambie en cada render.
+  const ifeFlight = React.useMemo(() => buildIfeFlightInfo(simbriefRawData), [simbriefRawData]);
+  const ifeFlightKey = `${ifeFlight.airlineIcao}-${ifeFlight.flightNumber}-${ifeFlight.originIcao}-${ifeFlight.destIcao}`;
+  const ifeGuest = React.useMemo(() => {
+    const source = boardingManifest.length > 0 ? boardingManifest : passengers;
+    const boarded = source.slice(0, Math.max(boardedCount, source.length));
+    return pickIfeGuest(boarded.length > 0 ? boarded : source);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ifeFlightKey]);
+
+  // ── IFE · Mapa en vivo: coordenadas, telemetría y recorrido ──────
+  const ifeOriginCoords = React.useMemo<[number, number] | null>(() => {
+    const a = resolvedAirports.origin;
+    return a && Number.isFinite(a.latitude_deg) && Number.isFinite(a.longitude_deg)
+      ? [a.latitude_deg, a.longitude_deg]
+      : null;
+  }, [resolvedAirports.origin]);
+  const ifeDestCoords = React.useMemo<[number, number] | null>(() => {
+    const a = resolvedAirports.dest;
+    return a && Number.isFinite(a.latitude_deg) && Number.isFinite(a.longitude_deg)
+      ? [a.latitude_deg, a.longitude_deg]
+      : null;
+  }, [resolvedAirports.dest]);
+  const ifeGetTelemetry = React.useCallback(() => {
+    const tele: any = flightContextRef.current?.getTelemetry?.();
+    if (!tele) return null;
+    const lat = Number(tele.latitude);
+    const lon = Number(tele.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+    return {
+      latitude: lat,
+      longitude: lon,
+      altitude: Number(tele.altitude) || 0,
+      groundspeed: Number(tele.groundspeed ?? tele.ground_speed) || 0,
+      heading: Number(tele.heading) || 0,
+      verticalSpeed: Number(tele.verticalSpeed) || 0,
+    };
+  }, []);
+  const ifeGetFlownPath = React.useCallback(() => {
+    const pts = flightPathRecorderRef.current?.toSnapshot().points ?? [];
+    // FlightPathPoint = [lon, lat, alt, spd, sec] → [lat, lon].
+    return pts.map((p) => [p[1], p[0]] as [number, number]);
+  }, []);
+
   // Compute ETA block minutes from raw SimBrief data
   const blockMinutes = React.useMemo(() => {
     if (simbriefRawData?.times?.est_block) {
@@ -3253,6 +3932,40 @@ export default function VueloActualView({
     return "12:45";
   }, [simbriefRawData]);
 
+  // Offsets UTC de `of_airports.timezone_offset` (respaldo cuando el mapa IANA
+  // no trae el aeropuerto). null = sin dato o mapa IANA vigente (no hace falta).
+  const [originTzOffset, setOriginTzOffset] = useState<number | null>(null);
+  const [destTzOffset, setDestTzOffset] = useState<number | null>(null);
+
+  // Carga los offsets de origen/destino al importar (solo si el mapa IANA no
+  // los cubre; el mapa sigue teniendo prioridad por contemplar DST).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const oIcao = ((simbriefRawData as any)?.origin?.icao_code || originICAO || "").toUpperCase().trim();
+      const dIcao = ((simbriefRawData as any)?.destination?.icao_code || destICAO || "").toUpperCase().trim();
+      const needOrigin = oIcao !== "" && getAirportTimezone(oIcao) === "UTC";
+      const needDest = dIcao !== "" && getAirportTimezone(dIcao) === "UTC";
+      if (!needOrigin) setOriginTzOffset(null);
+      if (!needDest) setDestTzOffset(null);
+      if (!needOrigin && !needDest) return;
+      const [oOff, dOff] = await Promise.all([
+        needOrigin ? getAirportUtcOffsetHours(oIcao) : Promise.resolve(null),
+        needDest ? getAirportUtcOffsetHours(dIcao) : Promise.resolve(null),
+      ]);
+      if (cancelled) return;
+      if (needOrigin) {
+        setOriginTzOffset(oOff);
+        console.log("[Timezone] offset origen desde of_airports:", { icao: oIcao, offsetHours: oOff });
+      }
+      if (needDest) {
+        setDestTzOffset(dOff);
+        console.log("[Timezone] offset destino desde of_airports:", { icao: dIcao, offsetHours: dOff });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [simbriefRawData, originICAO, destICAO]);
+
   // Hora local del aeropuerto de origen para mostrar en UI (pre-embarque)
   // departureTime (UTC) se mantiene para cálculos internos (demoras vs ZULU TIME)
   const departureTimeLocalStr = React.useMemo(() => {
@@ -3275,22 +3988,13 @@ export default function VueloActualView({
     const ts = Number(rawCandidate);
     // Origen para timezone: prioridad SimBrief, fallback estado editable
     const originForTz = (simbriefRawData as any)?.origin?.icao_code || originICAO || "";
-    const timezone = getAirportTimezone(originForTz);
-
-    if (!isNaN(ts) && ts > 0) {
-      try {
-        const localTime = new Date(ts * 1000).toLocaleTimeString('es-ES', {
-          hour: '2-digit',
-          minute: '2-digit',
-          timeZone: timezone,
-          hour12: false,
-        });
-        console.log('[DepartureTimeLocal] ✅ origin:', originForTz, '| timezone:', timezone, '| UTC ts:', ts, '| local HH:MM:', localTime, '| UTC HH:MM:', departureTimeStr);
-        return localTime;
-      } catch (e) {
-        console.warn('[DepartureTimeLocal] ⚠️ Error toLocaleTimeString con timezone', timezone, e);
-        return departureTimeStr; // fallback a UTC si falla timezone
-      }
+    const mapTz = getAirportTimezone(originForTz);
+    // Mapa IANA primero (con DST); offset de of_airports como respaldo.
+    const iana = mapTz !== "UTC" ? mapTz : null;
+    const localTime = formatLocalHHMM(ts, iana, originTzOffset);
+    if (localTime !== null) {
+      console.log('[DepartureTimeLocal] ✅ origin:', originForTz, '| timezone:', iana ?? `UTC${originTzOffset ?? 0}`, '| UTC ts:', ts, '| local HH:MM:', localTime, '| UTC HH:MM:', departureTimeStr);
+      return localTime;
     }
     if (typeof rawCandidate === 'string' && /^\d{1,2}:\d{2}/.test(rawCandidate.trim())) {
       // Si ya es HH:MM, no hay conversión, devolver tal cual (asumimos local si no hay timestamp)
@@ -3298,7 +4002,37 @@ export default function VueloActualView({
     }
     // Fallback: si no hay SimBrief, mantener mismo fallback que departureTimeStr pero en contexto local
     return departureTimeStr;
-  }, [simbriefRawData, originICAO, departureTimeStr]);
+  }, [simbriefRawData, originICAO, departureTimeStr, originTzOffset]);
+
+  // Hora local programada de ARRIBO (destino) para anuncios (arrival_time,
+  // local_time). De sched_in UTC + huso de destino (IANA u offset).
+  const arrivalTimeStr = React.useMemo(() => {
+    const candidates: Record<string, unknown> = {
+      'times.sched_in': (simbriefRawData as any)?.times?.sched_in,
+      'general.sched_in': (simbriefRawData as any)?.general?.sched_in,
+    };
+    let rawCandidate: unknown = null;
+    for (const v of Object.values(candidates)) {
+      if (v !== undefined && v !== null && v !== '') {
+        rawCandidate = v;
+        break;
+      }
+    }
+    const ts = Number(rawCandidate);
+    if (!Number.isFinite(ts) || ts <= 0) return "";
+    const destForTz = ((simbriefRawData as any)?.destination?.icao_code || destICAO || "").toUpperCase().trim();
+    const mapTz = destForTz !== "" ? getAirportTimezone(destForTz) : "UTC";
+    const iana = mapTz !== "UTC" ? mapTz : null;
+    const local = formatLocalHHMM(ts, iana, destTzOffset);
+    if (local === null) {
+      // Sin huso conocido: UTC explícito (mismo criterio que departure local).
+      const utc = new Date(ts * 1000).toISOString().slice(11, 16);
+      console.log('[ArrivalTime] ⚠️ sin huso de destino, usando UTC:', { dest: destForTz, utc });
+      return utc;
+    }
+    console.log('[ArrivalTime] ✅ dest:', destForTz, '| timezone:', iana ?? `UTC${destTzOffset ?? 0}`, '| local HH:MM:', local);
+    return local;
+  }, [simbriefRawData, destICAO, destTzOffset]);
 
   // Verificar que simbriefRawData se actualiza correctamente después de importación
   React.useEffect(() => {
@@ -3497,6 +4231,9 @@ export default function VueloActualView({
         gate,
         departureTime: departureTimeStr,
         departureTimeLocal: departureTimeLocalStr,
+        // Hora local de arribo (destino) para anuncios de llegada; undefined
+        // si no hay dato (la variable usa su fallback textual).
+        arrivalTime: arrivalTimeStr !== "" ? arrivalTimeStr : undefined,
         scheduledTakeoffTime: scheduledTakeoffSec,
         cruiseTimeSeconds,
         isInternational: cruiseIsInternational,
@@ -3520,6 +4257,7 @@ export default function VueloActualView({
         ...savedFlightData,
         scheduledTakeoffTime: scheduledTakeoffSec,
         cruiseTimeSeconds,
+        arrivalTime: arrivalTimeStr !== "" ? arrivalTimeStr : savedFlightData.arrivalTime,
         totalDistanceNm: totalDistanceNm ?? savedFlightData.totalDistanceNm,
         destLatitude: destLatitude ?? savedFlightData.destLatitude,
         destLongitude: destLongitude ?? savedFlightData.destLongitude,
@@ -3558,7 +4296,7 @@ export default function VueloActualView({
     };
   }, [
     airline, flightCode, originICAO, destICAO, originCityName, destCityName,
-    gate, departureTimeStr, departureTimeLocalStr, captainPrimaryLang, captainSecondaryLang, flightId,
+    gate, departureTimeStr, departureTimeLocalStr, arrivalTimeStr, captainPrimaryLang, captainSecondaryLang, flightId,
     simbriefRawData, simbriefAircraft, resolvedAirports,
     specialEvents, specialEventEnabled,
   ]);
@@ -3654,29 +4392,44 @@ export default function VueloActualView({
     return parseMETAR(simbriefRawData?.destination?.metar || "");
   }, [simbriefRawData]);
 
-  // Calculate global passenger statistics
-  const avgSatisfaction = Math.round(
-    passengers.reduce((sum, p) => sum + p.satisfaccion, 0) / passengers.length
-  );
-  const avgFear = Math.round(
-    passengers.reduce((sum, p) => sum + p.miedo, 0) / passengers.length
-  );
-  const avgHunger = Math.round(
-    passengers.reduce((sum, p) => sum + p.hambre, 0) / passengers.length
-  );
-  const avgBathroom = Math.round(
-    passengers.reduce((sum, p) => sum + p.bano, 0) / passengers.length
-  );
-
-  const p26Satisfaction = mockInfo ? mockInfo.satisfaction : avgSatisfaction;
-  const p26Fear = mockInfo ? mockInfo.fear : avgFear;
-  const p26Hunger = mockInfo ? mockInfo.hunger : avgHunger;
-  const p26Bathroom = mockInfo ? mockInfo.bathroom : avgBathroom;
+  // Fase 1 pasajeros: el motor es la ÚNICA fuente de los resúmenes de
+  // satisfacción (los mockups legacy por etapa quedaron eliminados).
+  // paxAverages se refresca 1Hz; null = muestra aún no iniciada.
+  const paxScore =
+    paxAverages !== null
+      ? Math.round(
+          (paxAverages.saciedad +
+            paxAverages.confortFisiologico +
+            paxAverages.calma +
+            paxAverages.entretenimiento) /
+            4
+        )
+      : null;
+  // Muestra trackeada para conteos y lista compacta (se relee en cada render;
+  // el estado paxAverages 1Hz es el que dispara el re-render).
+  const enginePaxList = passengerEngineRef.current?.isStarted()
+    ? passengerEngineRef.current.getState().passengers
+    : [];
+  const enginePaxScore = (attrs: AttributeState): number =>
+    Math.round(
+      (attrs.saciedad + attrs.confortFisiologico + attrs.calma + attrs.entretenimiento) / 4
+    );
+  const enginePaxNames = (() => {
+    try {
+      const map = new Map<string, string>();
+      for (const b of passengerEngineRef.current?.getArchetypeBreakdown() ?? []) {
+        map.set(b.archetypeId, b.name);
+      }
+      return map;
+    } catch {
+      return new Map<string, string>();
+    }
+  })();
 
   // SVG parameters for satisfying circular gauge
   const radius = 50;
   const circumference = 2 * Math.PI * radius;
-  const strokeDashoffset = circumference - (avgSatisfaction / 100) * circumference;
+  const strokeDashoffset = circumference - ((paxScore ?? 0) / 100) * circumference;
 
   // Render score stars or land ratings back
   const getLandingRating = (fpm: number) => {
@@ -3702,7 +4455,7 @@ export default function VueloActualView({
               onClick={() => setShowPackageManager(false)}
               className="text-[#45AFFF] hover:text-[#43E600] font-mono font-bold text-xs uppercase tracking-wider mb-2 flex items-center gap-1.5 focus:outline-none transition-all border border-[#3B7EB2]/30 px-3 py-1.5 rounded bg-[#00172e]/50 cursor-pointer"
             >
-              ← Volver al Vuelo Actual
+              ← {t("volar.back_to_select")}
             </button>
             <h1 className="font-display font-extrabold text-3xl tracking-tight text-[#45AFFF] flex items-center gap-2">
               <span className="w-3.5 h-3.5 rounded-full bg-[#43E600] animate-pulse" />
@@ -3788,12 +4541,12 @@ export default function VueloActualView({
                   </h3>
                 </div>
                 <div className="text-right text-[11px] font-mono text-white/60">
-                  Directorio: <strong className="text-white">announs/packs/{selectedPackage}/</strong>
+                  {t("flight_view.pkg_manager_dir")} <strong className="text-white">announs/packs/{selectedPackage}/</strong>
                 </div>
               </div>
 
               <p className="text-xs text-white/70 leading-relaxed mb-2">
-                Asigna un archivo de audio real (.mp3, .wav) para cada evento de cabina del simulador. Al interactuar con el simulador o activar el evento, se reproducirá el archivo seleccionado.
+                {t("flight_view.pkg_manager_intro")}
               </p>
 
               <div className="space-y-3.5 max-h-[580px] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-white/10">
@@ -3831,7 +4584,7 @@ export default function VueloActualView({
                           }}
                           className="text-[10px] font-mono px-3 py-1.5 rounded cursor-pointer transition-all uppercase flex items-center gap-1.5 bg-[#002440]/60 text-[#45AFFF] border border-[#3B7EB2]/40 hover:bg-[#45AFFF] hover:text-[#00172e]"
                         >
-                          <span>⚡ PROBAR AUDIO</span>
+                          <span>⚡ {t("flight_view.pkg_test_audio")}</span>
                         </button>
 
                         <button
@@ -3844,7 +4597,7 @@ export default function VueloActualView({
                           }}
                           className="bg-white/5 text-white/70 hover:bg-white/10 text-[10px] font-mono px-3 py-1.5 rounded border border-white/10 transition-all cursor-pointer"
                         >
-                          Reasignar archivo
+                          {t("flight_view.pkg_reassign")}
                         </button>
                       </div>
                     </div>
@@ -3854,7 +4607,7 @@ export default function VueloActualView({
 
               {/* Status and instruction info */}
               <div className="bg-[#43E600]/5 border border-[#43E600]/30 rounded-[5px] p-4 text-xs font-sans text-white/90 leading-relaxed">
-                💡 <strong>Consejo del Operador:</strong> Cuando utilices el modo <strong>"PACK"</strong> en el panel de eventos del vuelo, el sistema omitirá automáticamente la síntesis neuronal generativa del copiloto o la azafata y cargará la grabación estática de paquete listada en esta pantalla. Es ideal para emular azafatas reales con grabaciones originales de cada aerolínea.
+                💡 <strong>{t("flight_view.pkg_tip_title")}</strong> {t("flight_view.pkg_tip_body")}
               </div>
             </div>
           </div>
@@ -3877,11 +4630,11 @@ export default function VueloActualView({
           <div className="flex items-center justify-between border-b border-white/5 pb-2 gap-2">
             <div className="flex items-center gap-2 font-mono text-[#45AFFF] font-extrabold text-xs uppercase tracking-wider">
               <span className="w-2 h-2 rounded-full bg-[#43E600] animate-pulse" />
-              <span>Etapas de Vuelo</span>
+              <span>{t("flight_view.stages_title")}</span>
             </div>
             <div className="flex items-center gap-2">
               <div className="text-[10px] font-mono text-white/55 uppercase hidden sm:block">
-                Fase Activa: <span className="text-[#43E600] font-black">{currentSubStage}</span>
+                {t("flight_view.active_phase")} <span className="text-[#43E600] font-black">{tStage(currentSubStage)}</span>
               </div>
               <DebugMonitorButton onClick={() => setIsDebugOpen(true)} />
             </div>
@@ -4007,11 +4760,11 @@ export default function VueloActualView({
                   className="bg-[#43E600] text-black font-mono font-black px-4 py-2 rounded-[5px] text-xs hover:bg-[#3bcc00] transition-all flex items-center justify-center gap-1.5 cursor-pointer h-9 shrink-0 shadow-[0_0_15px_rgba(67,230,0,0.35)] hover:scale-[1.01] active:scale-[0.99]"
                 >
                   <CheckCircle className="w-3.5 h-3.5" />
-                  FINALIZAR
+                  {t("flight_view.finalize")}
                 </button>
               ) : showCancelConfirm ? (
                 <div className="flex items-center gap-1.5 bg-red-500/10 border border-red-500/30 p-1.5 rounded-[5px] h-9 animate-fadeIn">
-                  <span className="text-[9px] font-mono text-red-400 font-bold px-1 uppercase tracking-wider hidden sm:inline">¿Confirmar?</span>
+                  <span className="text-[9px] font-mono text-red-400 font-bold px-1 uppercase tracking-wider hidden sm:inline">                    {t("flight_view.confirm_q")}</span>
                   <button
                     onClick={() => {
                       setIsBoardingActive(false);
@@ -4022,13 +4775,13 @@ export default function VueloActualView({
                     }}
                     className="bg-red-600 hover:bg-red-700 text-white font-mono font-bold px-2 py-1 rounded text-[10px] uppercase transition-all cursor-pointer"
                   >
-                    Sí, Salir
+                    {t("flight_view.yes_exit")}
                   </button>
                   <button
                     onClick={() => setShowCancelConfirm(false)}
                     className="bg-white/10 hover:bg-white/20 text-white font-mono font-medium px-2 py-1 rounded text-[10px] uppercase transition-all cursor-pointer"
                   >
-                    No
+                    {t("flight_view.no")}
                   </button>
                 </div>
               ) : (
@@ -4038,7 +4791,7 @@ export default function VueloActualView({
                   className="bg-red-500/20 hover:bg-red-500/35 text-red-400 font-mono font-bold px-3 py-2 rounded-[5px] text-xs border border-red-500/30 hover:border-red-500/50 transition-all flex items-center justify-center gap-1.5 cursor-pointer h-9 shrink-0"
                 >
                   <XCircle className="w-3.5 h-3.5" />
-                  Cancelar
+                  {t("flight_view.cancel")}
                 </button>
               )
             ) : (
@@ -4055,11 +4808,11 @@ export default function VueloActualView({
                       className="bg-[#002440]/60 hover:bg-[#002440]/90 text-white/90 font-mono font-bold px-3 py-2 rounded-[5px] text-xs border border-white/10 hover:border-white/20 transition-all flex items-center justify-center gap-1.5 cursor-pointer h-9 shrink-0"
                     >
                       <ArrowLeft className="w-3.5 h-3.5" />
-                      Volver
+                      {t("flight_view.back")}
                     </button>
                   ) : showCancelConfirm ? (
                     <div className="flex items-center gap-1.5 bg-red-500/10 border border-red-500/30 p-1.5 rounded-[5px] h-9">
-                      <span className="text-[9px] font-mono text-red-400 font-bold px-1 uppercase tracking-wider hidden sm:inline">¿Confirmar?</span>
+                      <span className="text-[9px] font-mono text-red-400 font-bold px-1 uppercase tracking-wider hidden sm:inline">                    {t("flight_view.confirm_q")}</span>
                       <button
                         onClick={() => {
                           setIsBoardingActive(false);
@@ -4070,7 +4823,7 @@ export default function VueloActualView({
                         }}
                         className="bg-red-600 hover:bg-red-700 text-white font-mono font-bold px-2 py-1 rounded text-[10px] uppercase transition-all cursor-pointer"
                       >
-                        Sí, Salir
+                        {t("flight_view.yes_exit")}
                       </button>
                       <button
                         onClick={() => setShowCancelConfirm(false)}
@@ -4086,7 +4839,7 @@ export default function VueloActualView({
                       className="bg-red-500/20 hover:bg-red-500/35 text-red-400 font-mono font-bold px-3 py-2 rounded-[5px] text-xs border border-red-500/30 hover:border-red-500/50 transition-all flex items-center justify-center gap-1.5 cursor-pointer h-9 shrink-0"
                     >
                       <XCircle className="w-3.5 h-3.5" />
-                      Cancelar
+                      {t("flight_view.cancel")}
                     </button>
                   )}
 
@@ -4117,7 +4870,7 @@ export default function VueloActualView({
                       className="bg-[#43E600] hover:bg-[#3bcc00] text-black font-mono font-bold px-4 py-2 rounded-[5px] text-xs flex items-center justify-center gap-1.5 transition-all hover:scale-[1.02] active:scale-[0.98] shadow-md h-9 shrink-0 cursor-pointer animate-pulse shadow-[0_0_15px_rgba(67,230,0,0.3)]"
                     >
                       <Play className="w-3.5 h-3.5 fill-black" />
-                      COMENZAR EMBARQUE
+                      {t("flight_view.start_boarding")}
                     </button>
                   )}
 
@@ -4133,7 +4886,7 @@ export default function VueloActualView({
                         schedulerRef.current?.closeDoors();
                       }}
                       disabled={!canCloseDoors}
-                      title={!boardingComplete ? "Esperando embarque completo" : "Cerrar puertas y pasar a PRE_FLIGHT"}
+                      title={!boardingComplete ? t("flight_view.waiting_boarding") : t("flight_view.close_doors_ready")}
                       className={`font-mono font-bold px-4 py-2 rounded-[5px] text-xs flex items-center justify-center gap-1.5 h-9 shrink-0 transition-all ${
                         canCloseDoors
                           ? "bg-[#E68B00] hover:bg-[#ffa726] text-black shadow-[0_0_15px_rgba(230,139,0,0.35)] cursor-pointer hover:scale-[1.02] active:scale-[0.98]"
@@ -4141,7 +4894,7 @@ export default function VueloActualView({
                       }`}
                     >
                       <DoorClosed className="w-3.5 h-3.5" />
-                      CERRAR PUERTAS
+                      {t("flight_view.close_doors")}
                     </button>
                   )}
                 </div>
@@ -4212,7 +4965,21 @@ export default function VueloActualView({
                       </span>
                     </div>
 
-                    <div className="h-8 w-[1px] bg-white/10 hidden lg:block shrink-0" />
+                <div className="h-8 w-[1px] bg-white/10 hidden lg:block shrink-0" />
+
+                {/* Badge de campaña vigente (match por origen + destino) */}
+                {campaignMatch && campaignMatch.xpMultiplier > 1 && (
+                  <div className="flex flex-col text-center sm:text-left shrink-0">
+                    <span className="text-[9px] font-mono font-extrabold tracking-widest text-[#E68B00]/90 uppercase">
+                      {t("volar.campaign_matched")}
+                    </span>
+                    <span className="mt-1 inline-flex items-center gap-1 bg-[#E68B00]/10 border border-[#E68B00]/50 rounded-[4px] px-2 py-1 font-mono font-extrabold text-[11px] text-[#E68B00] whitespace-nowrap">
+                      {formatMultiplier(campaignMatch.xpMultiplier)} XP
+                    </span>
+                  </div>
+                )}
+
+                <div className="h-8 w-[1px] bg-white/10 hidden lg:block shrink-0" />
 
                     {/* Additional operational details */}
                     <div className="grid grid-cols-2 gap-x-5 text-[10px] font-mono text-white/70 flex-1 pl-0 lg:pl-1 mt-1 sm:mt-0 w-full lg:w-auto">
@@ -4234,7 +5001,7 @@ export default function VueloActualView({
                       onClick={() => setIsFlightSettingsOpen(false)}
                       className="bg-[#002440] hover:bg-[#00345C] text-white/90 hover:text-white border border-[#3B7EB2]/45 hover:border-[#3B7EB2] px-4 py-2 rounded-[5px] text-xs font-mono font-black flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-sm"
                     >
-                      Volver
+                      {t("flight_view.back")}
                     </button>
 
                     <div className="flex flex-col items-stretch gap-1.5">
@@ -4242,7 +5009,7 @@ export default function VueloActualView({
                         type="button"
                         disabled={!hasValidFlight || isStartingFlight || languagesLoading || voicesLoading || !languagesReady || !!languageError || !voicesReady || !!voiceError || (!isConnected && !isTestMode)}
                         onClick={() => handleStartFlight("normal")}
-                        title={!isConnected && !isTestMode ? "Se requiere conexión con un simulador (o modo pruebas)" : undefined}
+                        title={!isConnected && !isTestMode ? t("volar.connection_required") : undefined}
                         className="bg-[#43E600] hover:bg-[#3cd000] disabled:bg-[#43E600]/40 disabled:cursor-not-allowed text-black font-black px-5 py-2 rounded-[5px] text-xs font-mono flex items-center justify-center gap-1.5 transition-all shadow-[0_0_15px_rgba(67,230,0,0.3)] hover:scale-[1.02] active:scale-[0.98] cursor-pointer text-center"
                       >
                         <Play className="w-3.5 h-3.5 fill-black" strokeWidth={3} />
@@ -4281,13 +5048,13 @@ export default function VueloActualView({
                       <label className="block text-[11px] font-mono text-white/70 mb-1">{t("current_flight.not_started.crew.language")}</label>
                       <select
                         value={captainPrimaryLang}
-                        onChange={(e) => setCaptainPrimaryLang(e.target.value)}
+                        onChange={(e) => { userPickedRef.current.lang = true; setCaptainPrimaryLang(e.target.value); }}
                         className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF]"
                       >
                         {languagesLoading ? (
-                          <option value="" disabled>Cargando...</option>
+                          <option value="" disabled>{t("config.loading")}</option>
                         ) : langOptions.length === 0 ? (
-                          <option value="" disabled>{languageError || "Sin idiomas disponibles"}</option>
+                          <option value="" disabled>{languageError || t("flight_view.no_languages")}</option>
                         ) : (
                           langOptions.map((lang) => (
                             <option key={lang.id} value={lang.id}>{lang.name}</option>
@@ -4301,13 +5068,13 @@ export default function VueloActualView({
                       <label className="block text-[11px] font-mono text-white/70 mb-1">{t("current_flight.not_started.crew.gate_voice")}</label>
                       <select
                         value={gateAgentVoiceId}
-                        onChange={(e) => setGateAgentVoiceId(e.target.value)}
+                        onChange={(e) => { userPickedRef.current.gate = true; setGateAgentVoiceId(e.target.value); }}
                         className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF]"
                       >
                         {voicesLoading ? (
-                          <option value="" disabled>Cargando...</option>
+                          <option value="" disabled>{t("config.loading")}</option>
                         ) : gateVoiceOptions.length === 0 ? (
-                          <option value="" disabled>{voiceError || "Sin voces de agente de puerta para este idioma"}</option>
+                          <option value="" disabled>{voiceError || t("flight_view.no_gate_voices")}</option>
                         ) : (
                           <>
                             <option value="" disabled>{t("current_flight.not_started.crew.select_voice")}</option>
@@ -4324,13 +5091,13 @@ export default function VueloActualView({
                       <label className="block text-[11px] font-mono text-white/70 mb-1">{t("current_flight.not_started.crew.captain_voice")}</label>
                       <select
                         value={captainVoice}
-                        onChange={(e) => setCaptainVoice(e.target.value)}
+                        onChange={(e) => { userPickedRef.current.captain = true; setCaptainVoice(e.target.value); }}
                         className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF]"
                       >
                         {voicesLoading ? (
-                          <option value="" disabled>Cargando...</option>
+                          <option value="" disabled>{t("config.loading")}</option>
                         ) : captainVoiceOptions.length === 0 ? (
-                          <option value="" disabled>{voiceError || "Sin voces de capitán para este idioma"}</option>
+                          <option value="" disabled>{voiceError || t("flight_view.no_captain_voices")}</option>
                         ) : (
                           <>
                             <option value="" disabled>{t("current_flight.not_started.crew.select_voice")}</option>
@@ -4347,13 +5114,13 @@ export default function VueloActualView({
                       <label className="block text-[11px] font-mono text-white/70 mb-1">{t("current_flight.not_started.crew.cabin_voice")}</label>
                       <select
                         value={crewVoice}
-                        onChange={(e) => setCrewVoice(e.target.value)}
+                        onChange={(e) => { userPickedRef.current.crew = true; setCrewVoice(e.target.value); }}
                         className="w-full bg-[#00345C] border border-[#3B7EB2] text-white rounded-[5px] p-2 text-xs focus:outline-none focus:border-[#45AFFF]"
                       >
                         {voicesLoading ? (
-                          <option value="" disabled>Cargando...</option>
+                          <option value="" disabled>{t("config.loading")}</option>
                         ) : crewVoiceOptions.length === 0 ? (
-                          <option value="" disabled>{voiceError || "Sin voces de tripulación para este idioma"}</option>
+                          <option value="" disabled>{voiceError || t("flight_view.no_crew_voices")}</option>
                         ) : (
                           <>
                             <option value="" disabled>{t("current_flight.not_started.crew.select_voice")}</option>
@@ -4430,13 +5197,13 @@ export default function VueloActualView({
                 <div className="flex items-center gap-2 border-b border-white/10 pb-2">
                   <span className="text-base">🎉</span>
                   <h3 className="font-display font-bold text-base text-[#45AFFF]">
-                    Eventos Especiales de Cabina
+                    {t("flight_view.special_events_title")}
                   </h3>
                 </div>
 
                 <div className="space-y-3">
                   <label className="flex items-center justify-between gap-3 p-2.5 bg-[#002440]/35 border border-[#3B7EB2]/15 hover:border-[#3B7EB2]/35 rounded-[5px] cursor-pointer hover:bg-[#002440]/55 transition-all w-full select-none">
-                    <span className="text-white text-[11px] font-sans font-medium">Activar evento especial</span>
+                    <span className="text-white text-[11px] font-sans font-medium">{t("flight_view.special_event_enable")}</span>
                     <div className="relative inline-flex items-center shrink-0">
                       <input
                         type="checkbox"
@@ -4449,7 +5216,7 @@ export default function VueloActualView({
                   </label>
 
                   <div className="flex justify-between items-center text-[10px] font-mono text-white/50">
-                    <span className="uppercase font-bold">Detalle de Eventos Especiales</span>
+                    <span className="uppercase font-bold">{t("flight_view.special_event_detail")}</span>
                     <span className={specialEvents.length >= 450 ? "text-[#e68b00] font-bold animate-pulse" : "text-white/40"}>
                       {specialEvents.length} / 500 caract.
                     </span>
@@ -4460,15 +5227,15 @@ export default function VueloActualView({
                     value={specialEvents}
                     onChange={(e) => setSpecialEvents(e.target.value)}
                     disabled={!specialEventEnabled}
-                    placeholder="Ingresa aquí el evento especial o situación especial del vuelo..."
+                    placeholder={t("flight_view.special_event_placeholder")}
                     className={`w-full border rounded-[5px] p-3 text-xs placeholder-white/30 font-sans focus:outline-none resize-none leading-relaxed focus:border-[#45AFFF] ${specialEventEnabled ? "bg-[#002440]/60 border-[#3B7EB2]/60 text-white" : "bg-[#00172e]/40 border-white/10 text-white/40 cursor-not-allowed"}`}
                   />
                   <p className="text-[11px] text-white/50 italic leading-snug">
-                    Ej: "Hoy viaja el equipo de fútbol" o "Es Navidad"
+                    {t("flight_view.special_event_example")}
                   </p>
                   <p className="text-[11px] text-[#45AFFF]/70 italic leading-snug bg-black/20 p-2 border border-white/5 rounded flex items-start gap-1.5">
                     <span>ℹ️</span>
-                    <span>El evento será narrado por el capitán durante la fase de crucero.</span>
+                    <span>{t("flight_view.special_event_note")}</span>
                   </p>
                 </div>
               </div>
@@ -4478,7 +5245,7 @@ export default function VueloActualView({
                 <div className="flex items-center gap-2 border-b border-white/10 pb-2">
                   <Compass className="w-5 h-5 text-[#45AFFF]" />
                   <h3 className="font-display font-bold text-base text-[#45AFFF]">
-                    Servicios y Planificación de Cabina
+                    {t("flight_view.cabin_plan_title")}
                   </h3>
                 </div>
 
@@ -4488,12 +5255,12 @@ export default function VueloActualView({
                   <div className="space-y-4 bg-black/20 p-4 rounded border border-white/5 flex flex-col">
                     <div>
                       <span className="text-[10px] font-mono font-extrabold tracking-widest text-[#43E600] uppercase block border-b border-white/5 pb-1 mb-3">
-                        1) Gastronomía
+                        {t("flight_view.zone_catering")}
                       </span>
                       <div className="space-y-2.5">
-                        <ToggleSwitch checked={foodService} onChange={setFoodService} label="Servicio de Comida Principal" />
-                        <ToggleSwitch checked={breakfastService} onChange={setBreakfastService} label="Servicio de Desayuno" />
-                        <ToggleSwitch checked={snacksService} onChange={setSnacksService} label="Servicio rápido de Snacks y Bebidas" />
+                        <ToggleSwitch checked={foodService} onChange={setFoodService} label={t("flight_view.toggle_meal")} />
+                        <ToggleSwitch checked={breakfastService} onChange={setBreakfastService} label={t("flight_view.toggle_breakfast")} />
+                        <ToggleSwitch checked={snacksService} onChange={setSnacksService} label={t("flight_view.toggle_snacks")} />
                       </div>
                     </div>
 
@@ -4530,15 +5297,15 @@ export default function VueloActualView({
                   <div className="space-y-3 bg-black/20 p-4 rounded border border-white/5 flex flex-col justify-between">
                     <div>
                       <span className="text-[10px] font-mono font-extrabold tracking-widest text-[#45AFFF] uppercase block border-b border-white/5 pb-1 mb-3">
-                        2) Ventas y Promociones
+                        {t("flight_view.zone_sales")}
                       </span>
                       <div className="space-y-2.5">
-                        <ToggleSwitch checked={dutyFree} onChange={setDutyFree} label="Venta de Duty Free" />
-                        <ToggleSwitch checked={frequentFlyer} onChange={setFrequentFlyer} label="Anuncio de Pasajero Frecuente" />
+                        <ToggleSwitch checked={dutyFree} onChange={setDutyFree} label={t("flight_view.toggle_dutyfree")} />
+                        <ToggleSwitch checked={frequentFlyer} onChange={setFrequentFlyer} label={t("flight_view.toggle_frequent")} />
                       </div>
                     </div>
                     <div className="text-[10px] text-white/30 italic mt-2 font-sans line-clamp-2">
-                       Promocione programas de viajero o duty free durante la fase de crucero.
+                       {t("flight_view.sales_note")}
                     </div>
                   </div>
 
@@ -4546,15 +5313,15 @@ export default function VueloActualView({
                   <div className="space-y-3 bg-black/20 p-4 rounded border border-white/5 flex flex-col justify-between">
                     <div>
                       <span className="text-[10px] font-mono font-extrabold tracking-widest text-[#45AFFF] uppercase block border-b border-white/5 pb-1 mb-3">
-                        3) Confort y Procedimientos
+                        {t("flight_view.zone_comfort")}
                       </span>
                       <div className="space-y-2.5">
-                        <ToggleSwitch checked={wifiAnnouncement} onChange={setWifiAnnouncement} label="Anuncio disponibilidad de Wi-Fi" />
-                        <ToggleSwitch checked={customsForms} onChange={setCustomsForms} label="Formularios de Aduana" />
+                        <ToggleSwitch checked={wifiAnnouncement} onChange={setWifiAnnouncement} label={t("flight_view.toggle_wifi")} />
+                        <ToggleSwitch checked={customsForms} onChange={setCustomsForms} label={t("flight_view.toggle_customs")} />
                       </div>
                     </div>
                     <div className="text-[10px] text-white/30 italic mt-2 font-sans line-clamp-2">
-                      Configure anuncios para vuelos internacionales o con conectividad habilitable.
+                      {t("flight_view.comfort_note")}
                     </div>
                   </div>
 
@@ -4563,33 +5330,33 @@ export default function VueloActualView({
                 {/* Zona 4: Estilo de Comunicación */}
                 <div className="pt-4 border-t border-white/10 space-y-3">
                   <span className="text-[10px] font-mono font-extrabold tracking-widest text-[#43E600] uppercase block border-b border-[#3B7EB2]/45 pb-1">
-                    4) Estilo de Comunicación
+                    {t("flight_view.zone_style")}
                   </span>
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 select-none">
                     {[
                       { 
                         id: 1, 
-                        nombre: "Strict/Operational (Default)", 
-                        hace: "Se limita a la telemetría pura, meteorología y tiempos (ETA).",
-                        para: "Vuelos cortos, low-cost o simulación rigurosa y técnica." 
+                        nombre: t("flight_view.style1_name"), 
+                        hace: t("flight_view.style1_does"),
+                        para: t("flight_view.style1_for") 
                       },
                       { 
                         id: 2, 
-                        nombre: "Tourist/Cultural", 
-                        hace: "Busca datos curiosos, históricos o gastronómicos sobre el destino.",
-                        para: 'Ejemplo: "...justo para disfrutar del clima serrano o alfajores locales".' 
+                        nombre: t("flight_view.style2_name"), 
+                        hace: t("flight_view.style2_does"),
+                        para: t("flight_view.style2_for") 
                       },
                       { 
                         id: 3, 
-                        nombre: "Scenic/Landscape", 
-                        hace: "El capitán hace de guía turístico solicitando mirar por las ventanas.",
-                        para: 'Ejemplo: "...apreciar una vista despejada de la cordillera de los Andes".' 
+                        nombre: t("flight_view.style3_name"), 
+                        hace: t("flight_view.style3_does"),
+                        para: t("flight_view.style3_for") 
                       },
                       { 
                         id: 4, 
-                        nombre: "Relaxed/Charismatic", 
-                        hace: "Tono coloquial, amigable, incluye comentarios simpáticos.",
-                        para: "Ideal para simulación chárter o aerolíneas con cultura distendida." 
+                        nombre: t("flight_view.style4_name"), 
+                        hace: t("flight_view.style4_does"),
+                        para: t("flight_view.style4_for") 
                       }
                     ].map((style) => (
                       <div
@@ -4746,29 +5513,6 @@ export default function VueloActualView({
                     </span>
                   )}
                 </div>
-                <div id="package-selector-container" className="flex items-center gap-3 bg-black/30 border border-white/10 rounded-[5px] px-3 py-1.5 shrink-0 max-w-full overflow-x-auto">
-                  <label className="text-[9px] font-mono font-bold text-white/55 uppercase tracking-wider whitespace-nowrap">{t("current_flight.not_started.package_box.active_label")}</label>
-                  <select
-                    id="package-select"
-                    value={selectedPackage}
-                    onChange={(e) => setSelectedPackage(e.target.value)}
-                    className="bg-black/55 border border-[#3B7EB2]/45 text-xs text-white font-mono font-bold rounded-[3px] px-2 py-0.5 focus:outline-none cursor-pointer hover:border-[#45AFFF] transition-colors"
-                  >
-                    <option value="">{t("current_flight.not_started.package_box.no_package")}</option>
-                    <option value="aerolineas">Aerolíneas Argentinas AR Pack</option>
-                    <option value="latam">LATAM Real Voice Pack v2</option>
-                    <option value="iberia">Iberia Premium Audio</option>
-                    <option value="flybondi">Flybondi Low-Cost set</option>
-                    <option value="default">Default FS Soundset</option>
-                  </select>
-                  <button
-                    type="button"
-                    onClick={() => setShowPackageManager(true)}
-                    className="text-[#45AFFF] hover:text-[#43E600] text-[10px] font-mono font-bold hover:underline cursor-pointer border-l border-white/10 pl-2 shrink-0 transition-colors"
-                  >
-                    {t("current_flight.not_started.package_box.manage_btn")}
-                  </button>
-                </div>
               </div>
             </div>
 
@@ -4797,7 +5541,8 @@ export default function VueloActualView({
             {/* wider layout event configuration cards: 2 columns in full-width workspace with description first and narrator below */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 max-h-[460px] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-white/10">
               {activeGroupTab === "immersion" ? (
-                immersionOptions.map((item) => {
+                <>
+                {immersionOptions.map((item) => {
                   const currentValue = immersionConfig[item.key] ?? true;
 
                   return (
@@ -4855,6 +5600,49 @@ export default function VueloActualView({
                             </div>
                           </div>
                         )}
+                        {/* Fuente de música: catálogo (IA) o audio de la comunidad (Pack) */}
+                        {item.key === "play_boarding_music" && currentValue && (
+                          <div className="mt-3 space-y-2 border-t border-white/10 pt-3" onClick={(e) => e.stopPropagation()}>
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[10px] font-mono text-white/70 uppercase tracking-wider">
+                                {t("current_flight.not_started.immersion.source_label")}
+                              </span>
+                              <div className="flex bg-black/60 border border-white/15 rounded-[4px] overflow-hidden h-fit w-[165px]">
+                                {(["ia", "pack"] as const).map((mode) => {
+                                  const isSelected = effectiveBoardingAudioSource === mode;
+                                  let activeStyle = "text-white/30 border-transparent hover:text-white/60 text-[9px]";
+                                  if (isSelected) {
+                                    if (mode === "pack") activeStyle = "bg-amber-500/20 text-amber-300 border-amber-500/40 font-extrabold shadow-sm text-[9px]";
+                                    else activeStyle = "bg-sky-500/20 text-sky-400 border-[#45AFFF]/35 font-extrabold shadow-sm text-[9px]";
+                                  }
+                                  return (
+                                    <button
+                                      key={mode}
+                                      type="button"
+                                      onClick={() => handleBoardingAudioSourceChange(mode)}
+                                      className={`px-1.5 py-1 rounded-[3px] font-mono uppercase tracking-wider border cursor-pointer transition-all flex-1 text-center ${activeStyle}`}
+                                    >
+                                      {mode === "pack" ? t("current_flight.not_started.events.mode_pack") : t("current_flight.not_started.events.mode_ia")}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                            {effectiveBoardingAudioSource === "pack" && (
+                              <BoardingAudioPackSelector
+                                airlineIcao={safetyAirlineIcao}
+                                value={boardingAudioPackage?.id ?? storedBoardingAudioPackageId}
+                                onChange={handleBoardingAudioPackageChange}
+                                idPrefix="flight-boarding-pack"
+                                title={
+                                  boardingAudioPackage
+                                    ? `${t("boarding_pack.selector_title")} - ${boardingAudioPackage.package_name}`
+                                    : t("boarding_pack.selector_title")
+                                }
+                              />
+                            )}
+                          </div>
+                        )}
                       </div>
 
                       {/* Pill button switch SÍ/NO to match theme */}
@@ -4894,7 +5682,68 @@ export default function VueloActualView({
                       </div>
                     </div>
                   );
-                })
+                })}
+                {/* Ritmo de embarque (pax/min): override por vuelo del default
+                    global de Settings. Muestra el ETA del manifiesto. */}
+                <div
+                  key="boarding-pace"
+                  className="group relative bg-[#002440]/45 hover:bg-[#002440]/75 border border-[#3B7EB2]/20 hover:border-[#3B7EB2]/40 p-4 rounded-[6px] flex flex-col sm:flex-row justify-between gap-4 transition-all sm:items-start"
+                >
+                  <div className="space-y-1.5 flex-1 min-w-0 pr-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[12.5px] font-sans font-bold text-white leading-normal tracking-wide">
+                        {t("current_flight.not_started.immersion.pace.brief")}
+                        {boardingPaceOverride != null && (
+                          <span className="ml-2 text-[9px] font-mono font-bold uppercase tracking-wider text-amber-300 border border-amber-500/40 bg-amber-500/10 rounded px-1.5 py-0.5">
+                            {t("current_flight.not_started.immersion.pace_global", { count: boardingPaceGlobal })}
+                          </span>
+                        )}
+                      </span>
+                      <span className="text-[#45AFFF] hover:text-[#43E600] transition-colors cursor-help shrink-0 relative">
+                        <Info className="w-3.5 h-3.5" />
+                        <div className="invisible group-hover:visible absolute top-full left-1/2 -translate-x-1/2 mt-2.5 w-64 p-3 bg-[#01172e] border border-[#3B7EB2] text-[11px] text-white/90 leading-relaxed font-sans rounded shadow-2xl z-50 pointer-events-none font-normal">
+                          <span className="text-[#43E600] font-bold block mb-1 uppercase text-[9px] tracking-wider">{t("current_flight.not_started.immersion.details_header")}</span>
+                          {t("current_flight.not_started.immersion.pace.deep")}
+                          <div className="absolute bottom-full left-1/2 -translate-x-1/2 w-0 h-0 border-x-4 border-x-transparent border-b-4 border-b-[#3B7EB2]"></div>
+                        </div>
+                      </span>
+                    </div>
+                    <span className="text-[10px] font-mono text-white/45 uppercase block tracking-wider">
+                      {t("current_flight.not_started.immersion.pace_eta", {
+                        time: formatEtaMinSec(estimateBoardingSeconds(
+                          boardingManifest.length > 0 ? boardingManifest.length : passengers.length,
+                          effectiveBoardingPace
+                        )),
+                        count: boardingManifest.length > 0 ? boardingManifest.length : passengers.length,
+                      })}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto sm:max-w-[320px]">
+                    <input
+                      type="range"
+                      min={BOARDING_PACE_MIN_PPM}
+                      max={BOARDING_PACE_MAX_PPM}
+                      step={5}
+                      value={effectiveBoardingPace}
+                      onChange={(e) => setBoardingPaceOverride(clampBoardingPace(Number(e.target.value)))}
+                      className="flex-1 accent-[#45AFFF] cursor-pointer"
+                      aria-label={t("current_flight.not_started.immersion.pace.brief")}
+                    />
+                    <span className="font-mono text-xs text-[#43E600] font-bold shrink-0 min-w-[85px] text-right">
+                      {t("current_flight.not_started.immersion.pace_value", { count: effectiveBoardingPace })}
+                    </span>
+                    {boardingPaceOverride != null && (
+                      <button
+                        type="button"
+                        onClick={() => setBoardingPaceOverride(null)}
+                        className="text-[#45AFFF] hover:text-[#43E600] text-[10px] font-mono font-bold hover:underline cursor-pointer border-l border-white/10 pl-2 shrink-0 transition-colors"
+                      >
+                        {t("current_flight.not_started.immersion.pace_reset")}
+                      </button>
+                    )}
+                  </div>
+                </div>
+                </>
               ) : getFilteredEvents().length === 0 ? (
                 <div className="col-span-full bg-black/25 border border-white/10 rounded-[5px] p-6 text-center">
                   <p className="text-xs font-mono text-white/50">
@@ -4994,7 +5843,14 @@ export default function VueloActualView({
                           <div className="flex bg-black/60 border border-white/15 rounded-[4px] overflow-hidden h-fit w-[165px]">
                         {(["OFF", "PACK", "IA"] as const).map((mode) => {
                           const isSelected = currentValue === mode;
-                          const isPackModeDisabled = mode === "PACK" && !selectedPackage;
+                          // El video de seguridad (PACK de taxi_crew_safety_brief)
+                          // usa los packages de la comunidad (safety_video), no
+                          // el sound pack legacy: su opción PACK siempre está
+                          // habilitada.
+                          const isPackModeDisabled =
+                            mode === "PACK" &&
+                            item.eventKey !== SAFETY_VIDEO_EVENT_KEY &&
+                            !selectedPackage;
                           let activeStyle = "text-white/30 border-transparent hover:text-white/60 text-[9px]";
                           if (isSelected) {
                             if (mode === "OFF") activeStyle = "bg-red-500/20 text-red-300 border-red-500/35 font-extrabold shadow-sm text-[9px]";
@@ -5019,6 +5875,17 @@ export default function VueloActualView({
                       </div>
                     </div>
                     </div>
+                      {/* Selector del video de seguridad (modo PACK): consulta
+                          los packages de la comunidad para la aerolínea del
+                          vuelo (+ genéricos) con auto-selección por defecto. */}
+                      {item.eventKey === SAFETY_VIDEO_EVENT_KEY && currentValue === "PACK" && (
+                        <SafetyVideoPackSelector
+                          airlineIcao={safetyAirlineIcao}
+                          value={safetyPackage?.id ?? storedSafetyPackageId}
+                          onChange={handleSafetyPackageChange}
+                          idPrefix="flight-safety-pack"
+                        />
+                      )}
                     </div>
                   );
                 })
@@ -5189,10 +6056,10 @@ export default function VueloActualView({
             <div className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 flex flex-col h-[380px] shadow-lg">
               <div className="flex items-center justify-between border-b border-white/10 pb-2 mb-3">
                 <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider flex items-center gap-2">
-                  <Users className="w-4 h-4 text-[#45AFFF]" /> MANIFEST DE EMBARQUE DE PASAJEROS
+                  <Users className="w-4 h-4 text-[#45AFFF]" /> {t("flight_view.manifest_boarding")}
                 </h3>
                 <span className="text-[10px] font-mono bg-[#45AFFF]/15 px-2 py-0.5 rounded text-white/80 border border-white/10">
-                  Total: {displayTotalPassengers} pax
+                  {t("flight_view.total_pax", { count: displayTotalPassengers })}
                 </span>
               </div>
 
@@ -5202,13 +6069,13 @@ export default function VueloActualView({
                   const isBoardingCurrent = idx === boardedCount && isBoardingActive;
                   
                   let statusBg = "bg-white/5 border-white/10 text-white/40";
-                  let statusText = "SALA DE ESPERA";
+                  let statusText = t("flight_view.status_waiting");
                   if (isBoarded) {
                     statusBg = "bg-[#43E600]/10 border-[#43E600]/30 text-[#43E600]";
-                    statusText = "A BORDO";
+                    statusText = t("flight_view.status_boarded");
                   } else if (isBoardingCurrent) {
                     statusBg = "bg-amber-500/20 border-amber-500/40 text-amber-300 animate-pulse";
-                    statusText = "ABORDANDO...";
+                    statusText = t("flight_view.status_boarding");
                   }
 
                   return (
@@ -5226,7 +6093,7 @@ export default function VueloActualView({
                         <div>
                           <div className="flex items-center gap-1.5">
                             <span className="font-bold text-xs text-white truncate max-w-[150px]">{p.nombre}</span>
-                            <span className="text-[9px] font-mono text-white/45 bg-white/5 px-1 py-0.5 rounded">Clase {p.clase}</span>
+                            <span className="text-[9px] font-mono text-white/45 bg-white/5 px-1 py-0.5 rounded">{t("flight_view.class_label", { class: p.clase })}</span>
                           </div>
                           <span className="text-[9.5px] text-[#45AFFF]/75 font-mono">{p.nacionalidad}</span>
                         </div>
@@ -5235,7 +6102,7 @@ export default function VueloActualView({
                       <div className="flex items-center gap-3 shrink-0">
                         {/* Satisfaccion / Miedo indicator */}
                         <div className="text-[10px] font-mono text-right hidden sm:block">
-                          <span className="text-white/60">Sat:</span> <strong className="text-white bg-[#43E600]/10 border border-[#43E600]/25 px-1 py-0.2 rounded font-black">{p.satisfaccion}%</strong>
+                          <span className="text-white/60">{t("flight_view.sat_short")}</span> <strong className="text-white bg-[#43E600]/10 border border-[#43E600]/25 px-1 py-0.2 rounded font-black">{p.satisfaccion}%</strong>
                         </div>
 
                         {/* Connection status badge */}
@@ -5258,7 +6125,7 @@ export default function VueloActualView({
             <div className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 shadow-lg space-y-3">
               <div className="flex justify-between items-center border-b border-white/10 pb-2">
                 <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider flex items-center gap-1.5 font-bold">
-                  <Radio className="w-4 h-4 text-[#43E600]" /> Último anuncio
+                  <Radio className="w-4 h-4 text-[#43E600]" /> {t("flight_view.last_announcement")}
                 </h3>
               </div>
               
@@ -5274,17 +6141,17 @@ export default function VueloActualView({
                     : currentAnnouncement
                       ? `"${currentAnnouncement.text}"`
                       : isGenerating
-                        ? "Generando anuncio..."
+                        ? t("flight_view.generating_announcement")
                         : null}
                 </p>
                 
                 <div className="mt-3 pt-2.5 border-t border-white/15 flex justify-between items-center text-[9.5px] font-mono text-white/50">
                   {(() => {
                     if (!currentAnnouncement) return null;
-                    const roleLabel = currentAnnouncement.speaker_role === "captain" ? "Capitán" : currentAnnouncement.speaker_role === "crew" ? "Tripulación de Cabina" : "Agente de Puerta";
+                    const roleLabel = currentAnnouncement.speaker_role === "captain" ? t("flight_view.role_captain") : currentAnnouncement.speaker_role === "crew" ? t("flight_view.role_crew") : t("flight_view.role_gate");
                     return (
                       <>
-                        <span>NARRACIÓN: <strong className="text-white font-bold">{getSpeakerName(currentAnnouncement.speaker_role)}</strong></span>
+                        <span>{t("flight_view.narration")} <strong className="text-white font-bold">{getSpeakerName(currentAnnouncement.speaker_role)}</strong></span>
                         <span className="text-[#45AFFF] uppercase font-black text-[8px] tracking-wider bg-[#45AFFF]/10 px-1.5 py-0.5 rounded border border-[#45AFFF]/20">{roleLabel}</span>
                       </>
                     );
@@ -5293,10 +6160,13 @@ export default function VueloActualView({
               </div>
             </div>
 
+            {/* Fase 1 pasajeros: estado agregado de cabina (muestra de 10) */}
+            <PassengerStatusPanel averages={paxAverages} started={paxStarted} flash={paxFlash} />
+
             {/* Tripulación al Mando (Con indicadores que se iluminan al hablar) */}
             <div className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 shadow-lg space-y-4">
               <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider border-b border-white/10 pb-2">
-                Canales de Voz de Tripulación
+                {t("flight_view.crew_channels")}
               </h3>
               
               <div className="space-y-3">
@@ -5318,7 +6188,7 @@ export default function VueloActualView({
                           )}
                         </div>
                         <div>
-                          <span className="text-[10px] font-mono text-white/45 block uppercase font-bold">Comandante</span>
+                          <span className="text-[10px] font-mono text-white/45 block uppercase font-bold">{t("flight_view.commander")}</span>
                           <span className={`text-[12px] font-sans font-black tracking-wide ${isCaptainSpeaking ? 'text-[#43E600]' : 'text-white'}`}>
                             {getSpeakerName("captain")}
                           </span>
@@ -5327,7 +6197,7 @@ export default function VueloActualView({
                       <span className={`text-[9px] font-mono px-2 py-0.5 rounded uppercase font-bold tracking-wider ${
                         isCaptainSpeaking ? "bg-[#43E600] text-black bg-opacity-80" : "bg-black/40 text-white/30"
                       }`}>
-                        {isCaptainSpeaking ? "Hablando" : "A la escucha"}
+                        {isCaptainSpeaking ? t("flight_view.speaking") : t("flight_view.listening")}
                       </span>
                     </div>
                   );
@@ -5351,7 +6221,7 @@ export default function VueloActualView({
                           )}
                         </div>
                         <div>
-                          <span className="text-[10px] font-mono text-white/45 block uppercase font-bold font-mono">Jefe de Tripulación</span>
+                          <span className="text-[10px] font-mono text-white/45 block uppercase font-bold font-mono">{t("flight_view.crew_chief")}</span>
                           <span className={`text-[12px] font-sans font-black tracking-wide ${isCrewSpeaking ? 'text-[#43E600]' : 'text-white'}`}>
                             {getSpeakerName("crew")}
                           </span>
@@ -5360,7 +6230,7 @@ export default function VueloActualView({
                       <span className={`text-[9px] font-mono px-2 py-0.5 rounded uppercase font-bold tracking-wider ${
                         isCrewSpeaking ? "bg-[#43E600] text-black bg-opacity-80" : "bg-black/40 text-white/30"
                       }`}>
-                        {isCrewSpeaking ? "Hablando" : "A la escucha"}
+                        {isCrewSpeaking ? t("flight_view.speaking") : t("flight_view.listening")}
                       </span>
                     </div>
                   );
@@ -5373,17 +6243,17 @@ export default function VueloActualView({
               <div className="space-y-4">
                 {/* Música Ambiente Info */}
                 <div className="p-3 bg-black/25 rounded-[5px] border border-[#3B7EB2]/30 text-xs text-white/95 font-sans">
-                  <span className="font-mono text-[#45AFFF] font-semibold text-[11px] block mb-1">MÚSICA EMBARQUE:</span>
+                  <span className="font-mono text-[#45AFFF] font-semibold text-[11px] block mb-1">{t("flight_view.boarding_music")}</span>
                   <div className="flex justify-between text-[10px] font-mono">
-                    <span>SISTEMA: <strong className="text-[#43E600]">ON AIR</strong></span>
-                    <span>TEMA: {boardingMusicTrackId === RANDOM_MUSIC_ID ? t("music.random") : selectedMusicTrack?.name || t("music.no_music")}</span>
+                    <span>{t("flight_view.system_label")} <strong className="text-[#43E600]">ON AIR</strong></span>
+                    <span>{t("flight_view.theme_label")} {boardingMusicTrackId === RANDOM_MUSIC_ID ? t("music.random") : selectedMusicTrack?.name || t("music.no_music")}</span>
                   </div>
                 </div>
 
                 {/* Volumen Slider */}
                 <div>
                   <div className="flex justify-between items-center text-xs font-mono mb-1 text-white/80">
-                    <span>VOLUMEN:</span>
+                    <span>{t("flight_view.volume")}</span>
                     <span className="text-[#45AFFF] font-bold">{copilotVolume}%</span>
                   </div>
                   <input 
@@ -5406,15 +6276,28 @@ export default function VueloActualView({
 
       {/* ==================== ESTADO C: EN VUELO (EMBARQUE Y CRUCERO) ==================== */}
       {currentState === FlightState.EnVuelo && !isPhase2To7 && (
-        <div id="vuelo-estado-C" className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-fadeIn">
-          
+        <div id="vuelo-estado-C" className="space-y-6 animate-fadeIn">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+          {/* IFE principal: reemplaza al manifiesto tras el cierre de puertas */}
+          <div className="lg:col-span-2 min-w-0">
+            <IfeScreen
+              flight={ifeFlight}
+              guest={ifeGuest}
+              originCoords={ifeOriginCoords}
+              destCoords={ifeDestCoords}
+              getTelemetry={ifeGetTelemetry}
+              getFlownPath={ifeGetFlownPath}
+            />
+          </div>
+
           {/* Circular Satisfaction Meter Left, triggers right */}
           <div className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 flex flex-col md:flex-row items-center gap-6 justify-around shadow-md">
             
             {/* Circular SVG Gauge for global satisfaction */}
             <div className="text-center">
               <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider mb-4 text-center">
-                Satisfacción General
+                {t("flight_view.general_satisfaction")}
               </h3>
               
               <div className="relative w-36 h-36 mx-auto flex items-center justify-center">
@@ -5443,17 +6326,17 @@ export default function VueloActualView({
                 </svg>
                 {/* Embedded digit in the center */}
                 <div className="absolute inset-0 flex flex-col items-center justify-center">
-                  <span className="text-2xl font-display font-extrabold text-white">{avgSatisfaction}%</span>
-                  <span className="text-[9px] font-mono text-white/60">CONFORME</span>
+                  <span className="text-2xl font-display font-extrabold text-white">{paxScore !== null ? `${paxScore}%` : "—"}</span>
+                  <span className="text-[9px] font-mono text-white/60">{t("flight_view.satisfied")}</span>
                 </div>
               </div>
 
               <div className="mt-4 flex gap-4 justify-center text-xs font-mono">
                 <span className="flex items-center gap-1 text-[#43E600]">
-                  <Smile className="w-4 h-4" /> {passengers.filter(p => p.satisfaccion >= 70).length} Felices
+                  <Smile className="w-4 h-4" /> {enginePaxList.filter(p => enginePaxScore(p.attributes) >= 70).length} {t("flight_view.happy")}
                 </span>
                 <span className="flex items-center gap-1 text-[#E68B00]">
-                  <Frown className="w-4 h-4" /> {passengers.filter(p => p.satisfaccion < 50).length} Incómodos
+                  <Frown className="w-4 h-4" /> {enginePaxList.filter(p => enginePaxScore(p.attributes) < 50).length} {t("flight_view.uncomfortable")}
                 </span>
               </div>
             </div>
@@ -5464,36 +6347,36 @@ export default function VueloActualView({
                 <div className="flex justify-between text-xs font-mono mb-1 text-white/95">
                   <span className="flex items-center gap-1">
                     <AlertTriangle className="w-3.5 h-3.5 text-[#E68B00]" />
-                    ÍNDICE DE MIEDO GENERAL / TURBULENCIA:
+                    {t("flight_view.calm_turbulence")}
                   </span>
-                  <span className={`font-bold ${avgFear > 50 ? 'text-[#E600D2]' : 'text-white'}`}>{avgFear}%</span>
+                  <span className={`font-bold ${paxAverages !== null && paxAverages.calma < 40 ? 'text-[#E600D2]' : 'text-white'}`}>{paxAverages !== null ? `${Math.round(paxAverages.calma)}%` : "—"}</span>
                 </div>
                 {/* Linear tracking bar */}
                 <div className="w-full bg-[#00345C] h-2 rounded overflow-hidden">
                   <div 
-                    className={`h-full transition-all duration-500 ${avgFear > 50 ? 'bg-[#E600D2]' : 'bg-[#E68B00]'}`}
-                    style={{ width: `${avgFear}%` }}
+                    className={`h-full transition-all duration-500 ${paxAverages !== null && paxAverages.calma < 40 ? 'bg-[#E600D2]' : paxAverages !== null && paxAverages.calma < 70 ? 'bg-[#E68B00]' : 'bg-[#43E600]'}`}
+                    style={{ width: `${paxAverages !== null ? Math.round(paxAverages.calma) : 0}%` }}
                   />
                 </div>
               </div>
 
               {/* Announcement dispatcher */}
               <div className="bg-black/20 p-2.5 rounded border border-[#3B7EB2]/40 text-[11px] font-mono">
-                📞 <strong className="text-[#45AFFF]">Anuncios en curso:</strong>
+                📞 <strong className="text-[#45AFFF]">{t("flight_view.announcements_in_progress")}</strong>
                 <div className="mt-2 grid grid-cols-2 gap-1.5 text-[10px]">
                   <button 
                     id="btn-envuelo-turbulencia"
                     onClick={() => onTriggerAnnouncement("turbulencia")}
                     className="p-1 bg-[#2C6591] border border-white/20 hover:border-white/60 rounded text-white text-left cursor-pointer"
                   >
-                    ⛈️ Turbulencia
+                    ⛈️ {t("flight_view.turbulence_btn")}
                   </button>
                   <button 
                     id="btn-envuelo-descenso"
                     onClick={() => onTriggerAnnouncement("descenso")}
                     className="p-1 bg-[#2C6591] border border-white/20 hover:border-white/60 rounded text-white text-left cursor-pointer"
                   >
-                    📉 Descenso
+                    📉 {t("flight_view.descent_btn")}
                   </button>
                 </div>
               </div>
@@ -5503,38 +6386,38 @@ export default function VueloActualView({
 
 
 
-          {/* Scrollable list of Passenger metrics */}
-          <div className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 flex flex-col h-[300px] shadow-md">
-            <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider mb-2 border-b border-white/10 pb-1.5 flex items-center justify-between">
-              <span>LISTA COMPACTA DE PASAJEROS</span>
-              <span className="text-[10px] text-white/50">{displayTotalPassengers} pax</span>
-            </h3>
+          </div>
 
-            <div className="overflow-y-auto flex-1 space-y-2 pr-1" id="compact-passenger-list">
-              {passengers.map((p) => {
+          {/* Manifiesto reubicado en acordeón colapsado por defecto */}
+          <ManifestAccordion
+            title={t("flight_view.compact_pax_list")}
+            countLabel={t("flight_view.total_pax", { count: displayTotalPassengers })}
+          >
+            <div className="overflow-y-auto space-y-2 pr-1 max-h-[300px]" id="compact-passenger-list">
+              {enginePaxList.map((p) => {
+                const score = enginePaxScore(p.attributes);
                 let statusColor = "text-[#43E600]";
-                if (p.satisfaccion < 55) statusColor = "text-[#E68B00]";
-                if (p.miedo > 70) statusColor = "text-[#E600D2]";
+                if (score < 55) statusColor = "text-[#E68B00]";
+                if (score < 40) statusColor = "text-[#E600D2]";
 
                 return (
                   <div 
                     key={p.id}
                     id={`p-list-item-${p.id}`}
-                    onClick={() => setSelectedPasajero(p)}
-                    className="bg-[#00345C]/55 border border-[#3B7EB2]/40 rounded-[5px] p-2 flex items-center justify-between hover:bg-[#00345C]/90 hover:border-[#45AFFF]/70 cursor-pointer transition-all"
+                    className="bg-[#00345C]/55 border border-[#3B7EB2]/40 rounded-[5px] p-2 flex items-center justify-between"
                   >
                     <div>
                       <div className="flex items-center gap-1.5">
-                        <span className="font-bold text-xs text-white truncate max-w-[120px]">{p.nombre}</span>
-                        <span className="text-[10px] font-mono bg-white/10 px-1 rounded text-white/80">{p.asiento}</span>
+                        <span className="font-bold text-xs text-white truncate max-w-[120px]">{p.id}</span>
+                        <span className="text-[10px] font-mono bg-white/10 px-1 rounded text-white/80">{enginePaxNames.get(p.archetypeId) ?? p.archetypeId}</span>
                       </div>
-                      <span className="text-[9px] text-[#45AFFF] font-mono uppercase">{p.clase} Clase</span>
+                      <span className="text-[9px] text-[#45AFFF] font-mono uppercase">{t("flight_view.tracked_sample")}</span>
                     </div>
 
                     <div className="text-right flex items-center gap-2">
                       <div className="text-[10px] font-mono">
-                        <div className="text-white">😊 Sat: <strong className={statusColor}>{p.satisfaccion}%</strong></div>
-                        <div className="text-white/70">😰 Miedo: <strong className="text-white/90">{p.miedo}%</strong></div>
+                        <div className="text-white">😊 Score: <strong className={statusColor}>{score}%</strong></div>
+                        <div className="text-white/70">😌 Calma: <strong className="text-white/90">{Math.round(p.attributes.calma)}%</strong></div>
                       </div>
                       <span className="text-[#45AFFF]/60">➔</span>
                     </div>
@@ -5542,8 +6425,7 @@ export default function VueloActualView({
                 );
               })}
             </div>
-          </div>
-
+          </ManifestAccordion>
         </div>
       )}
 
@@ -5560,99 +6442,117 @@ export default function VueloActualView({
               <div className="flex justify-between items-center text-[10px] font-mono font-bold tracking-wider border-b border-white/10 pb-2.5 uppercase text-[#45AFFF]">
                 <span className="flex items-center gap-1.5">
                   <Users className="w-4 h-4 text-[#43E600]" />
-                  <span>Resumen de Satisfacción a Bordo - Cabin Status</span>
+                  <span>{t("flight_view.summary_title")}</span>
                 </span>
                 <span className="text-[#43E600] flex items-center gap-1.5 font-sans font-black">
                   <span className="w-1.5 h-1.5 rounded-full bg-[#43E600] animate-pulse" />
-                  ACTIVO • {currentSubStage.toUpperCase()}
+                  {t("flight_view.active")} • {tStage(currentSubStage).toUpperCase()}
                 </span>
               </div>
 
               {/* Grid de 4 Atributos Promedio (Estilo Bento Card) */}
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 mt-4">
                 
-                {/* Atributo 1: Satisfacción */}
+                {/* Atributo 1: Saciedad */}
                 <div className="bg-[#002440]/65 border border-[#3B7EB2]/25 p-3.5 rounded-[7px] flex flex-col justify-between min-h-[110px] hover:border-[#43E600]/40 transition-all duration-300">
                   <div className="flex justify-between items-center text-[10px] font-mono text-white/55 uppercase">
-                    <span>SATISFACCIÓN</span>
+                    <span>{t("flight_view.attr_satiety")}</span>
                     <Smile className="w-3.5 h-3.5 text-[#43E600]" />
                   </div>
                   <div className="my-2 flex items-baseline gap-1">
-                    <strong className="text-3xl font-display font-black text-white">{p26Satisfaction}%</strong>
-                    <span className={`text-[8.5px] font-mono font-bold uppercase ${p26Satisfaction >= 70 ? 'text-[#43E600]' : p26Satisfaction >= 45 ? 'text-[#E68B00]' : 'text-[#E600D2]'}`}>
-                      {p26Satisfaction >= 70 ? "Alta" : p26Satisfaction >= 45 ? "Aceptable" : "Baja"}
+                    <strong className="text-3xl font-display font-black text-white">{paxAverages !== null ? `${Math.round(paxAverages.saciedad)}%` : "—"}</strong>
+                    <span className={`text-[8.5px] font-mono font-bold uppercase ${paxAverages === null ? 'text-white/40' : paxAverages.saciedad >= 70 ? 'text-[#43E600]' : paxAverages.saciedad >= 45 ? 'text-[#E68B00]' : 'text-[#E600D2]'}`}>
+                      {paxAverages === null ? t("flight_view.no_data") : paxAverages.saciedad >= 70 ? t("flight_view.satiety_high") : paxAverages.saciedad >= 45 ? t("flight_view.satiety_ok") : t("flight_view.satiety_low")}
                     </span>
                   </div>
                   <div className="w-full bg-black/45 h-1.5 rounded-full overflow-hidden">
                     <div 
                       className="h-full bg-[#43E600] rounded-full transition-all duration-500" 
-                      style={{ width: `${p26Satisfaction}%`, filter: "drop-shadow(0 0 2px #43E600)" }} 
+                      style={{ width: `${paxAverages !== null ? Math.round(paxAverages.saciedad) : 0}%`, filter: "drop-shadow(0 0 2px #43E600)" }} 
                     />
                   </div>
                 </div>
 
-                {/* Atributo 2: Miedo */}
+                {/* Atributo 2: Calma */}
                 <div className="bg-[#002440]/65 border border-[#3B7EB2]/25 p-3.5 rounded-[7px] flex flex-col justify-between min-h-[110px] hover:border-[#E600D2]/40 transition-all duration-300">
                   <div className="flex justify-between items-center text-[10px] font-mono text-white/55 uppercase">
-                    <span>ÍNDICE MIEDO</span>
+                    <span>{t("flight_view.attr_calm")}</span>
                     <AlertTriangle className="w-3.5 h-3.5 text-[#E600D2]" />
                   </div>
                   <div className="my-2 flex items-baseline gap-1">
-                    <strong className="text-3xl font-display font-black text-white">{p26Fear}%</strong>
-                    <span className={`text-[8.5px] font-mono font-bold uppercase ${p26Fear >= 60 ? 'text-[#E600D2]' : p26Fear >= 30 ? 'text-[#E68B00]' : 'text-[#43E600]'}`}>
-                      {p26Fear >= 60 ? "Trastorno" : p26Fear >= 30 ? "Ansiedad" : "Estable"}
+                    <strong className="text-3xl font-display font-black text-white">{paxAverages !== null ? `${Math.round(paxAverages.calma)}%` : "—"}</strong>
+                    <span className={`text-[8.5px] font-mono font-bold uppercase ${paxAverages === null ? 'text-white/40' : paxAverages.calma >= 70 ? 'text-[#43E600]' : paxAverages.calma >= 40 ? 'text-[#E68B00]' : 'text-[#E600D2]'}`}>
+                      {paxAverages === null ? t("flight_view.no_data") : paxAverages.calma >= 70 ? t("flight_view.calm_calm") : paxAverages.calma >= 40 ? t("flight_view.calm_restless") : t("flight_view.calm_tense")}
                     </span>
                   </div>
                   <div className="w-full bg-black/45 h-1.5 rounded-full overflow-hidden">
                     <div 
-                      className={`h-full rounded-full transition-all duration-500 ${p26Fear >= 60 ? 'bg-[#E600D2]' : p26Fear >= 30 ? 'bg-[#E68B00]' : 'bg-[#43E600]'}`} 
-                      style={{ width: `${p26Fear}%` }} 
+                      className={`h-full rounded-full transition-all duration-500 ${paxAverages !== null && paxAverages.calma < 40 ? 'bg-[#E600D2]' : paxAverages !== null && paxAverages.calma < 70 ? 'bg-[#E68B00]' : 'bg-[#43E600]'}`} 
+                      style={{ width: `${paxAverages !== null ? Math.round(paxAverages.calma) : 0}%` }} 
                     />
                   </div>
                 </div>
 
-                {/* Atributo 3: Hambre */}
+                {/* Atributo 3: Entretenimiento */}
                 <div className="bg-[#002440]/65 border border-[#3B7EB2]/25 p-3.5 rounded-[7px] flex flex-col justify-between min-h-[110px] hover:border-amber-400/40 transition-all duration-300">
                   <div className="flex justify-between items-center text-[10px] font-mono text-white/55 uppercase">
-                    <span>HAMBRE ALERTA</span>
+                    <span>{t("flight_view.attr_entertainment")}</span>
                     <Coffee className="w-3.5 h-3.5 text-amber-400" />
                   </div>
                   <div className="my-2 flex items-baseline gap-1">
-                    <strong className="text-3xl font-display font-black text-white">{p26Hunger}%</strong>
-                    <span className={`text-[8.5px] font-mono font-bold uppercase ${p26Hunger >= 70 ? 'text-[#E600D2]' : p26Hunger >= 35 ? 'text-amber-400' : 'text-[#43E600]'}`}>
-                      {p26Hunger >= 70 ? "Urgente" : p26Hunger >= 35 ? "Ganas" : "Satisfecho"}
+                    <strong className="text-3xl font-display font-black text-white">{paxAverages !== null ? `${Math.round(paxAverages.entretenimiento)}%` : "—"}</strong>
+                    <span className={`text-[8.5px] font-mono font-bold uppercase ${paxAverages === null ? 'text-white/40' : paxAverages.entretenimiento >= 70 ? 'text-[#43E600]' : paxAverages.entretenimiento >= 45 ? 'text-amber-400' : 'text-[#E600D2]'}`}>
+                      {paxAverages === null ? t("flight_view.no_data") : paxAverages.entretenimiento >= 70 ? t("flight_view.ent_entertained") : paxAverages.entretenimiento >= 45 ? t("flight_view.ent_distracted") : t("flight_view.ent_bored")}
                     </span>
                   </div>
                   <div className="w-full bg-black/45 h-1.5 rounded-full overflow-hidden">
                     <div 
-                      className={`h-full rounded-full transition-all duration-500 ${p26Hunger >= 70 ? 'bg-red-500' : p26Hunger >= 35 ? 'bg-amber-500' : 'bg-emerald-500'}`} 
-                      style={{ width: `${p26Hunger}%` }} 
+                      className={`h-full rounded-full transition-all duration-500 ${paxAverages !== null && paxAverages.entretenimiento < 45 ? 'bg-red-500' : paxAverages !== null && paxAverages.entretenimiento < 70 ? 'bg-amber-500' : 'bg-emerald-500'}`} 
+                      style={{ width: `${paxAverages !== null ? Math.round(paxAverages.entretenimiento) : 0}%` }} 
                     />
                   </div>
                 </div>
 
-                {/* Atributo 4: Demanda Baño */}
+                {/* Atributo 4: Confort */}
                 <div className="bg-[#002440]/65 border border-[#3B7EB2]/25 p-3.5 rounded-[7px] flex flex-col justify-between min-h-[110px] hover:border-violet-400/40 transition-all duration-300">
                   <div className="flex justify-between items-center text-[10px] font-mono text-white/55 uppercase">
-                    <span>DEMANDA BAÑO</span>
+                    <span>{t("flight_view.attr_comfort")}</span>
                     <span className="text-[11px] leading-none select-none">🚻</span>
                   </div>
                   <div className="my-2 flex items-baseline gap-1">
-                    <strong className="text-3xl font-display font-black text-white">{p26Bathroom}%</strong>
-                    <span className={`text-[8.5px] font-mono font-bold uppercase ${p26Bathroom >= 70 ? 'text-[#E600D2]' : p26Bathroom >= 35 ? 'text-violet-400' : 'text-[#43E600]'}`}>
-                      {p26Bathroom >= 70 ? "Crítico" : p26Bathroom >= 35 ? "Ganas" : "Relajados"}
+                    <strong className="text-3xl font-display font-black text-white">{paxAverages !== null ? `${Math.round(paxAverages.confortFisiologico)}%` : "—"}</strong>
+                    <span className={`text-[8.5px] font-mono font-bold uppercase ${paxAverages === null ? 'text-white/40' : paxAverages.confortFisiologico >= 70 ? 'text-[#43E600]' : paxAverages.confortFisiologico >= 45 ? 'text-violet-400' : 'text-[#E600D2]'}`}>
+                      {paxAverages === null ? t("flight_view.no_data") : paxAverages.confortFisiologico >= 70 ? t("flight_view.comfort_ok") : paxAverages.confortFisiologico >= 45 ? t("flight_view.comfort_annoyed") : t("flight_view.comfort_urgent")}
                     </span>
                   </div>
                   <div className="w-full bg-black/45 h-1.5 rounded-full overflow-hidden">
                     <div 
-                      className={`h-full rounded-full transition-all duration-500 ${p26Bathroom >= 70 ? 'bg-red-500' : p26Bathroom >= 35 ? 'bg-violet-500' : 'bg-emerald-500'}`} 
-                      style={{ width: `${p26Bathroom}%` }} 
+                      className={`h-full rounded-full transition-all duration-500 ${paxAverages !== null && paxAverages.confortFisiologico < 45 ? 'bg-red-500' : paxAverages !== null && paxAverages.confortFisiologico < 70 ? 'bg-violet-500' : 'bg-emerald-500'}`} 
+                      style={{ width: `${paxAverages !== null ? Math.round(paxAverages.confortFisiologico) : 0}%` }} 
                     />
                   </div>
                 </div>
 
               </div>
             </div>
+
+            {/* 1b. IFE - ENTRETENIMIENTO A BORDO (misma posición desde
+                PRE-FLIGHT hasta TAXI-TO-GATE; en Plataforma lo reemplaza el
+                resumen de aterrizaje). El monitor queda montado y operativo en
+                todas esas fases; el video de seguridad (modo PACK) se
+                reproduce dentro del mismo. */}
+            {currentSubStage !== "Plataforma" && (
+              <div className="animate-fadeIn">
+                <IfeScreen
+              flight={ifeFlight}
+              guest={ifeGuest}
+              originCoords={ifeOriginCoords}
+              destCoords={ifeDestCoords}
+              getTelemetry={ifeGetTelemetry}
+              getFlownPath={ifeGetFlownPath}
+            />
+              </div>
+            )}
 
             {/* 2. COMPORTAMIENTO DE ETAPA 7 (PLATAFORMA) - RESUMENES DE ATERRIZAJE E IA */}
             {currentSubStage === "Plataforma" && (
@@ -5662,32 +6562,32 @@ export default function VueloActualView({
                   <div className="flex justify-between items-center text-[10px] font-mono font-bold tracking-wider border-b border-white/10 pb-2.5 uppercase text-[#E68B00]">
                     <span className="flex items-center gap-1.5 font-bold">
                       <span className="text-sm">🛬</span>
-                      <span>Resumen de Aterrizaje - Touchdown Telemetry</span>
+                      <span>{t("flight_view.landing_summary_title")}</span>
                     </span>
                     <span className="text-[#43E600] font-sans font-black bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/25">
-                      SUAVE / GREASER
+                      {t("flight_view.soft_greaser")}
                     </span>
                   </div>
 
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-4 font-mono">
                     <div className="bg-black/30 p-3 rounded border border-white/10 text-center">
-                      <span className="text-[9px] text-white/50 block">CLASIFICACIÓN:</span>
-                      <strong className="text-sm text-[#43E600] block mt-1 font-sans font-black">Soft Landing</strong>
+                      <span className="text-[9px] text-white/50 block">{t("flight_view.classification")}</span>
+                      <strong className="text-sm text-[#43E600] block mt-1 font-sans font-black">{t("flight_view.soft_landing")}</strong>
                     </div>
 
                     <div className="bg-black/30 p-3 rounded border border-white/10 text-center">
-                      <span className="text-[9px] text-white/50 block">FUERZA G (G-FORCE):</span>
+                      <span className="text-[9px] text-white/50 block">{t("flight_view.gforce")}</span>
                       <strong className="text-base text-white font-sans font-black block mt-0.5">1.12 G</strong>
                     </div>
 
                     <div className="bg-black/30 p-3 rounded border border-white/10 text-center">
-                      <span className="text-[9px] text-white/50 block">VELOCIDAD VERTICAL:</span>
+                      <span className="text-[9px] text-white/50 block">{t("flight_view.vertical_speed")}</span>
                       <strong className="text-base text-[#43E600] font-sans font-black block mt-0.5">-115 FPM</strong>
                     </div>
 
                     <div className="bg-black/30 p-3 rounded border border-white/10 text-center">
-                      <span className="text-[9px] text-white/50 block">BOTES (BOUNCES):</span>
-                      <strong className="text-base text-white font-sans font-black block mt-0.5">0 (Ninguno)</strong>
+                      <span className="text-[9px] text-white/50 block">{t("flight_view.bounces")}</span>
+                      <strong className="text-base text-white font-sans font-black block mt-0.5">0 ({t("flight_view.none")})</strong>
                     </div>
                   </div>
                 </div>
@@ -5698,7 +6598,7 @@ export default function VueloActualView({
                   <div className="flex justify-between items-center text-[10px] font-mono font-bold tracking-wider border-b border-white/10 pb-2.5 uppercase text-[#43E600]">
                     <span className="flex items-center gap-1.5 font-bold">
                       <Trophy className="w-4 h-4" />
-                      <span>Experiencia Ganada - Desglose XP</span>
+                      <span>{t("flight_view.xp_earned_title")}</span>
                     </span>
                     {xpCompletion?.status === "done" && xpCompletion.totalFlightXp !== null && (
                       <span className="font-sans font-black bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/25">
@@ -5711,17 +6611,16 @@ export default function VueloActualView({
                     <div className="flex flex-col items-center justify-center py-6 text-center space-y-2">
                       <Loader2 className="w-6 h-6 text-[#43E600] animate-spin" />
                       <p className="text-xs font-mono text-white/70 font-bold">
-                        {!xpCompletion ? "Aguardando cierre del vuelo…" : "Calculando experiencia…"}
+                        {!xpCompletion ? t("flight_view.awaiting_close") : t("flight_view.calculating_xp")}
                       </p>
                       <p className="text-[10px] font-mono text-white/40">
-                        El desglose aparece al persistirse el recorrido (AT_GATE / Finalizar).
+                        {t("flight_view.breakdown_note")}
                       </p>
                     </div>
                   ) : xpCompletion.status === "error" ? (
                     <div className="space-y-3 mt-3">
                       <div className="bg-red-900/30 border border-red-500/40 rounded px-3 py-2 text-[11px] font-mono text-red-300">
-                        No se pudo otorgar la XP: {xpCompletion.error ?? "fallo en el cierre."} Se muestran los
-                        valores calculados localmente (no otorgados).
+                        {t("flight_view.xp_error", { error: xpCompletion.error ?? t("flight_view.breakdown_note") })}
                       </div>
                       <ul className="space-y-2">
                         {explainXpBreakdown(xpCompletion.bonuses).map((bonus) => (
@@ -5741,12 +6640,25 @@ export default function VueloActualView({
                     <div className="space-y-3 mt-3">
                       <div className="flex items-center justify-between gap-2 bg-black/30 rounded border border-white/10 px-3 py-2">
                         <span className="text-xs font-mono font-bold text-white uppercase tracking-wider">
-                          Base por tiempo de vuelo
+                          {t("flight_view.base_time")}
                         </span>
                         <span className="text-lg font-mono font-extrabold text-white whitespace-nowrap">
                           → {(xpCompletion.baseXpAwarded ?? 0).toLocaleString("en-US")} XP
                         </span>
                       </div>
+                      {(xpCompletion.campaignXp ?? 0) > 0 && (
+                        <div className="flex items-center justify-between gap-2 bg-[#E68B00]/10 rounded border border-[#E68B00]/40 px-3 py-2">
+                          <span className="text-xs font-mono font-bold text-[#E68B00] uppercase tracking-wider">
+                            {t("volar.campaign_bonus_label")}
+                            {xpCompletion.campaignMultiplier && xpCompletion.campaignMultiplier > 1
+                              ? ` ${formatMultiplier(xpCompletion.campaignMultiplier)}`
+                              : ""}
+                          </span>
+                          <span className="text-lg font-mono font-extrabold text-[#E68B00] whitespace-nowrap">
+                            → +{(xpCompletion.campaignXp ?? 0).toLocaleString("en-US")} XP
+                          </span>
+                        </div>
+                      )}
                       <ul className="space-y-2">
                         {explainXpBreakdown(xpCompletion.bonuses).map((bonus) => (
                           <li key={bonus.key} className="flex items-start justify-between gap-2 text-xs font-mono pl-1">
@@ -5777,10 +6689,10 @@ export default function VueloActualView({
                   <div className="flex justify-between items-center text-[10px] font-mono font-bold tracking-wider border-b border-white/10 pb-2.5 uppercase text-[#45AFFF]">
                     <span className="flex items-center gap-1.5 font-bold">
                       <span className="text-sm">🤖</span>
-                      <span>Informe de Operaciones IA - Virtual Cab AI Report</span>
+                      <span>{t("flight_view.ai_report_title")}</span>
                     </span>
                     <span className="text-[#45AFFF] font-mono font-bold">
-                      VERSIÓN 1.2
+                      {t("flight_view.version")}
                     </span>
                   </div>
 
@@ -5788,28 +6700,33 @@ export default function VueloActualView({
                     <div className="flex flex-col items-center justify-center py-8 text-center space-y-3">
                       <Loader2 className="w-8 h-8 text-[#45AFFF] animate-spin" />
                       <div className="space-y-1">
-                        <p className="text-xs font-mono text-white/80 animate-pulse font-bold">GENERANDO INFORME DE INTELIGENCIA DE VUELO...</p>
-                        <p className="text-[10px] font-mono text-white/40">Sincronizando encuestas de satisfacción y datos telemétricos...</p>
+                        <p className="text-xs font-mono text-white/80 animate-pulse font-bold">{t("flight_view.generating_report")}</p>
+                        <p className="text-[10px] font-mono text-white/40">{t("flight_view.syncing_data")}</p>
                       </div>
                     </div>
                   ) : (
                     <div className="mt-4 space-y-3 font-mono text-xs leading-relaxed text-white/95 bg-black/45 p-4 rounded border border-[#3B7EB2]/30 animate-fadeIn" id="ai-report-body">
                       <div className="flex items-center gap-1.5 text-emerald-400 font-bold border-b border-emerald-500/10 pb-1.5 text-[11px] mb-2 uppercase">
                         <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
-                        VUELO COMPLETADO CON ÉXITO • FLIGHT DIRECTIVE SATISFIED
+                        {t("flight_view.flight_completed_ok")}
                       </div>
                       <p>
-                        <strong className="text-[#45AFFF]">OPERACIÓN DE CABINA:</strong> Se completó el traslado de los pasajeros desde <strong className="text-[#43E600]">{originICAO}</strong> hasta <strong className="text-[#43E600]">{destICAO}</strong> en el avión <strong className="font-bold text-white">{simBriefData.avion || "Airbus A320"}</strong>. El servicio general de cabina se coordinó en un 100% de efectividad.
+                        {t("flight_view.ai_op_body", { origin: originICAO, dest: destICAO, aircraft: simBriefData.avion || "Airbus A320" })}
                       </p>
                       <p>
-                        <strong className="text-[#45AFFF]">MÉTRICAS DE PASAJEROS:</strong> La satisfacción promedio cerró en un increíble <strong className="text-[#43E600]">98%</strong>, demostrando una recepción impecable del servicio de café y el orden de los flujos de baño. El índice de miedo en cabina se estabilizó en un mínimo de <strong className="text-emerald-400">2%</strong> gracias a comunicados claros y oportunos de la tripulación técnica en las altitudes designadas.
+                        {t("flight_view.ai_pax_body", {
+                          score: paxFinal !== null ? Math.round(paxFinal.overallScore) : "—",
+                          attrs: paxFinal !== null
+                            ? ` (${t("flight_view.metric_satiety")} ${Math.round(paxFinal.globalAttributeAverages.saciedad)}%, ${t("flight_view.metric_comfort")} ${Math.round(paxFinal.globalAttributeAverages.confortFisiologico)}%, ${t("flight_view.metric_calm")} ${Math.round(paxFinal.globalAttributeAverages.calma)}%, ${t("flight_view.metric_entertainment")} ${Math.round(paxFinal.globalAttributeAverages.entretenimiento)}%)`
+                            : "",
+                        })}
                       </p>
                       <p>
-                        <strong className="text-[#45AFFF]">REPORTE DE TOQUE:</strong> El aterrizaje catalogado como <strong className="text-[#43E600]">SOFT LANDING (-115 FPM, 1.12 G)</strong> contribuyó a la máxima valoración del confort del cliente al final de la ruta. Las puertas se desarmaron en plataforma sin incidentes de seguridad reportados.
+                        {t("flight_view.ai_touchdown_body", { rating: ratingObj.rating, fpm: Math.round(landingFpm) })}
                       </p>
                       <div className="pt-2 border-t border-white/10 flex justify-between items-center text-[10px] text-white/40 font-bold">
-                        <span>OPERADOR: AC-AI INTELLIGENCE v1.2</span>
-                        <span className="text-[#43E600] font-black uppercase text-[10px]">CALIFICACIÓN GLOBAL: A+ EXCELENTE</span>
+                        <span>{t("flight_view.operator")}</span>
+                        <span className="text-[#43E600] font-black uppercase text-[10px]">{t("flight_view.global_rating")}</span>
                       </div>
                     </div>
                   )}
@@ -5824,11 +6741,11 @@ export default function VueloActualView({
                 onClick={() => setIsManifestCollapsed(!isManifestCollapsed)}
               >
                 <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider flex items-center gap-2 font-bold font-black">
-                  <Users className="w-4 h-4 text-[#45AFFF]" /> MANIFEST DE PASAJEROS EN CABINA
+                  <Users className="w-4 h-4 text-[#45AFFF]" /> {t("flight_view.pax_manifest")}
                   {isManifestCollapsed ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
                 </h3>
                 <span className="text-[10px] font-mono bg-[#45AFFF]/15 px-2 py-0.5 rounded text-white/80 border border-white/10 font-bold">
-                  A Bordo: {passengers.length} pax {isManifestCollapsed && "(Colapsado)"}
+                  {t("flight_view.onboard_count", { count: passengers.length })} {isManifestCollapsed && t("flight_view.collapsed")}
                 </span>
               </div>
 
@@ -5873,7 +6790,7 @@ export default function VueloActualView({
                         <div className="flex flex-col gap-1 text-[10px]">
                           {/* Mini-barra de satisfacción */}
                           <div className="flex items-center gap-1.5 w-28 sm:w-32">
-                            <span className="text-[8px] font-mono text-white/45 w-6 uppercase text-left font-bold">SAT</span>
+                            <span className="text-[8px] font-mono text-white/45 w-6 uppercase text-left font-bold">{t("flight_view.sat_label")}</span>
                             <div className="flex-1 bg-black/45 h-1.5 rounded-full overflow-hidden">
                               <div 
                                 className={`h-full rounded-full transition-all duration-300 ${displaySat >= 70 ? 'bg-[#43E600]' : displaySat >= 45 ? 'bg-[#E68B00]' : 'bg-[#E600D2]'}`}
@@ -5887,7 +6804,7 @@ export default function VueloActualView({
                           
                           {/* Mini-barra de miedo */}
                           <div className="flex items-center gap-1.5 w-28 sm:w-32">
-                            <span className="text-[8px] font-mono text-white/45 w-6 uppercase text-left font-bold">MDO</span>
+                            <span className="text-[8px] font-mono text-white/45 w-6 uppercase text-left font-bold">{t("flight_view.fear_label")}</span>
                             <div className="flex-1 bg-black/45 h-1.5 rounded-full overflow-hidden">
                               <div 
                                 className={`h-full rounded-full transition-all duration-300 ${displayFear >= 60 ? 'bg-[#E600D2]' : displayFear >= 30 ? 'bg-[#E68B00]' : 'bg-[#43E600]'}`}
@@ -5933,7 +6850,7 @@ export default function VueloActualView({
               <div className="space-y-4">
                 <div>
                   <div className="flex justify-between items-center text-xs font-mono mb-1 text-white/80">
-                    <span>VOLUMEN GLOBAL CABINA:</span>
+                    <span>{t("flight_view.volume_global")}</span>
                     <span className="text-[#45AFFF] font-bold">{copilotVolume}%</span>
                   </div>
                   <input 
@@ -5961,17 +6878,17 @@ export default function VueloActualView({
           {/* Main Landing Report card */}
           <div className="lg:col-span-2 bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 font-mono shadow-md">
             <h3 className="text-sm font-bold text-[#45AFFF] uppercase tracking-wider mb-4 border-b border-white/15 pb-2 flex items-center gap-2">
-              🛬 REGISTRO POST-ATERRIZAJE DE FLIGHT REALS
+              🛬 {t("flight_view.landing_report_title")}
             </h3>
 
             <div className="bg-black/35 border border-white/10 rounded-[7px] p-6 text-center space-y-4">
-              <span className="text-xs text-white/70 block">VELOCIDAD VERTICAL DE IMPACTO (TOUCHDOWN):</span>
+              <span className="text-xs text-white/70 block">{t("flight_view.touchdown_vspeed")}</span>
               <strong className={`text-5xl font-display font-extrabold tracking-tight ${ratingObj.color} block`} id="touchdown-fpm-display">
                 {landingFpm} FPM
               </strong>
               
               <div className="inline-block bg-white/10 border border-white/20 px-3 py-1.5 rounded text-xs">
-                CALIFICACIÓN DE CABINA / RANG: <strong className={`text-sm ${ratingObj.color}`}>{ratingObj.rating}</strong>
+                {t("flight_view.cabin_rating")} <strong className={`text-sm ${ratingObj.color}`}>{ratingObj.rating}</strong>
               </div>
 
               <div className="max-w-md mx-auto py-2">
@@ -5983,7 +6900,7 @@ export default function VueloActualView({
 
               {/* Slider simulation for landing */}
               <div className="pt-4 border-t border-white/10 max-w-sm mx-auto">
-                <label className="text-[10px] text-white/60 block mb-1">PROBAR OTRO TOQUE DE PISTA (FPM):</label>
+                <label className="text-[10px] text-white/60 block mb-1">{t("flight_view.test_landing")}</label>
                 <div className="flex gap-3 items-center">
                   <span className="text-[10px] text-white">-60 FPM</span>
                   <input 
@@ -6000,19 +6917,30 @@ export default function VueloActualView({
               </div>
             </div>
 
-            {/* Satisfaction Summary */}
+            {/* Satisfaction Summary (Fase 1 pasajeros: score final del engine) */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
               <div className="bg-[#00345C]/50 p-4 rounded border border-[#3B7EB2]/40">
-                <span className="text-[11px] font-bold text-[#45AFFF]">SATISFACCIÓN GENERAL FINAL:</span>
+                <span className="text-[11px] font-bold text-[#45AFFF]">{t("flight_view.final_satisfaction")}</span>
                 <div className="flex items-center gap-2 mt-2">
                   <Smile className="w-5 h-5 text-[#43E600]" />
-                  <strong className="text-lg text-white">{avgSatisfaction}%</strong>
-                  <span className="text-[10px] text-white/60">de aprobación</span>
+                  <strong className="text-lg text-white">{paxFinal !== null ? `${Math.round(paxFinal.overallScore)}%` : "—"}</strong>
+                  <span className="text-[10px] text-white/60">{t("flight_view.approval")}</span>
                 </div>
+                {paxFinal !== null && (
+                  <div className="text-[10px] font-mono text-white/50 mt-2">
+                    sac {Math.round(paxFinal.globalAttributeAverages.saciedad)} ·{" "}
+                    con {Math.round(paxFinal.globalAttributeAverages.confortFisiologico)} ·{" "}
+                    cal {Math.round(paxFinal.globalAttributeAverages.calma)} ·{" "}
+                    ent {Math.round(paxFinal.globalAttributeAverages.entretenimiento)}
+                    {paxFinal.variancePenaltyApplied > 0 && (
+                      <span className="text-[#E68B00]"> · penalización −{paxFinal.variancePenaltyApplied}</span>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="bg-[#00345C]/50 p-4 rounded border border-[#3B7EB2]/40">
-                <span className="text-[11px] font-bold text-[#E68B00]">XP ADQUIRIDOS EN ESTE VUELO:</span>
-                <strong className="text-lg text-[#43E600] block mt-1">+4,500 XP de carrera</strong>
+                <span className="text-[11px] font-bold text-[#E68B00]">{t("flight_view.xp_acquired")}</span>
+                <strong className="text-lg text-[#43E600] block mt-1">{t("flight_view.xp_career")}</strong>
               </div>
             </div>
 
@@ -6023,7 +6951,7 @@ export default function VueloActualView({
                 onClick={() => { void handleFinalizarVuelo(); }}
                 className="bg-[#43E600] text-black font-bold font-mono px-5 py-2.5 rounded-[5px] text-xs hover:bg-[#34b600] transition-all cursor-pointer flex items-center gap-1.5"
               >
-                🔄 CARGAR NUEVO DESPACHO (REINICIAR RUTA)
+                🔄 {t("flight_view.load_new_dispatch")}
               </button>
             </div>
           </div>
@@ -6032,22 +6960,22 @@ export default function VueloActualView({
           <div className="space-y-6">
             <div className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 space-y-4 shadow-md">
               <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider border-b border-white/10 pb-1.5 flex items-center gap-1.5">
-                🎉 RECONOCIMIENTOS ADJUDICADOS
+                🎉 {t("flight_view.achievements_awarded")}
               </h3>
               
               <ul className="space-y-3 font-mono text-xs">
                 {Math.abs(landingFpm) <= 120 && (
                   <li className="p-2.5 bg-[#43E600]/10 border border-[#43E600]/40 rounded flex items-center gap-2 text-[#43E600]">
-                    🏆 Unlocked: <strong>Seda en los Mandos</strong>
+                    🏆 {t("flight_view.unlocked")} <strong>{t("flight_view.ach_silk")}</strong>
                   </li>
                 )}
-                {avgSatisfaction >= 90 ? (
+                {paxFinal !== null && Math.round(paxFinal.overallScore) >= 90 ? (
                   <li className="p-2.5 bg-[#45AFFF]/10 border border-[#45AFFF]/40 rounded flex items-center gap-2 text-[#45AFFF]">
-                    ❤ Unlocked: <strong>Anfitrión Supremo</strong>
+                    ❤ {t("flight_view.unlocked")} <strong>{t("flight_view.ach_host")}</strong>
                   </li>
                 ) : (
                   <li className="p-2.5 bg-black/20 text-white/50 rounded">
-                    🔇 No se desbloquearon logros nuevos por satisfacción.
+                    🔇 {t("flight_view.no_achievements")}
                   </li>
                 )}
               </ul>
@@ -6082,14 +7010,17 @@ export default function VueloActualView({
         ruleEngine={ruleEngineRef.current}
         phaseDetector={phaseDetectorRef.current}
         xpBonusTracker={xpBonusTrackerRef.current}
+        passengerEngine={passengerEngineRef.current}
+        turbulenceDetector={turbulenceRef.current}
         lastEventVariables={lastEventVars}
       />
 
-      {/* Debug cluster — barra superior derecha (aviso conexión / Monitor / Descargar / Limpiar logs) */}
+      {/* Debug cluster — barra superior derecha (aviso conexión / Monitor).
+          Los botones temporales "Descargar / Limpiar logs" se eliminaron. */}
       <div className="fixed top-4 right-4 z-50 flex items-center gap-1.5">
         {!isConnected && !isTestMode && currentState === FlightState.NoIniciado && (
           <div className="warning-banner bg-amber-500/10 border border-amber-500/40 rounded-[5px] px-2.5 py-2 text-[11px] font-sans text-amber-300 leading-tight flex items-center gap-2 shadow-lg shadow-black/30">
-            <span className="whitespace-nowrap">⚠️ No hay conexión con un simulador. El sistema usará el modo Mock (simulado).</span>
+            <span className="whitespace-nowrap">⚠️ {t("connection.banner")}</span>
             <button
               type="button"
               onClick={() => {
@@ -6098,7 +7029,7 @@ export default function VueloActualView({
               }}
               className="bg-[#E68B00] hover:bg-[#ffa726] text-black font-mono font-black text-[10px] px-2.5 py-1 rounded-[5px] transition-all cursor-pointer shrink-0"
             >
-              Usar modo pruebas
+              {t("connection.banner_cta")}
             </button>
           </div>
         )}
@@ -6106,27 +7037,10 @@ export default function VueloActualView({
           type="button"
           onClick={() => setIsDebugOpen(true)}
           className="bg-[#002440]/90 hover:bg-[#00345C]/90 text-[#45AFFF] border border-[#3B7EB2]/50 px-3 py-2 rounded-[5px] text-[11px] font-mono font-bold flex items-center gap-1.5 shadow-lg shadow-black/30 cursor-pointer transition-colors"
-          title="Abrir monitor de variables"
+          title={t("flight_view.monitor_tooltip")}
         >
           <Activity className="w-3.5 h-3.5" />
-          Monitor
-        </button>
-        <button
-          type="button"
-          onClick={() => fileLogger.download()}
-          className="bg-[#002440]/90 hover:bg-[#00345C]/90 text-white border border-[#3B7EB2]/50 px-3 py-2 rounded-[5px] text-[11px] font-mono flex items-center gap-1.5 shadow-lg shadow-black/30 cursor-pointer transition-colors"
-          title="Descargar logs de depuración (eventos y fases)"
-        >
-          <Download className="w-3.5 h-3.5" />
-          Descargar Logs
-        </button>
-        <button
-          type="button"
-          onClick={() => { fileLogger.clear(); console.log('[FileLogger] Logs limpiados'); }}
-          className="bg-black/40 hover:bg-black/60 text-white/70 hover:text-white border border-white/10 px-2.5 py-2 rounded-[5px] text-[11px] font-mono cursor-pointer transition-colors"
-          title="Limpiar logs"
-        >
-          Limpiar
+          {t("flight_view.monitor_btn")}
         </button>
       </div>
 

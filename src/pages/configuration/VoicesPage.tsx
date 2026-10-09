@@ -7,6 +7,7 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Search, Volume2, Loader2 } from "lucide-react";
 import { supabase } from "../../lib/supabase";
 import { useToast } from "../../components/Toast";
@@ -34,6 +35,7 @@ function genderIcon(gender: string | null | undefined): string {
 }
 
 export default function VoicesPage() {
+  const { t } = useTranslation();
   const { showToast } = useToast();
   const [userId, setUserId] = useState<string | null>(null);
   const [voices, setVoices] = useState<VoiceWithStatus[]>([]);
@@ -62,7 +64,7 @@ export default function VoicesPage() {
         if (cancelled) return;
         setVoices(list);
       } catch (e: any) {
-        if (!cancelled) showToast(e?.message || "Error al cargar voces", "error");
+        if (!cancelled) showToast(e?.message || t("voices.load_error"), "error");
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -98,7 +100,7 @@ export default function VoicesPage() {
 
   const handleSave = async () => {
     if (!userId) {
-      showToast("Usuario no autenticado", "error");
+      showToast(t("voices.not_authenticated"), "error");
       return;
     }
     setSaving(true);
@@ -106,9 +108,9 @@ export default function VoicesPage() {
       const settings = voices.map((v) => ({ voicestock_id: v.id, voice_enabled: v.voice_enabled }));
       await voiceService.saveVoiceSettings(userId, settings);
       setDirty(false);
-      showToast("¡Ajustes de voces guardados!", "success");
+      showToast(t("voices.save_ok"), "success");
     } catch (e: any) {
-      showToast(e?.message || "Error al guardar voces", "error");
+      showToast(e?.message || t("voices.save_error"), "error");
     } finally {
       setSaving(false);
     }
@@ -138,7 +140,7 @@ export default function VoicesPage() {
 
     // Sin audio de muestra: no reproducir
     if (!voice.audio_sample_url) {
-      showToast("Audio no disponible para esta voz", "error");
+      showToast(t("voices.audio_unavailable"), "error");
       return;
     }
 
@@ -159,21 +161,21 @@ export default function VoicesPage() {
       audio.onended = () => stopPlayback();
       audio.onerror = () => {
         stopPlayback();
-        showToast("No se pudo reproducir la muestra", "error");
+        showToast(t("voices.sample_play_error"), "error");
       };
 
       try {
         await audio.play();
       } catch {
         stopPlayback();
-        showToast("No se pudo reproducir la muestra", "error");
+        showToast(t("voices.sample_play_error"), "error");
       }
     } catch (e: any) {
       stopPlayback();
       if (/404|no encontrado|not found/i.test(e?.message || "")) {
-        showToast("Archivo de audio de muestra no encontrado (404)", "error");
+        showToast(t("voices.sample_not_found"), "error");
       } else {
-        showToast(e?.message || "No se pudo reproducir la muestra", "error");
+        showToast(e?.message || t("voices.sample_play_error"), "error");
       }
     } finally {
       setLoadingId(null);
@@ -183,7 +185,7 @@ export default function VoicesPage() {
   if (loading) {
     return (
       <div className="bg-[#2C6591]/20 border border-white/20 rounded-[5px] p-8 flex items-center justify-center gap-2 text-white/70 font-mono text-xs">
-        <Loader2 className="w-4 h-4 animate-spin" /> Cargando voces...
+        <Loader2 className="w-4 h-4 animate-spin" /> {t("voices.loading")}
       </div>
     );
   }
@@ -193,10 +195,10 @@ export default function VoicesPage() {
       <div className="border-b border-white/10 pb-3 flex flex-col sm:flex-row sm:items-end justify-between gap-3">
         <div>
           <h3 className="text-base font-display font-black text-[#45AFFF] uppercase tracking-wider flex items-center gap-2">
-            🗣️ Control y Registro de Voces Naturales
+            🗣️ {t("voices.title")}
           </h3>
           <p className="text-xs text-white/60 font-mono mt-1">
-            Configure los perfiles sintéticos de cabina o registre grabaciones de voz de tripulantes reales.
+            {t("voices.subtitle")}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -204,7 +206,7 @@ export default function VoicesPage() {
             <Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-white/40" />
             <input
               type="text"
-              placeholder="Buscar por nombre o rol..."
+              placeholder={t("voices.search_placeholder")}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="bg-[#00172e] border border-[#3B7EB2]/40 rounded-[4px] pl-7 pr-3 py-1.5 text-xs font-mono text-white placeholder:text-white/40 focus:outline-none focus:border-[#45AFFF] w-[220px]"
@@ -226,14 +228,14 @@ export default function VoicesPage() {
           }`}
         >
           {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-          Guardar ajustes
+          {t("voices.save")}
         </button>
       </div>
 
       {/* Grilla */}
       {filtered.length === 0 ? (
         <div className="text-center text-white/60 font-mono text-xs py-10 border border-dashed border-white/15 rounded-[6px] bg-black/15">
-          {voices.length === 0 ? "No hay voces disponibles en voices_stock." : "Sin resultados para la búsqueda."}
+          {voices.length === 0 ? t("voices.empty") : t("voices.no_results")}
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -285,7 +287,7 @@ export default function VoicesPage() {
                       <span
                         className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-white/10 border border-white/15 text-[18px] leading-none"
                         title={voice.voice_gender || "—"}
-                        aria-label={`sexo ${voice.voice_gender}`}
+                        aria-label={t("voices.gender_aria", { gender: voice.voice_gender })}
                       >
                         {sexoIcon}
                       </span>
@@ -311,7 +313,7 @@ export default function VoicesPage() {
                         type="button"
                         onClick={() => playSample(voice)}
                         disabled={isLoading}
-                        title={isLoading ? "Cargando audio..." : undefined}
+                        title={isLoading ? t("voices.loading_audio") : undefined}
                         className={`flex-1 font-mono text-[11px] font-bold py-2 px-2 rounded-[4px] border transition-all flex items-center justify-center gap-1.5 ${
                           isPlaying
                             ? "bg-red-500/25 text-red-300 border-red-500/40 animate-pulse cursor-pointer"
@@ -326,18 +328,18 @@ export default function VoicesPage() {
                           <Volume2 className={`w-3.5 h-3.5 shrink-0 ${isPlaying ? "animate-bounce" : ""}`} />
                         )}
                         <span className="truncate">
-                          {isLoading ? "Cargando..." : isPlaying ? "Reproduciendo..." : "▶️ Escuchar"}
+                          {isLoading ? t("voices.loading_short") : isPlaying ? t("voices.playing") : t("voices.listening")}
                         </span>
                       </button>
                     ) : (
                       <button
                         type="button"
                         disabled
-                        title="Audio no disponible"
+                        title={t("voices.audio_unavailable_short")}
                         className="flex-1 font-mono text-[11px] font-bold py-2 px-2 rounded-[4px] border bg-white/5 text-white/30 border-white/10 cursor-not-allowed flex items-center justify-center gap-1.5"
                       >
                         <span className="text-[13px] leading-none">🔇</span>
-                        <span className="truncate">Audio no disponible</span>
+                        <span className="truncate">{t("voices.audio_unavailable_short")}</span>
                       </button>
                     )}
 
@@ -352,7 +354,7 @@ export default function VoicesPage() {
                       }`}
                     >
                       <span className="text-[13px] leading-none">{voice.voice_enabled ? "🔊" : "🔇"}</span>
-                      <span className="truncate">{voice.voice_enabled ? "Activado" : "Activar"}</span>
+                      <span className="truncate">{voice.voice_enabled ? t("voices.activated") : t("voices.activate")}</span>
                     </button>
                   </div>
                 </div>

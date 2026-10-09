@@ -11,7 +11,9 @@ export function buildGateContext(eventKey: string, fc: FlightContext): EventCont
     eventData.flight_number = flight.flightNumber;
     eventData.destination = flight.destCity;
     eventData.gate = flight.gate;
-    eventData.departure_time = flight.departureTime;
+    // Hora LOCAL del aeropuerto (nunca UTC): es lo que se narra en cabina.
+    const local = typeof flight.departureTimeLocal === "string" ? flight.departureTimeLocal.trim() : "";
+    eventData.departure_time = local !== "" ? local : flight.departureTime;
   }
 
   return { eventKey, eventData };

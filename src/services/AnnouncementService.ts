@@ -6,6 +6,37 @@ import { fileLogger } from "./FileLogger";
 export type { AnnouncementParams, AnnouncementEvent };
 
 /**
+ * Posición actual para el historial (`flight_audio_deliveries`): el Edge la
+ * persiste junto al audio entregado para asociar cada anuncio a un punto del
+ * vuelo. Solo valores finitos; sin dato se omite (el Edge guarda NULL).
+ */
+export function telemetryPositionParams(fc: {
+  getTelemetry?: () => unknown;
+} | null | undefined): {
+  latitude?: number;
+  longitude?: number;
+  altitude?: number;
+} {
+  try {
+    const t = (fc?.getTelemetry?.() ?? {}) as Record<string, unknown>;
+    const num = (v: unknown): number | undefined => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : undefined;
+    };
+    const out: { latitude?: number; longitude?: number; altitude?: number } = {};
+    const lat = num(t.latitude);
+    const lon = num(t.longitude);
+    const alt = num(t.altitude);
+    if (lat !== undefined) out.latitude = lat;
+    if (lon !== undefined) out.longitude = lon;
+    if (alt !== undefined) out.altitude = alt;
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Lee el body de un error HTTP de supabase Edge Function.
  * `supabase.functions.invoke` ante una respuesta no-2xx devuelve un
  * `FunctionsHttpError` cuyo `.context` es la `Response` original. Acá se extrae
@@ -90,6 +121,9 @@ export class AnnouncementService {
     voiceId,
     speakerRole,
     eventData,
+    latitude,
+    longitude,
+    altitude,
   }: AnnouncementParams): Promise<AnnouncementInfo> {
     this.aborted = false;
     this.emit("generating", true);
@@ -111,6 +145,10 @@ export class AnnouncementService {
       ...(voiceId ? { voice_id: voiceId } : {}),
       ...(speakerRole ? { speaker_role: speakerRole } : {}),
       ...(eventData ? { event_data: eventData } : {}),
+      // Posición al disparar (historial flight_audio_deliveries en el Edge).
+      ...(Number.isFinite(latitude) ? { latitude } : {}),
+      ...(Number.isFinite(longitude) ? { longitude } : {}),
+      ...(Number.isFinite(altitude) ? { altitude } : {}),
     };
     console.log("[AnnouncementService] Llamando a audio-get con payload:", payload);
     fileLogger.log('[AnnouncementService] audio-get request', payload);

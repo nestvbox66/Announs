@@ -24,6 +24,13 @@ export interface FlightInfo {
   /** Hora local del aeropuerto de origen (HH:MM), derivada de sched_out UTC para mostrar en UI. */
   departureTimeLocal?: string;
   /**
+   * Hora local programada de ARRIBO (HH:MM, huso del destino), derivada de
+   * sched_in UTC. La usan los anuncios que hablan de la llegada
+   * (`arrival_time`, `local_time`). Vacía si no hay dato (la variable se
+   * omite o usa su fallback textual).
+   */
+  arrivalTime?: string;
+  /**
    * Hora programada de despegue para delay_detection.
    * Segundos del día UTC (0-86400), normalizado desde SimBrief sched_out (epoch s).
    * Se compara contra telemetry.zuluTime (segundos desde medianoche UTC).

@@ -35,14 +35,17 @@ import { ProgressionService, LevelProgress } from "../services/ProgressionServic
 import { formatTotalHours } from "../services/pilotStatsFormat";
 import PassportView from "./PassportView";
 import AccountView from "./AccountView";
+import CampaignFlightsView from "./CampaignFlightsView";
 import FlightDetailView from "./flight/FlightDetailView";
 import { FlightHistoryService, FlightHistoryEntry, FLIGHT_HISTORY_PAGE_SIZE } from "../services/FlightHistoryService";
+import { resolveAvatarDisplayUrl } from "../services/avatarUrl";
 import { PilotStatsService, PilotStats } from "../services/PilotStatsService";
 import { formatMinutes, formatNm, formatHours } from "../services/pilotStatsFormat";
 import { ResponsiveContainer, Treemap, Tooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid, Cell } from "recharts";
 
 /** Celda del treemap de flota (colores de la paleta, texto adaptativo). */
 function FleetTreemapCell(props: any) {
+  const { t } = useTranslation();
   const { x, y, width, height, name, fill, hours, flights, sharePct } = props;
   // Texto azul marino sobre los rellenos brillantes de la paleta: el blanco
   // se lavaba y parecía "transparente". Sin emoji (algunas fuentes lo
@@ -69,7 +72,7 @@ function FleetTreemapCell(props: any) {
       )}
       {showSub && (
         <text x={x + 8} y={y + 40} fill="#0a1622" opacity={0.78} fontSize={11} fontFamily="monospace" fontWeight="700">
-          {formatHours(hours)} · {Number(sharePct ?? 0).toFixed(1)}% · {flights} {flights === 1 ? "vuelo" : "vuelos"}
+          {formatHours(hours)} · {Number(sharePct ?? 0).toFixed(1)}% · {t("hub.recent_flights.flight", { count: flights })}
         </text>
       )}
     </g>
@@ -78,6 +81,7 @@ function FleetTreemapCell(props: any) {
 
 /** Tooltip del treemap: modelo, horas, vuelos y participación. */
 function FleetTreemapTip({ active, payload }: any) {
+  const { t } = useTranslation();
   if (!active || !payload || payload.length === 0) return null;
   const node = payload[0]?.payload ?? {};
   return (
@@ -93,12 +97,12 @@ function FleetTreemapTip({ active, payload }: any) {
       }}
     >
       <div style={{ fontWeight: "bold", color: "#45AFFF", marginBottom: 4 }}>✈ {node.name ?? "—"}</div>
-      <div>Horas de vuelo: <strong>{formatHours(node.hours)}</strong></div>
+      <div>{t("hub.stats.treemap_hours")}: <strong>{formatHours(node.hours)}</strong></div>
       <div>
-        Vuelos operados: <strong>{node.flights ?? 0}</strong>
+        {t("hub.stats.treemap_flights")}: <strong>{node.flights ?? 0}</strong>
       </div>
       <div>
-        Participación: <strong>{Number(node.sharePct ?? 0).toFixed(1)}%</strong>
+        {t("hub.stats.treemap_share")}: <strong>{Number(node.sharePct ?? 0).toFixed(1)}%</strong>
       </div>
     </div>
   );
@@ -122,7 +126,7 @@ export default function HubView({
   onLogout
 }: HubViewProps) {
   const { t, i18n } = useTranslation();
-  const [subView, setSubView] = useState<"overview" | "stats" | "passport" | "account">("overview");
+  const [subView, setSubView] = useState<"overview" | "stats" | "passport" | "campaigns" | "account">("overview");
   const [selectedFlight, setSelectedFlight] = useState<VueloReciente | null>(null);
   // Historial real desde Supabase (`public.flights` del usuario autenticado).
   const [recentFlights, setRecentFlights] = useState<FlightHistoryEntry[] | null>(null);
@@ -146,6 +150,19 @@ export default function HubView({
   const [loading, setLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [userProfile, setUserProfile] = useState<{ username: string; avatar: string; createdAt: string } | null>(null);
+  // El avatar falla al cargar (URL pública no accesible/permiso): se intenta
+  // una URL firmada y, si tampoco, se cae al icono genérico.
+  const [avatarBroken, setAvatarBroken] = useState(false);
+  const [signedAvatar, setSignedAvatar] = useState<string | null>(null);
+  useEffect(() => { setAvatarBroken(false); setSignedAvatar(null); }, [userProfile?.avatar]);
+  const handleAvatarError = async () => {
+    const raw = userProfile?.avatar;
+    if (!raw) return;
+    if (signedAvatar !== null) { setAvatarBroken(true); return; }
+    const resolved = await resolveAvatarDisplayUrl(raw);
+    if (resolved && resolved !== raw) setSignedAvatar(resolved);
+    else setAvatarBroken(true);
+  };
 
   useEffect(() => {
     if (!isLoggedIn) return;
@@ -156,23 +173,35 @@ export default function HubView({
       const { data: { user }, error: authErr } = await supabase.auth.getUser();
       if (cancelled || authErr || !user) return;
 
+      // Avatar de Google/OAuth como respaldo cuando `users.avatar` está vacío.
+      const meta = (user.user_metadata ?? {}) as Record<string, unknown>;
+      const metaAvatar =
+        (typeof meta.avatar_url === "string" && meta.avatar_url) ||
+        (typeof meta.picture === "string" && meta.picture) ||
+        "";
+
       const { data, error } = await supabase
         .from("users")
         .select("username, avatar, created_at, preferred_language")
         .eq("id", user.id)
         .maybeSingle();
 
-      if (cancelled || error || !data) return;
+      if (cancelled) return;
+      // No abortar si la fila falta o la consulta falla: se conserva al menos
+      // el avatar de la sesión (OAuth) y el username del proveedor.
+      const row = (!error && data ? data : null) as
+        | { username?: string; avatar?: string; created_at?: string; preferred_language?: string }
+        | null;
 
       setUserProfile({
-        username: data.username || "",
-        avatar: data.avatar || "",
-        createdAt: data.created_at || "",
+        username: row?.username || (typeof meta.name === "string" ? meta.name : "") || "",
+        avatar: (row?.avatar || "").trim() || metaAvatar,
+        createdAt: row?.created_at || "",
       });
 
-      if (data.preferred_language) {
-        i18n.changeLanguage(data.preferred_language);
-        localStorage.setItem("announs_language", data.preferred_language);
+      if (row?.preferred_language) {
+        i18n.changeLanguage(row.preferred_language);
+        localStorage.setItem("announs_language", row.preferred_language);
       }
     };
 
@@ -307,7 +336,7 @@ export default function HubView({
       destinoCiudad: entry.arriveCity,
       fecha: entry.departLabel,
       fpmLanding: 0,
-      satisfaccionMedia: 0,
+      satisfaccionMedia: entry.globalSatisfaction ?? 0,
       puntuacion: 0,
       duracion: entry.durationLabel,
       aerolinea: entry.airline,
@@ -353,7 +382,17 @@ export default function HubView({
   const totalXP = vuelos.reduce((sum, v) => sum + v.puntuacion, 24500);
   const totalPasajeros = 24558 + vuelos.length * 142;
   const totalHoras = 158;
-  const averageSatisfaccion = Math.round(vuelos.reduce((sum, v) => sum + v.satisfaccionMedia, 0) / vuelos.length);
+  // Satisfacción media REAL: promedio de `global_satisfaction` sobre los
+  // vuelos finalizados del usuario (`flight_status = 'ended'`, ya filtrado
+  // por el historial). null = sin dato todavía (se muestra "—").
+  const satisfactionScores: number[] = historyLoaded
+    ? (recentFlights ?? [])
+        .map((e) => e.globalSatisfaction)
+        .filter((s): s is number => typeof s === "number" && Number.isFinite(s))
+    : [];
+  const averageSatisfaccion: number | null = satisfactionScores.length > 0
+    ? Math.round(satisfactionScores.reduce((sum, s) => sum + s, 0) / satisfactionScores.length)
+    : null;
   const averageFPM = Math.round(vuelos.reduce((sum, v) => sum + v.fpmLanding, 0) / vuelos.length);
 
   const avatarInitials = userProfile?.username
@@ -607,6 +646,16 @@ export default function HubView({
             {t("hub.tabs.passport")}
           </button>
           <button
+            onClick={() => setSubView("campaigns")}
+            className={`px-3 py-1.5 rounded-[4px] font-mono text-[11px] font-bold tracking-wider uppercase transition-all duration-200 cursor-pointer ${
+              subView === "campaigns"
+                ? "bg-[#45AFFF] text-[#00345C] shadow-sm"
+                : "text-white/60 hover:text-white hover:bg-white/5"
+            }`}
+          >
+            {t("hub.tabs.campaigns")}
+          </button>
+          <button
             onClick={() => setSubView("account")}
             className={`px-3 py-1.5 rounded-[4px] font-mono text-[11px] font-bold tracking-wider uppercase transition-all duration-200 cursor-pointer ${
               subView === "account"
@@ -631,7 +680,22 @@ export default function HubView({
                 <div className="flex items-center gap-4 border-b border-white/20 pb-4 mb-4">
                   <div className="w-14 h-14 rounded-full bg-[#00345C] border border-white/80 flex items-center justify-center font-display font-bold text-xl shrink-0 overflow-hidden">
                     {userProfile?.avatar ? (
-                      <img src={userProfile.avatar} alt="" className="w-full h-full object-cover" />
+                      /^(https?:|data:)/i.test(userProfile.avatar) ? (
+                        avatarBroken ? (
+                          <User className="w-6 h-6 text-[#45AFFF]" />
+                        ) : (
+                          <img
+                            src={signedAvatar ?? userProfile.avatar}
+                            alt=""
+                            className="w-full h-full object-cover"
+                            referrerPolicy="no-referrer"
+                            onError={() => { void handleAvatarError(); }}
+                          />
+                        )
+                      ) : (
+                        // Voz/avatar emoji guardado como texto (no es URL).
+                        <span className="text-2xl leading-none select-none">{userProfile.avatar}</span>
+                      )
                     ) : (
                       <User className="w-6 h-6 text-[#45AFFF]" />
                     )}
@@ -692,7 +756,7 @@ export default function HubView({
                       <Heart className="w-3.5 h-3.5 text-[#E600D2]" />
                       {t("overview.avg_satisfaction")}
                     </span>
-                    <span className="font-mono text-sm font-bold text-[#43E600]">{averageSatisfaccion}%</span>
+                    <span className="font-mono text-sm font-bold text-[#43E600]">{averageSatisfaccion === null ? "—" : `${averageSatisfaccion}%`}</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-xs text-white/80 flex items-center gap-1.5">
@@ -712,10 +776,10 @@ export default function HubView({
             >
               <div className="flex items-center justify-between border-b border-white/20 pb-3 mb-4">
                 <h3 className="text-sm font-mono text-[#45AFFF] uppercase tracking-wider flex items-center gap-2">
-                  <Award className="w-4 h-4" /> Logros y Pasaporte de Vuelos
+                  <Award className="w-4 h-4" /> {t("hub.achievements.title")}
                 </h3>
                 <span className="text-xs font-mono text-white/70">
-                  Desbloqueados: {logros.filter(l => l.desbloqueado).length} de {logros.length}
+                  {t("hub.achievements.unlocked", { done: logros.filter(l => l.desbloqueado).length, total: logros.length })}
                 </span>
               </div>
 
@@ -723,6 +787,7 @@ export default function HubView({
               <div className="grid grid-cols-2 md:grid-cols-3 gap-4" id="passport-stamp-grid">
                 {logros.map((item) => {
                   const stamp = countryStamps[item.id] || { flag: "✈️", city: "Mundial", stampColor: "border-[#3B7EB2] text-white/40" };
+                  const stampCity = item.id in countryStamps ? stamp.city : t("hub.achievements.worldwide");
                   return (
                     <div 
                       key={item.id}
@@ -742,7 +807,7 @@ export default function HubView({
                         <span className="text-lg">{item.desbloqueado ? stamp.flag : "🔒"}</span>
                         {item.desbloqueado && (
                           <span className="text-[9px] font-mono bg-white/10 px-1 py-0.5 rounded text-white font-bold">
-                            SELLADO
+                            {t("hub.achievements.sealed")}
                           </span>
                         )}
                       </div>
@@ -755,7 +820,7 @@ export default function HubView({
                       </div>
 
                       <div className="flex justify-between items-center text-[9px] font-mono mt-1 pt-1 border-t border-white/5 text-white/50">
-                        <span>{item.desbloqueado ? stamp.city : "Bloqueado"}</span>
+                        <span>{item.desbloqueado ? stampCity : t("hub.achievements.locked")}</span>
                         <span>{item.fechaDesbloqueo ? item.fechaDesbloqueo : "---"}</span>
                       </div>
                     </div>
@@ -772,7 +837,7 @@ export default function HubView({
           >
             <div className="flex items-center justify-between border-b border-white/20 pb-3 mb-4">
               <h3 className="text-sm font-mono text-[#45AFFF] uppercase tracking-wider flex items-center gap-2">
-                <History className="w-4 h-4 text-[#E68B00]" /> Historial de Vuelos Recientes
+                <History className="w-4 h-4 text-[#E68B00]" /> {t("hub.recent_flights.title")}
               </h3>
             </div>
 
@@ -780,12 +845,12 @@ export default function HubView({
               <table className="w-full text-left border-collapse" id="flights-table">
                 <thead>
                   <tr className="border-b border-white/20 text-xs font-mono text-[#45AFFF]/80">
-                    <th className="py-2.5 px-3">Aerolínea</th>
-                    <th className="py-2.5 px-3">N° de Vuelo</th>
-                    <th className="py-2.5 px-3">Ruta</th>
-                    <th className="py-2.5 px-3">Fecha y Hora</th>
-                    <th className="py-2.5 px-3">Duración</th>
-                    <th className="py-2.5 px-3 text-center">Valoración</th>
+                    <th className="py-2.5 px-3">{t("hub.recent_flights.col_airline")}</th>
+                    <th className="py-2.5 px-3">{t("hub.recent_flights.col_flight")}</th>
+                    <th className="py-2.5 px-3">{t("hub.recent_flights.col_route")}</th>
+                    <th className="py-2.5 px-3">{t("hub.recent_flights.col_datetime")}</th>
+                    <th className="py-2.5 px-3">{t("hub.recent_flights.col_duration")}</th>
+                    <th className="py-2.5 px-3 text-center">{t("hub.recent_flights.col_rating")}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/10 text-xs text-white/90">
@@ -797,7 +862,7 @@ export default function HubView({
                             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
                             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                           </svg>
-                          Cargando tu historial de vuelos…
+                          {t("hub.recent_flights.loading")}
                         </div>
                       </td>
                     </tr>
@@ -805,13 +870,13 @@ export default function HubView({
                     <tr>
                       <td colSpan={6} className="py-8 px-3 text-center">
                         <div className="space-y-2">
-                          <p className="text-xs font-mono text-red-300">No se pudo cargar el historial: {flightsError}</p>
+                          <p className="text-xs font-mono text-red-300">{t("hub.recent_flights.error", { error: flightsError })}</p>
                           <button
                             type="button"
                             onClick={() => setHistoryReloadKey((k) => k + 1)}
                             className="bg-[#2C6591]/50 border border-white/20 hover:bg-[#45AFFF]/15 text-white px-3 py-1.5 rounded-[5px] font-mono text-[11px] transition-all cursor-pointer"
                           >
-                            Reintentar
+                            {t("hub.recent_flights.retry")}
                           </button>
                         </div>
                       </td>
@@ -821,16 +886,16 @@ export default function HubView({
                       <td colSpan={6} className="py-10 px-3 text-center">
                         <div className="flex flex-col items-center gap-2">
                           <PlaneTakeoff className="w-8 h-8 text-[#45AFFF]/40" />
-                          <p className="text-sm font-bold text-white/80">Aún no registraste ningún vuelo</p>
+                          <p className="text-sm font-bold text-white/80">{t("hub.recent_flights.empty_title")}</p>
                           <p className="text-[11px] font-mono text-white/50 max-w-sm">
-                            Cuando completes tu primer vuelo con Announs, aparecerá aquí tu historial.
+                            {t("hub.recent_flights.empty_desc")}
                           </p>
                           <button
                             type="button"
                             onClick={onStartFlightShortcut}
                             className="mt-1 bg-[#45AFFF] hover:bg-[#45AFFF]/85 text-[#00345C] px-4 py-2 rounded font-mono font-extrabold text-[11px] uppercase tracking-widest transition-all cursor-pointer"
                           >
-                            Iniciar mi primer vuelo
+                            {t("hub.recent_flights.empty_cta")}
                           </button>
                         </div>
                       </td>
@@ -867,7 +932,7 @@ export default function HubView({
                         <td className="py-3 px-3 text-center">
                           <div
                             className="inline-flex items-center gap-1 bg-black/20 px-2.5 py-0.5 rounded-[4px] border border-white/10 font-mono font-bold text-white"
-                            title={isPhStats ? "La valoración estará disponible próximamente" : undefined}
+                            title={isPhStats ? t("hub.recent_flights.rating_tooltip") : undefined}
                           >
                             <UserCheck className="w-3 h-3 text-[#43E600] scale-90" />
                             <span className={isPhStats ? "text-white/40" : "text-[#43E600]"}>{ratingVal}</span>
@@ -896,7 +961,12 @@ export default function HubView({
               return (
                 <div className="flex flex-wrap items-center justify-between gap-2 mt-3 px-1">
                   <span className="text-[10px] font-mono text-white/45">
-                    Mostrando {from}–{to} de {historyTotal} {historyTotal === 1 ? "vuelo" : "vuelos"}
+                    {t("hub.recent_flights.showing", {
+                      from,
+                      to,
+                      total: historyTotal,
+                      unit: t("hub.recent_flights.flight", { count: historyTotal }),
+                    })}
                   </span>
                   <div className="flex items-center gap-1">
                     <button
@@ -905,7 +975,7 @@ export default function HubView({
                       disabled={flightsLoading || currentPage <= 0}
                       className="px-2.5 py-1 rounded-[4px] border border-white/20 bg-[#2C6591]/40 font-mono text-[11px] text-white hover:bg-[#45AFFF]/15 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                     >
-                      ‹ Anterior
+                      {t("hub.recent_flights.prev")}
                     </button>
                     {pageNums.map((n) => (
                       <button
@@ -928,7 +998,7 @@ export default function HubView({
                       disabled={flightsLoading || currentPage >= totalPages - 1}
                       className="px-2.5 py-1 rounded-[4px] border border-white/20 bg-[#2C6591]/40 font-mono text-[11px] text-white hover:bg-[#45AFFF]/15 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                     >
-                      Siguiente ›
+                      {t("hub.recent_flights.next")}
                     </button>
                   </div>
                 </div>
@@ -945,9 +1015,9 @@ export default function HubView({
               <div className="flex bg-[#001b33]/60 p-4 rounded-[5px] border border-[#3B7EB2]/30 items-center justify-between">
                 <div>
                   <h2 className="text-sm font-mono font-bold text-[#45AFFF] uppercase tracking-wider">
-                    Análisis Estadístico
+                    {t("hub.stats.header_title")}
                   </h2>
-                  <p className="text-[10px] text-white/50 font-mono">Panel Global de Estadísticas de Carrera</p>
+                  <p className="text-[10px] text-white/50 font-mono">{t("hub.stats.header_subtitle")}</p>
                 </div>
               </div>
               <div className="bg-[#2C6591]/20 border border-white/20 rounded-[5px] p-10 flex items-center justify-center gap-2 text-white/60 font-mono text-xs">
@@ -955,7 +1025,7 @@ export default function HubView({
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                 </svg>
-                Cargando tus estadísticas…
+                {t("hub.stats.loading")}
               </div>
             </div>
           );
@@ -967,19 +1037,19 @@ export default function HubView({
               <div className="flex bg-[#001b33]/60 p-4 rounded-[5px] border border-[#3B7EB2]/30 items-center justify-between">
                 <div>
                   <h2 className="text-sm font-mono font-bold text-[#45AFFF] uppercase tracking-wider">
-                    Análisis Estadístico
+                    {t("hub.stats.header_title")}
                   </h2>
-                  <p className="text-[10px] text-white/50 font-mono">Panel Global de Estadísticas de Carrera</p>
+                  <p className="text-[10px] text-white/50 font-mono">{t("hub.stats.header_subtitle")}</p>
                 </div>
               </div>
               <div className="bg-[#2C6591]/20 border border-white/20 rounded-[5px] p-10 text-center space-y-3">
-                <p className="text-xs font-mono text-red-300">No se pudieron cargar las estadísticas: {statsError ?? "sin datos"}</p>
+                <p className="text-xs font-mono text-red-300">{t("hub.stats.error", { error: statsError ?? t("hub.stats.no_data") })}</p>
                 <button
                   type="button"
                   onClick={() => setStatsReloadKey((k) => k + 1)}
                   className="bg-[#2C6591]/50 border border-white/20 hover:bg-[#45AFFF]/15 text-white px-3 py-1.5 rounded-[5px] font-mono text-[11px] transition-all cursor-pointer"
                 >
-                  Reintentar
+                  {t("hub.stats.retry")}
                 </button>
               </div>
             </div>
@@ -1017,20 +1087,20 @@ export default function HubView({
               <div className="flex items-center gap-3 shrink-0">
                 <div>
                   <h2 className="text-sm font-mono font-bold text-[#45AFFF] uppercase tracking-wider">
-                    Análisis Estadístico
+                    {t("hub.stats.header_title")}
                   </h2>
-                  <p className="text-[10px] text-white/50 font-mono">Panel Global de Estadísticas de Carrera</p>
+                  <p className="text-[10px] text-white/50 font-mono">{t("hub.stats.header_subtitle")}</p>
                 </div>
               </div>
               {levelProgress && (
-                <div className="flex-1 max-w-md space-y-1.5" title="Progreso de nivel">
+                <div className="flex-1 max-w-md space-y-1.5" title={t("hub.stats.level_tooltip")}>
                   <div className="flex items-baseline justify-between gap-3">
                     <span className="text-xs font-mono font-extrabold text-white">
                       {levelProgress.totalXp.toLocaleString("en-US")}{" "}
                       <span className="text-[10px] text-white/50 font-bold">XP</span>
                     </span>
                     <span className="text-[10px] font-mono text-[#45AFFF] font-bold uppercase tracking-wider">
-                      {levelProgress.level !== null ? `Nivel ${levelProgress.level}` : "Nivel —"}
+                      {levelProgress.level !== null ? t("hub.stats.level", { level: levelProgress.level }) : t("hub.stats.level_dash")}
                     </span>
                   </div>
                   <div className="h-2 rounded-full bg-white/10 overflow-hidden">
@@ -1041,13 +1111,13 @@ export default function HubView({
                   </div>
                   <div className="text-[10px] font-mono text-white/50 text-right">
                     {levelProgress.nextRankXp !== null ? (
-                      <>
-                        {levelProgress.xpToNext.toLocaleString("en-US")} XP para{" "}
-                        <span className="text-white/75 font-bold">{levelProgress.nextRankTitle}</span>
-                        <span className="text-white/35"> ({levelProgress.nextRankXp.toLocaleString("en-US")} XP)</span>
-                      </>
+                      t("hub.stats.xp_to_next", {
+                        xp: levelProgress.xpToNext.toLocaleString("en-US"),
+                        rank: levelProgress.nextRankTitle,
+                        nextXp: levelProgress.nextRankXp.toLocaleString("en-US"),
+                      })
                     ) : (
-                      <span className="text-[#43E600] font-bold">Nivel máximo alcanzado</span>
+                      <span className="text-[#43E600] font-bold">{t("hub.stats.level_max")}</span>
                     )}
                   </div>
                 </div>
@@ -1057,83 +1127,83 @@ export default function HubView({
             {/* Title: Estadísticas de Carrera */}
             <div id="stats-section-title" className="border-b border-white/10 pb-2">
               <h3 className="text-base font-display font-extrabold text-[#45AFFF] flex items-center gap-2">
-                <BarChart3 className="w-5 h-5 text-[#45AFFF]" /> ESTADÍSTICAS DE CARRERA
+                <BarChart3 className="w-5 h-5 text-[#45AFFF]" /> {t("hub.stats.career_title")}
               </h3>
             </div>
 
             {/* Row 1: KPI Indicators */}
             <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4" id="stats-kpi-row">
               <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-4 shadow-sm flex flex-col justify-between h-24">
-                <span className="text-[10px] font-mono text-[#45AFFF]/80 uppercase tracking-wider">VUELOS</span>
+                <span className="text-[10px] font-mono text-[#45AFFF]/80 uppercase tracking-wider">{t("hub.stats.kpi_flights")}</span>
                 <span className="text-2xl font-mono font-extrabold text-white">{statsVuelosTotal}</span>
-                <span className="text-[9px] text-white/40 font-mono">Registrados</span>
+                <span className="text-[9px] text-white/40 font-mono">{t("hub.stats.kpi_registered")}</span>
               </div>
               
               <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-4 shadow-sm flex flex-col justify-between h-24">
-                <span className="text-[10px] font-mono text-[#45AFFF]/80 uppercase tracking-wider">DISTANCIA</span>
-                <span className="text-xl font-mono font-extrabold text-white">{statsDistanciaTotal} <span className="text-xs text-white/60">MN</span></span>
-                <span className="text-[9px] text-white/40 font-mono">Millas Náuticas</span>
+                <span className="text-[10px] font-mono text-[#45AFFF]/80 uppercase tracking-wider">{t("hub.stats.kpi_distance")}</span>
+                <span className="text-xl font-mono font-extrabold text-white">{statsDistanciaTotal} <span className="text-xs text-white/60">{t("hub.stats.kpi_nm")}</span></span>
+                <span className="text-[9px] text-white/40 font-mono">{t("hub.stats.kpi_nautical_miles")}</span>
               </div>
 
               <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-4 shadow-sm flex flex-col justify-between h-24">
-                <span className="text-[10px] font-mono text-[#45AFFF]/80 uppercase tracking-wider">DURACIÓN PROMEDIO</span>
+                <span className="text-[10px] font-mono text-[#45AFFF]/80 uppercase tracking-wider">{t("hub.stats.kpi_avg_duration")}</span>
                 <span className="text-xl font-mono font-extrabold text-white">{statsDuracionPromedio}</span>
-                <span className="text-[9px] text-white/40 font-mono">Tiempo Promedio</span>
+                <span className="text-[9px] text-white/40 font-mono">{t("hub.stats.kpi_avg_time")}</span>
               </div>
 
               <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-4 shadow-sm flex flex-col justify-between h-24">
-                <span className="text-[10px] font-mono text-[#45AFFF]/80 uppercase tracking-wider">AEROPUERTOS</span>
+                <span className="text-[10px] font-mono text-[#45AFFF]/80 uppercase tracking-wider">{t("hub.stats.kpi_airports")}</span>
                 <span className="text-2xl font-mono font-extrabold text-white">{statsAeropuertosUnicos}</span>
-                <span className="text-[9px] text-white/40 font-mono">Terminales Conectadas</span>
+                <span className="text-[9px] text-white/40 font-mono">{t("hub.stats.kpi_terminals")}</span>
               </div>
 
-              <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-4 shadow-sm flex flex-col justify-between h-24" title="El puntaje promedio estará disponible próximamente">
-                <span className="text-[10px] font-mono text-[#45AFFF]/80 uppercase tracking-wider">PUNTAJE PROMEDIO</span>
+              <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-4 shadow-sm flex flex-col justify-between h-24" title={t("hub.stats.kpi_soon")}>
+                <span className="text-[10px] font-mono text-[#45AFFF]/80 uppercase tracking-wider">{t("hub.stats.kpi_avg_score")}</span>
                 <span className="text-xl font-mono font-extrabold text-white/40">—<span className="text-xs text-white/40">/10</span></span>
-                <span className="text-[9px] text-white/40 font-mono">Próximamente</span>
+                <span className="text-[9px] text-white/40 font-mono">{t("hub.stats.kpi_soon")}</span>
               </div>
 
               <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-4 shadow-sm flex flex-col justify-between h-24">
-                <span className="text-[10px] font-mono text-[#45AFFF]/80 uppercase tracking-wider">RACHA</span>
-                <span className="text-2xl font-mono font-extrabold text-[#E68B00]">{statsRachaActual} <span className="text-xs font-normal text-white/60">DÍAS</span></span>
-                <span className="text-[9px] text-white/40 font-mono">Actividad Consecutiva</span>
+                <span className="text-[10px] font-mono text-[#45AFFF]/80 uppercase tracking-wider">{t("hub.stats.kpi_streak")}</span>
+                <span className="text-2xl font-mono font-extrabold text-[#E68B00]">{statsRachaActual} <span className="text-xs font-normal text-white/60">{t("hub.stats.kpi_days")}</span></span>
+                <span className="text-[9px] text-white/40 font-mono">{t("hub.stats.kpi_consecutive")}</span>
               </div>
             </div>
 
             {/* Row 2: Performance Indicators (Rendimiento) */}
             <div className="space-y-3">
               <h4 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider border-b border-white/5 pb-1">
-                RENDIMIENTO DE COCKPIT
+                {t("hub.stats.perf_title")}
               </h4>
               <div className="grid grid-cols-2 md:grid-cols-5 gap-4" id="stats-performance-row">
-                <div className="bg-[#00345C]/35 border border-white/10 rounded-[5px] p-3 text-center" title="La mediana de VS estará disponible próximamente">
-                  <span className="text-[9px] font-mono text-white/50 block uppercase">MEDIANA DE VS</span>
+                <div className="bg-[#00345C]/35 border border-white/10 rounded-[5px] p-3 text-center" title={t("hub.stats.perf_vs_soon")}>
+                  <span className="text-[9px] font-mono text-white/50 block uppercase">{t("hub.stats.perf_vs_median")}</span>
                   <span className="text-lg font-mono font-extrabold text-white/40">— FPM</span>
-                  <span className="text-[9px] text-white/30 block mt-0.5">Próximamente</span>
+                  <span className="text-[9px] text-white/30 block mt-0.5">{t("hub.stats.kpi_soon")}</span>
                 </div>
 
                 <div className="bg-[#00345C]/35 border border-white/10 rounded-[5px] p-3 text-center">
-                  <span className="text-[9px] font-mono text-white/50 block uppercase">VUELO MÁS LARGO (DUR.)</span>
+                  <span className="text-[9px] font-mono text-white/50 block uppercase">{t("hub.stats.perf_longest_dur")}</span>
                   <span className="text-lg font-mono font-extrabold text-white">{statsVueloMasLargoDur}</span>
-                  <span className="text-[9px] text-white/30 block mt-0.5">Tiempo Máximo en Aire</span>
+                  <span className="text-[9px] text-white/30 block mt-0.5">{t("hub.stats.perf_longest_dur_sub")}</span>
                 </div>
 
                 <div className="bg-[#00345C]/35 border border-white/10 rounded-[5px] p-3 text-center">
-                  <span className="text-[9px] font-mono text-white/50 block uppercase">VUELO MÁS LARGO (DIST.)</span>
-                  <span className="text-lg font-mono font-extrabold text-white">{statsVueloMasLargoDtn} MN</span>
-                  <span className="text-[9px] text-white/30 block mt-0.5">Millas Máximas Cruzadas</span>
+                  <span className="text-[9px] font-mono text-white/50 block uppercase">{t("hub.stats.perf_longest_dist")}</span>
+                  <span className="text-lg font-mono font-extrabold text-white">{statsVueloMasLargoDtn} {t("hub.stats.kpi_nm")}</span>
+                  <span className="text-[9px] text-white/30 block mt-0.5">{t("hub.stats.perf_longest_dist_sub")}</span>
                 </div>
 
-                <div className="bg-[#00345C]/35 border border-white/10 rounded-[5px] p-3 text-center" title="La mejor racha estará disponible próximamente">
-                  <span className="text-[9px] font-mono text-white/50 block uppercase">MEJOR RACHA</span>
-                  <span className="text-lg font-mono font-extrabold text-white/40">— DÍAS</span>
-                  <span className="text-[9px] text-white/30 block mt-0.5">Próximamente</span>
+                <div className="bg-[#00345C]/35 border border-white/10 rounded-[5px] p-3 text-center" title={t("hub.stats.perf_best_streak_tooltip")}>
+                  <span className="text-[9px] font-mono text-white/50 block uppercase">{t("hub.stats.perf_best_streak")}</span>
+                  <span className="text-lg font-mono font-extrabold text-white/40">— {t("hub.stats.kpi_days")}</span>
+                  <span className="text-[9px] text-white/30 block mt-0.5">{t("hub.stats.perf_best_streak_sub")}</span>
                 </div>
 
                 <div className="bg-[#00345C]/35 border border-white/10 rounded-[5px] p-3 text-center col-span-2 md:col-span-1">
-                  <span className="text-[9px] font-mono text-white/50 block uppercase">PAÍSES VISITADOS</span>
-                  <span className="text-lg font-mono font-extrabold text-[#45AFFF]">{statsPaisesVisitados} URBES</span>
-                  <span className="text-[9px] text-white/30 block mt-0.5">Espacios Aéreos Soberanos</span>
+                  <span className="text-[9px] font-mono text-white/50 block uppercase">{t("hub.stats.perf_countries")}</span>
+                  <span className="text-lg font-mono font-extrabold text-[#45AFFF]">{statsPaisesVisitados} {t("hub.stats.perf_countries_unit")}</span>
+                  <span className="text-[9px] text-white/30 block mt-0.5">{t("hub.stats.perf_countries_sub")}</span>
                 </div>
               </div>
             </div>
@@ -1141,14 +1211,14 @@ export default function HubView({
             {/* Row 3: Distribution Graphs/Indicators - Treemap / Mapa de Árbol */}
             <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-5 shadow-sm space-y-4">
               <h4 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider border-b border-white/10 pb-1.5 flex items-center justify-between">
-                <span>DISTRIBUCIÓN DE OPERACIÓN: MAPA DE ÁRBOL (TREEMAP)</span>
-                <span className="text-[9px] text-[#43E600] font-bold">FLOTA & PARTICIPACIÓN HORARIA</span>
+                <span>{t("hub.stats.dist_title")}</span>
+                <span className="text-[9px] text-[#43E600] font-bold">{t("hub.stats.dist_sub")}</span>
               </h4>
               
               {distribution.length === 0 ? (
                 <div className="text-center py-8 space-y-1">
-                  <p className="text-sm font-bold text-white/70">Sin operaciones por modelo todavía</p>
-                  <p className="text-[11px] font-mono text-white/45">La distribución de tu flota aparecerá aquí.</p>
+                  <p className="text-sm font-bold text-white/70">{t("hub.stats.dist_empty_title")}</p>
+                  <p className="text-[11px] font-mono text-white/45">{t("hub.stats.dist_empty_desc")}</p>
                 </div>
               ) : (
                 <div style={{ width: "100%", height: 260 }}>
@@ -1172,7 +1242,7 @@ export default function HubView({
                 </div>
               )}
               {totalDistHours <= 0 && distribution.length > 0 && (
-                <p className="text-[10px] font-mono text-white/35">Participación estimada por cantidad de vuelos (sin horas registradas).</p>
+                <p className="text-[10px] font-mono text-white/35">{t("hub.stats.dist_estimated")}</p>
               )}
             </div>
 
@@ -1181,14 +1251,14 @@ export default function HubView({
               {/* Rutas más realizadas */}
               <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-5 shadow-sm lg:col-span-2 space-y-4">
                 <h4 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider border-b border-white/10 pb-1.5">
-                  RUTAS MÁS REALIZADAS
+                  {t("hub.stats.routes_title")}
                 </h4>
 
                 <div className="divide-y divide-white/5 space-y-2 text-xs">
                   {topRoutes.length === 0 ? (
                     <div className="py-6 text-center space-y-1">
-                      <p className="text-xs font-bold text-white/70">Sin rutas registradas todavía</p>
-                      <p className="text-[10px] font-mono text-white/45">Tus rutas más voladas aparecerán aquí.</p>
+                      <p className="text-xs font-bold text-white/70">{t("hub.stats.routes_empty_title")}</p>
+                      <p className="text-[10px] font-mono text-white/45">{t("hub.stats.routes_empty_desc")}</p>
                     </div>
                   ) : (
                     topRoutes.map((route, idx) => (
@@ -1204,8 +1274,8 @@ export default function HubView({
                           </div>
                         </div>
                         <div className="text-right font-mono">
-                          <div className="font-extrabold text-white">{route.count} {route.count === 1 ? "vez" : "veces"}</div>
-                          <div className="text-[10px] text-white/40">{route.distanceNm !== null ? `${formatNm(route.distanceNm)} MN` : "—"}</div>
+                          <div className="font-extrabold text-white">{t("hub.stats.route_times", { count: route.count })}</div>
+                          <div className="text-[10px] text-white/40">{route.distanceNm !== null ? `${formatNm(route.distanceNm)} ${t("hub.stats.kpi_nm")}` : "—"}</div>
                         </div>
                       </div>
                     ))
@@ -1216,8 +1286,8 @@ export default function HubView({
               {/* Bar Chart section */}
               <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-5 shadow-sm lg:col-span-3 space-y-4">
                 <h4 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider border-b border-white/10 pb-1.5 flex items-center justify-between">
-                  <span>ACTIVIDAD DE VUELOS POR MES</span>
-                  <span className="text-[9px] text-white/40 font-mono uppercase font-normal">Frecuencia Cockpit</span>
+                  <span>{t("hub.stats.monthly_title")}</span>
+                  <span className="text-[9px] text-white/40 font-mono uppercase font-normal">{t("hub.stats.monthly_sub")}</span>
                 </h4>
 
                 {/* Actividad mensual (Recharts) */}
@@ -1243,9 +1313,9 @@ export default function HubView({
                         cursor={{ fill: "rgba(69,175,255,0.08)" }}
                         contentStyle={{ backgroundColor: "#00172e", border: "1px solid rgba(69,175,255,0.4)", borderRadius: 5, fontSize: 11, fontFamily: "monospace", color: "#fff" }}
                         labelStyle={{ color: "#45AFFF" }}
-                        formatter={(value: number | string) => [`${value} vls`, "Vuelos"]}
+                        formatter={(value: number | string) => [`${value}`, t("hub.stats.monthly_flights_label")]}
                       />
-                      <Bar dataKey="flights" name="Vuelos" radius={[4, 4, 0, 0]}>
+                      <Bar dataKey="flights" name={t("hub.stats.monthly_flights_label")} radius={[4, 4, 0, 0]}>
                         {monthly.map((mes) => (
                           <Cell
                             key={mes.key}
@@ -1258,7 +1328,7 @@ export default function HubView({
                 </div>
 
                 <div className="text-[10px] text-white/60 text-right font-mono">
-                  Total acumulado promedio mensual: <strong className="text-[#45AFFF]">{monthlyAvg} vuelos / mes</strong>
+                  {t("hub.stats.monthly_avg", { avg: monthlyAvg })}
                 </div>
               </div>
             </div>
@@ -1270,6 +1340,13 @@ export default function HubView({
 
       {subView === "passport" && (
         <PassportView onBack={() => setSubView("overview")} />
+      )}
+
+      {subView === "campaigns" && (
+        <CampaignFlightsView
+          onBack={() => setSubView("overview")}
+          onOpenFlight={(flight) => setSelectedFlight(flight)}
+        />
       )}
 
       {subView === "account" && (

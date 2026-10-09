@@ -15,14 +15,17 @@
  */
 
 import React, { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { ComposableMap, Geographies, Geography } from "react-simple-maps";
 import countries, { type LocaleData } from "i18n-iso-countries";
 import esLocale from "i18n-iso-countries/langs/es.json";
+import enLocale from "i18n-iso-countries/langs/en.json";
 import { ArrowLeft, Globe, MapPin, PlaneTakeoff } from "lucide-react";
 import { PilotStatsService, PilotAtlas } from "../services/PilotStatsService";
 import topoUrl from "world-atlas/countries-110m.json?url";
 
 countries.registerLocale(esLocale as unknown as LocaleData);
+countries.registerLocale(enLocale as unknown as LocaleData);
 
 interface PassportViewProps {
   onBack: () => void;
@@ -42,6 +45,7 @@ function flagEmoji(iso: string): string {
  * emoji de bandera no se renderizan). Con fallback a emoji si falla la red.
  */
 function FlagImg({ iso, className }: { iso: string; className?: string }) {
+  const { t } = useTranslation();
   const [failed, setFailed] = useState(false);
   if (!/^[A-Za-z]{2}$/.test(iso ?? "") || failed) {
     return <span className={className}>{flagEmoji(iso)}</span>;
@@ -49,7 +53,7 @@ function FlagImg({ iso, className }: { iso: string; className?: string }) {
   return (
     <img
       src={`https://flagcdn.com/w80/${iso.toLowerCase()}.png`}
-      alt={`Bandera de ${iso.toUpperCase()}`}
+      alt={t("hub.passport.flag_alt", { iso: iso.toUpperCase() })}
       className={className}
       loading="lazy"
       onError={() => setFailed(true)}
@@ -79,6 +83,7 @@ function formatSealDate(iso: string | null): string {
 }
 
 export default function PassportView({ onBack }: PassportViewProps) {
+  const { t, i18n } = useTranslation();
   const [atlas, setAtlas] = useState<PilotAtlas | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -99,7 +104,7 @@ export default function PassportView({ onBack }: PassportViewProps) {
       if (result.success) {
         setAtlas(result.data ?? { countries: [], totalAirports: 0 });
       } else {
-        setError(result.error ?? "No se pudo cargar el pasaporte.");
+        setError(result.error ?? null);
         setAtlas(null);
       }
       setLoading(false);
@@ -121,7 +126,8 @@ export default function PassportView({ onBack }: PassportViewProps) {
 
   const countryName = (iso: string): string => {
     try {
-      return countries.getName(iso, "es") ?? iso;
+      const locale = (i18n.language || "en").startsWith("es") ? "es" : "en";
+      return countries.getName(iso, locale) ?? iso;
     } catch {
       return iso;
     }
@@ -134,14 +140,14 @@ export default function PassportView({ onBack }: PassportViewProps) {
           type="button"
           onClick={onBack}
           className="bg-[#2C6591]/50 border border-white/20 hover:bg-[#45AFFF]/15 text-white p-2 rounded-[5px] transition-all cursor-pointer flex items-center justify-center"
-          title="Volver"
+          title={t("hub.passport.back")}
         >
           <ArrowLeft className="w-5 h-5 text-[#45AFFF]" />
         </button>
         <div>
-          <div className="text-xs text-[#45AFFF]/60 font-mono tracking-widest uppercase mb-0.5">Pasaporte del piloto</div>
+          <div className="text-xs text-[#45AFFF]/60 font-mono tracking-widest uppercase mb-0.5">{t("hub.passport.subtitle")}</div>
           <h1 className="font-display font-extrabold text-2xl tracking-tight text-[#45AFFF] uppercase">
-            Mapa Mundi de Conquista
+            {t("hub.passport.title")}
           </h1>
         </div>
       </div>
@@ -152,17 +158,17 @@ export default function PassportView({ onBack }: PassportViewProps) {
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
           </svg>
-          Sellando tu pasaporte…
+          {t("hub.passport.loading")}
         </div>
       ) : error || !atlas ? (
         <div className="bg-[#2C6591]/20 border border-white/20 rounded-[5px] p-10 text-center space-y-3">
-          <p className="text-xs font-mono text-red-300">No se pudo cargar el pasaporte: {error ?? "sin datos"}</p>
+          <p className="text-xs font-mono text-red-300">{t("hub.passport.error", { error: error ?? t("hub.passport.no_data") })}</p>
           <button
             type="button"
             onClick={() => setReloadKey((k) => k + 1)}
             className="bg-[#2C6591]/50 border border-white/20 hover:bg-[#45AFFF]/15 text-white px-3 py-1.5 rounded-[5px] font-mono text-[11px] transition-all cursor-pointer"
           >
-            Reintentar
+            {t("hub.passport.retry")}
           </button>
         </div>
       ) : (
@@ -172,7 +178,7 @@ export default function PassportView({ onBack }: PassportViewProps) {
             <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-5 shadow-sm flex items-center gap-4">
               <span className="text-4xl">🌍</span>
               <div>
-                <div className="text-[10px] font-mono text-[#45AFFF]/80 uppercase tracking-wider">Países Conquistados</div>
+                <div className="text-[10px] font-mono text-[#45AFFF]/80 uppercase tracking-wider">{t("hub.passport.countries_conquered")}</div>
                 <div className="text-2xl font-mono font-extrabold text-white">
                   {atlas.countries.length} <span className="text-sm text-white/50">/ {TOTAL_COUNTRIES}</span>
                 </div>
@@ -181,7 +187,7 @@ export default function PassportView({ onBack }: PassportViewProps) {
             <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-5 shadow-sm flex items-center gap-4">
               <span className="text-4xl">🛬</span>
               <div>
-                <div className="text-[10px] font-mono text-[#45AFFF]/80 uppercase tracking-wider">Aeropuertos Visitados</div>
+                <div className="text-[10px] font-mono text-[#45AFFF]/80 uppercase tracking-wider">{t("hub.passport.airports_visited")}</div>
                 <div className="text-2xl font-mono font-extrabold text-white">{atlas.totalAirports}</div>
               </div>
             </div>
@@ -191,10 +197,10 @@ export default function PassportView({ onBack }: PassportViewProps) {
           <div className="bg-[#00172e]/60 border border-white/10 rounded-[5px] p-4">
             <div className="flex items-center justify-between mb-2 px-1">
               <span className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider flex items-center gap-2">
-                <Globe className="w-4 h-4" /> Conquista global
+                <Globe className="w-4 h-4" /> {t("hub.passport.global_conquest")}
               </span>
               <span className="text-[10px] font-mono text-white/50 h-4">
-                {hoverCountry ?? "Pasá el cursor sobre un país"}
+                {hoverCountry ?? t("hub.passport.hover_hint")}
               </span>
             </div>
             <ComposableMap
@@ -219,7 +225,7 @@ export default function PassportView({ onBack }: PassportViewProps) {
                         onMouseEnter={() => {
                           setHoverKey(geo.rsmKey);
                           const name = alpha2 ? countryName(alpha2) : geo.properties?.name;
-                          setHoverCountry(`${flagEmoji(alpha2)} ${name}${visited ? " · conquistado" : ""}`);
+                          setHoverCountry(`${flagEmoji(alpha2)} ${name}${visited ? t("hub.passport.conquered_suffix") : ""}`);
                         }}
                         onMouseLeave={() => {
                           setHoverKey(null);
@@ -233,10 +239,10 @@ export default function PassportView({ onBack }: PassportViewProps) {
             </ComposableMap>
             <div className="flex items-center gap-4 px-1 pt-1 text-[10px] font-mono text-white/50">
               <span className="flex items-center gap-1.5">
-                <span className="inline-block w-3 h-3 rounded-sm bg-[#43E600]" /> Conquistado
+                <span className="inline-block w-3 h-3 rounded-sm bg-[#43E600]" /> {t("hub.passport.conquered")}
               </span>
               <span className="flex items-center gap-1.5">
-                <span className="inline-block w-3 h-3 rounded-sm bg-[#8a9bb0] border border-white/20" /> Sin visitar
+                <span className="inline-block w-3 h-3 rounded-sm bg-[#8a9bb0] border border-white/20" /> {t("hub.passport.not_visited")}
               </span>
             </div>
           </div>
@@ -244,14 +250,14 @@ export default function PassportView({ onBack }: PassportViewProps) {
           {/* Grilla de países */}
           <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-5 shadow-sm space-y-4">
             <h4 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider border-b border-white/10 pb-1.5 flex items-center gap-2">
-              <MapPin className="w-4 h-4" /> Países conquistados ({atlas.countries.length})
+              <MapPin className="w-4 h-4" /> {t("hub.passport.countries_title", { n: atlas.countries.length })}
             </h4>
             {atlas.countries.length === 0 ? (
               <div className="py-8 text-center space-y-2">
                 <PlaneTakeoff className="w-8 h-8 text-[#45AFFF]/40 mx-auto" />
-                <p className="text-sm font-bold text-white/80">Tu pasaporte está en blanco</p>
+                <p className="text-sm font-bold text-white/80">{t("hub.passport.empty_title")}</p>
                 <p className="text-[11px] font-mono text-white/50 max-w-sm mx-auto">
-                  Completá tu primer vuelo (estado finalizado) y el primer sello aparecerá aquí.
+                  {t("hub.passport.empty_desc")}
                 </p>
               </div>
             ) : (
@@ -267,7 +273,7 @@ export default function PassportView({ onBack }: PassportViewProps) {
                     <div className="flex items-start justify-between gap-2">
                       <FlagImg iso={country.iso} className="w-8 h-auto rounded-[3px] shadow" />
                       <span className="text-[9px] font-mono bg-[#43E600]/20 text-[#43E600] px-1.5 py-0.5 rounded font-bold border border-[#43E600]/40">
-                        SELLADO
+                        {t("hub.passport.sealed")}
                       </span>
                     </div>
                     <div className="mt-2">
@@ -275,9 +281,9 @@ export default function PassportView({ onBack }: PassportViewProps) {
                       <p className="text-[10px] font-mono text-white/50">{country.iso}</p>
                     </div>
                     <div className="flex justify-between items-center text-[10px] font-mono mt-2 pt-1.5 border-t border-white/10 text-white/60">
-                      <span>{country.ops} {country.ops === 1 ? "operación" : "operaciones"}</span>
-                      <span>{country.airports} {country.airports === 1 ? "aeropuerto" : "aeropuertos"}</span>
-                      <span>Último: {formatSealDate(country.lastFlight)}</span>
+                      <span>{t("hub.passport.ops", { count: country.ops })}</span>
+                      <span>{t("hub.passport.airports", { count: country.airports })}</span>
+                      <span>{t("hub.passport.last", { date: formatSealDate(country.lastFlight) })}</span>
                     </div>
                   </div>
                 ))}

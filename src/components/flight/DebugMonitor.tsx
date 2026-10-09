@@ -7,16 +7,27 @@
  */
 
 import React, { useEffect, useState, useMemo, useRef } from "react";
-import { X, Clock, Activity, Plane, FileText, Layers, Variable, Timer, AlertTriangle, MoonStar, GitBranch, Trophy } from "lucide-react";
+import { X, Clock, Activity, Plane, FileText, Layers, Variable, Timer, AlertTriangle, MoonStar, GitBranch, Trophy, Users } from "lucide-react";
 import { FlightContext } from "../../services/FlightContext";
 import { XpBonusTracker } from "../../services/XpBonusTracker";
+import { PassengerEngine } from "../../passengers/PassengerEngine";
+import { FlightPhase } from "../../engine/FlightEngine";
+import {
+  TURBULENCE_COOLDOWN_SEC,
+  TURBULENCE_SUSTAIN_SEC,
+  TURBULENCE_THRESHOLDS,
+  TurbulenceDetector,
+  classifyVs,
+} from "../../passengers/turbulence";
 import {
   AI_SYNERGY_EVENT_KEYS,
   AI_SYNERGY_XP_PER_EVENT,
   HARD_AIRPORT_BONUS_XP,
+  PASSENGER_XP_MAX_PCT,
   WEATHER_SEVERITY_BONUS_XP,
   hasSevereWeather,
   resolveHardAirportBonus,
+  resolvePassengerBonus,
   resolveWeatherSeverityBonus,
 } from "../../services/FlightCompletionBonuses";
 import { formatXpSeconds } from "../../services/XpBonusTracker";
@@ -339,6 +350,10 @@ export interface DebugMonitorProps {
   phaseDetector?: FlightPhaseDetector | null;
   /** Tracker de bonos XP de disciplina (muestras por fase) */
   xpBonusTracker?: XpBonusTracker | null;
+  /** Motor de pasajeros Fase 1 (promedios, historial y arquetipos) */
+  passengerEngine?: PassengerEngine | null;
+  /** Detector de turbulencia (estado interno + último evento) */
+  turbulenceDetector?: TurbulenceDetector | null;
   /** Variables resueltas del último evento (opcional, si el caller las provee) */
   lastEventVariables?: Record<string, unknown> | null;
 }
@@ -353,6 +368,8 @@ export default function DebugMonitor({
   ruleEngine,
   phaseDetector,
   xpBonusTracker,
+  passengerEngine,
+  turbulenceDetector,
   lastEventVariables,
 }: DebugMonitorProps) {
   const [tick, setTick] = useState(0);
@@ -501,6 +518,56 @@ export default function DebugMonitor({
       return null;
     }
   }, [xpBonusTracker, tick]);
+
+  // ── Simulación Pasajeros Fase 1 (promedios, historial, arquetipos) ──────
+  const paxMonitor = useMemo(() => {
+    void tick;
+    try {
+      if (!passengerEngine?.isStarted()) return null;
+      return {
+        averages: passengerEngine.getAverages(),
+        history: passengerEngine.getHistory().slice(-20).reverse(),
+        breakdown: passengerEngine.getArchetypeBreakdown(),
+        elapsedSeconds: passengerEngine.getState().elapsedSeconds,
+        pendingMitigable: passengerEngine
+          .getState()
+          .activeNegativeEvents.filter((e) => !e.mitigated).length,
+        // Resumen en vivo para la proyección de XP (misma fórmula del cierre).
+        summary: passengerEngine.getSummary("live"),
+      };
+    } catch {
+      return null;
+    }
+  }, [passengerEngine, tick]);
+
+  // ── Detector de turbulencia (estado + muestra viva) ───────────────────
+  const turbMonitor = useMemo(() => {
+    void tick;
+    try {
+      const snap = turbulenceDetector?.getSnapshot() ?? null;
+      const tel = telemetry as Record<string, unknown>;
+      const vsRaw = tel?.verticalSpeed ?? (tel as Record<string, unknown>)?.vertical_speed;
+      const vs = typeof vsRaw === "number" && Number.isFinite(vsRaw) ? vsRaw : null;
+      let phase: FlightPhase | null = null;
+      try {
+        const p = (scheduler as unknown as { getCurrentPhase?: () => unknown })?.getCurrentPhase?.();
+        if (typeof p === "string" && (Object.values(FlightPhase) as string[]).includes(p)) {
+          phase = p as FlightPhase;
+        }
+      } catch {}
+      const thresholds = phase ? TURBULENCE_THRESHOLDS[phase] ?? null : null;
+      return {
+        snap,
+        vs,
+        vsAbs: vs === null ? null : Math.round(Math.abs(vs)),
+        phase,
+        thresholds,
+        tierNow: classifyVs(vs, phase),
+      };
+    } catch {
+      return null;
+    }
+  }, [turbulenceDetector, tick, telemetry, scheduler]);
 
   // ── Bonus de entorno en vivo (misma lógica que el cierre del vuelo) ────
   // Noche: E:TIME OF DAY muestreado por el tracker (>30% nocturno).
@@ -1533,6 +1600,116 @@ export default function DebugMonitor({
                     </>
                   );
                 })()}
+              </div>
+            )}
+          </Section>
+
+          {/* Simulación Pasajeros Fase 1 (promedios, eventos, arquetipos) */}
+          <Section title="Simulación Pasajeros" icon={Users} count={paxMonitor ? paxMonitor.history.length : 0} defaultOpen={true}>
+            {!paxMonitor ? (
+              <div className="text-[11px] font-mono text-white/30 italic px-2 py-2">Sin muestra activa (iniciá el vuelo)</div>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2 px-2 pb-1.5 mb-1 border-b border-white/5">
+                  <span className="text-[10px] font-mono text-white/30">Puntos base · actualización 1s</span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="font-mono text-[10px] text-white/50">t+{formatXpSeconds(paxMonitor.elapsedSeconds)}</span>
+                    {paxMonitor.pendingMitigable > 0 && (
+                      <XpPill tone="warn">{paxMonitor.pendingMitigable} mitigable{paxMonitor.pendingMitigable > 1 ? "s" : ""}</XpPill>
+                    )}
+                  </span>
+                </div>
+                <KeyValueGrid
+                  data={{
+                    saciedad: Math.round(paxMonitor.averages.saciedad * 10) / 10,
+                    confortFisiologico: Math.round(paxMonitor.averages.confortFisiologico * 10) / 10,
+                    calma: Math.round(paxMonitor.averages.calma * 10) / 10,
+                    entretenimiento: Math.round(paxMonitor.averages.entretenimiento * 10) / 10,
+                  }}
+                />
+                {(() => {
+                  const score = paxMonitor.summary?.overallScore ?? null;
+                  const base = xpBonus?.projected.base_time_xp ?? 0;
+                  const projected = resolvePassengerBonus(score, base);
+                  return (
+                    <div className="mx-2 mt-2 rounded-[5px] border border-[#43E600]/30 bg-[#43E600]/5 px-2 py-1.5 flex items-center justify-between gap-2">
+                      <span className="font-mono text-[10px] text-white/50">
+                        Satisfacción global {score === null ? "—" : `${Math.round(score)}%`}
+                        <span className="text-white/30"> · techo {Math.round(PASSENGER_XP_MAX_PCT * 100)}% del base</span>
+                      </span>
+                      <span className="font-mono text-[11px] font-extrabold text-[#43E600] whitespace-nowrap">
+                        +{projected.toLocaleString("en-US")} XP proyectados
+                      </span>
+                    </div>
+                  );
+                })()}
+                <div className="text-[10px] font-mono text-white/40 px-2 pt-1">Eventos (últimos {paxMonitor.history.length})</div>
+                {paxMonitor.history.length === 0 ? (
+                  <div className="text-[11px] font-mono text-white/30 italic px-2">Sin eventos todavía</div>
+                ) : (
+                  <div className="space-y-0.5 max-h-48 overflow-y-auto">
+                    {paxMonitor.history.map((h) => (
+                      <div key={h.seq} className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-white/[0.04]">
+                        <span className="font-mono text-[11px] text-white/60 truncate" title={h.label}>
+                          <span className="text-white/35">t+{formatXpSeconds(h.tSecond)}</span>{" "}
+                          {h.kind === "negative" ? "⚠ " : h.kind === "mitigate_missed" ? "○ " : h.kind === "silence" ? "🔇 " : "🔊 "}
+                          {h.label}
+                        </span>
+                        <span className="font-mono text-[11px] text-white/85 shrink-0">{h.detail}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="text-[10px] font-mono text-white/40 px-2 pt-1">Arquetipos en la muestra</div>
+                <div className="space-y-0.5">
+                  {paxMonitor.breakdown.map((a) => (
+                    <div key={a.archetypeId} className="px-2 py-1 rounded hover:bg-white/[0.04]">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono text-[11px] text-white/60 truncate">{a.name}</span>
+                        <span className="font-mono text-[11px] text-white/85 shrink-0">×{a.count}</span>
+                      </div>
+                      <div className="font-mono text-[10px] text-white/40 truncate">
+                        sac {Math.round(a.averages.saciedad)} · con {Math.round(a.averages.confortFisiologico)} · cal {Math.round(a.averages.calma)} · ent {Math.round(a.averages.entretenimiento)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </Section>
+
+          {/* Turbulencia (detector edge-triggered por VS) */}
+          <Section title="Turbulencia (detector)" icon={Activity} count={turbMonitor?.snap ? 1 : 0} defaultOpen={true}>
+            {!turbMonitor || !turbMonitor.snap ? (
+              <div className="text-[11px] font-mono text-white/30 italic px-2 py-2">Sin detector activo (iniciá el vuelo)</div>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2 px-2 pb-1.5 mb-1 border-b border-white/5">
+                  <span className="text-[10px] font-mono text-white/30">
+                    Fase {turbMonitor.phase ?? "—"} · VS {turbMonitor.vsAbs === null ? "—" : `${turbMonitor.vsAbs} fpm`} · tier {turbMonitor.tierNow}/3
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    {turbMonitor.snap.cooldownLeftSec > 0 ? (
+                      <XpPill tone="warn">cooldown {turbMonitor.snap.cooldownLeftSec}s</XpPill>
+                    ) : turbMonitor.snap.sustainedSec > 0 ? (
+                      <XpPill tone="ok">acumulando {turbMonitor.snap.sustainedSec}s/{TURBULENCE_SUSTAIN_SEC}s</XpPill>
+                    ) : (
+                      <XpPill tone="idle">inactivo</XpPill>
+                    )}
+                  </span>
+                </div>
+                <KeyValueGrid
+                  data={{
+                    umbralesFase: turbMonitor.thresholds ? turbMonitor.thresholds.join(" / ") : "— (tierra o sin fase)",
+                    picoEpisodio: `tier ${turbMonitor.snap.peakTier}`,
+                    ultimoEvento: turbMonitor.snap.lastEvent
+                      ? `${turbMonitor.snap.lastEvent.level} (calma −${turbMonitor.snap.lastEvent.amount}) @ ${turbMonitor.snap.lastEvent.at}`
+                      : "—",
+                  }}
+                />
+                <div className="text-[10px] font-mono text-white/40 px-2">
+                  Sostener {TURBULENCE_SUSTAIN_SEC}s sobre el umbral dispara · cooldown {TURBULENCE_COOLDOWN_SEC}s · daño solo a calma
+                </div>
               </div>
             )}
           </Section>

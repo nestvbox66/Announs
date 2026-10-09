@@ -38,6 +38,7 @@ export const BONUS_LABELS: Record<string, string> = {
   night_flight_bonus_xp: "Vuelo nocturno",
   hard_airport_bonus_xp: "Aeropuerto complejo",
   weather_severity_bonus_xp: "Meteorología adversa",
+  passenger_xp_awarded: "Satisfacción de pasajeros",
 };
 
 export type XpBonusState = "earned" | "partial" | "missed";
@@ -68,6 +69,9 @@ export const XP_BONUS_MAX: Record<string, number | null> = {
   night_flight_bonus_xp: NIGHT_FLIGHT_BONUS_XP,
   hard_airport_bonus_xp: HARD_AIRPORT_BONUS_XP,
   weather_severity_bonus_xp: WEATHER_SEVERITY_BONUS_XP,
+  // El máximo de pasajeros depende del base del vuelo (20% del base):
+  // como el butter (servidor), cualquier xp > 0 cuenta como cumplido.
+  passenger_xp_awarded: null,
 };
 
 function stateOf(xp: number, maxXp: number | null): XpBonusState {
@@ -182,6 +186,10 @@ export interface CompletionRpcBonuses {
   p_night_flight: number;
   p_hard_airport: number;
   p_weather_severity: number;
+  /** Bonus de pasajeros (proporcional al base, con techo). */
+  p_passenger?: number;
+  /** Multiplicador de campaña vigente (1 = sin campaña). */
+  p_campaign_multiplier?: number;
 }
 
 /**
@@ -206,6 +214,7 @@ export function toColumnBonusItems(rpc: CompletionRpcBonuses): Array<{ key: stri
     item("night_flight_bonus_xp", rpc.p_night_flight),
     item("hard_airport_bonus_xp", rpc.p_hard_airport),
     item("weather_severity_bonus_xp", rpc.p_weather_severity),
+    item("passenger_xp_awarded", rpc.p_passenger ?? 0),
   ];
 }
 
@@ -219,6 +228,10 @@ export interface XpCompletionSummary {
   baseXpAwarded: number | null;
   /** XP total del vuelo según la RPC (null hasta su respuesta). */
   totalFlightXp: number | null;
+  /** Multiplicador de campaña reservado al importar (null si no aplica). */
+  campaignMultiplier: number | null;
+  /** XP otorgada por bonus de campaña según la RPC (null hasta su respuesta). */
+  campaignXp: number | null;
   /** Mensaje si la RPC falló. */
   error?: string | null;
 }

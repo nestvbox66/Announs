@@ -6,6 +6,7 @@
 import React, { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { supabase } from "../lib/supabase";
+import { resolveAvatarDisplayUrl } from "../services/avatarUrl";
 import { 
   User, 
   Mail, 
@@ -78,6 +79,15 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
   const [customAvatarInput, setCustomAvatarInput] = useState("");
   const [showNotification, setShowNotification] = useState(false);
   const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
+  const [avatarImgBroken, setAvatarImgBroken] = useState(false);
+  const [signedAvatar, setSignedAvatar] = useState<string | null>(null);
+  useEffect(() => { setAvatarImgBroken(false); setSignedAvatar(null); }, [avatarUrl]);
+  const handleAvatarError = async () => {
+    if (signedAvatar !== null) { setAvatarImgBroken(true); return; }
+    const resolved = await resolveAvatarDisplayUrl(avatarUrl);
+    if (resolved && resolved !== avatarUrl) setSignedAvatar(resolved);
+    else setAvatarImgBroken(true);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -94,6 +104,13 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
       const uid = user.id;
       setUserId(uid);
 
+      // Avatar de Google/OAuth como respaldo cuando `users.avatar` está vacío.
+      const meta = (user.user_metadata ?? {}) as Record<string, unknown>;
+      const metaAvatar =
+        (typeof meta.avatar_url === "string" && meta.avatar_url) ||
+        (typeof meta.picture === "string" && meta.picture) ||
+        "";
+
       const { data, error } = await supabase
         .from("users")
         .select("*")
@@ -107,9 +124,9 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
       }
 
       const row: AccountData = {
-        username: data?.username || "",
+        username: data?.username || (typeof meta.name === "string" ? meta.name : "") || "",
         email: data?.email || user.email || "",
-        avatarUrl: data?.avatar || "👨‍✈️",
+        avatarUrl: (data?.avatar || "").trim() || metaAvatar || "👨‍✈️",
         subscriptionType: data?.subscription_tier || "base",
         pilotSince: data?.created_at || "",
         subscriptionExpiry: data?.subscription_enddate || "",
@@ -153,7 +170,9 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
     setIsUploadingAvatar(true);
     try {
       const fileExt = file.name.split(".").pop()?.toLowerCase() || "png";
-      const filePath = `${userId}-${Date.now()}.${fileExt}`;
+      // Carpeta por usuario: las policies de Storage validan el dueño por la
+      // primera carpeta (`storage.foldername(name))[1] = auth.uid()`).
+      const filePath = `${userId}/avatar_${Date.now()}.${fileExt}`;
 
       const { error: uploadError } = await supabase.storage
         .from("avatars")
@@ -187,13 +206,17 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
     const parsed = parseInt(simbriefPilotIdStr, 10);
     const simbriefPilotIdNum = simbriefPilotIdStr && !isNaN(parsed) ? parsed : null;
 
-    const updatePayload = {
+    const updatePayload: Record<string, unknown> = {
       username,
-      avatar: avatarUrl,
       simbrief_units: simbriefUnits,
       simbrief_pilot_id: simbriefPilotIdNum,
       preferred_language: preferredLanguage
     };
+    // Solo persistir `avatar` si el usuario lo cambió: evita sobreescribir un
+    // avatar real con el valor por defecto si la carga previa viniera vacía.
+    if (avatarUrl !== (dbData?.avatarUrl ?? "")) {
+      updatePayload.avatar = avatarUrl;
+    }
 
     console.log("Payload a guardar:", updatePayload);
 
@@ -319,12 +342,17 @@ export default function AccountView({ onBack, onLogout }: AccountViewProps) {
             {/* Simulated Live Avatar Frame */}
             <div className="relative w-24 h-24 mx-auto rounded-full border-2 border-[#45AFFF] flex items-center justify-center text-4xl bg-gradient-to-br from-[#00172e] to-[#2C6591] overflow-hidden shadow-lg group">
               {avatarUrl.startsWith("data:") || avatarUrl.startsWith("http") ? (
-                <img 
-                  src={avatarUrl} 
-                  alt="Custom Avatar" 
-                  className="w-full h-full object-cover"
-                  referrerPolicy="no-referrer"
-                />
+                avatarImgBroken ? (
+                  <span className="select-none text-5xl">👨‍✈️</span>
+                ) : (
+                  <img 
+                    src={signedAvatar ?? avatarUrl} 
+                    alt="Custom Avatar" 
+                    className="w-full h-full object-cover"
+                    referrerPolicy="no-referrer"
+                    onError={() => { void handleAvatarError(); }}
+                  />
+                )
               ) : (
                 <span className="select-none text-5xl transform group-hover:scale-110 transition-transform">{avatarUrl || "👨‍✈️"}</span>
               )}

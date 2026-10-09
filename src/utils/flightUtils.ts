@@ -143,3 +143,59 @@ export function isInternationalFlight(originICAO: string, destICAO: string): boo
 
   return getCountryKey(orig) !== getCountryKey(dest);
 }
+
+// ── Ritmo de embarque (pasajeros por minuto) ─────────────────────────
+
+/** Clave de localStorage del default global del piloto. */
+export const BOARDING_PACE_STORAGE_KEY = "cfg_boarding_pax_per_minute";
+
+/** Límites del slider de ritmo (pax/min). */
+export const BOARDING_PACE_MIN_PPM = 5;
+export const BOARDING_PACE_MAX_PPM = 600;
+
+/**
+ * Ritmo por defecto: 60 pax/min = 1 pax/s, el comportamiento histórico del
+ * intervalo de embarque antes de hacerlo configurable.
+ */
+export const BOARDING_PACE_DEFAULT_PPM = 60;
+
+/**
+ * Normaliza un valor arbitrario a pax/min válidos (entero, clamp 5-600).
+ * Sin dato o inválido → default (60).
+ */
+export function clampBoardingPace(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return BOARDING_PACE_DEFAULT_PPM;
+  return Math.min(
+    BOARDING_PACE_MAX_PPM,
+    Math.max(BOARDING_PACE_MIN_PPM, Math.round(n))
+  );
+}
+
+/**
+ * Pasajeros por tick de 1s para un ritmo dado (puede ser fraccionario: el
+ * intervalo acumula el resto hasta completar un pasajero entero).
+ */
+export function boardingPaxPerTick(paxPerMinute: number): number {
+  return clampBoardingPace(paxPerMinute) / 60;
+}
+
+/**
+ * Segundos estimados para embarcar `totalPax` a un ritmo dado.
+ * Null si no hay ritmo válido o no hay pasajeros.
+ */
+export function estimateBoardingSeconds(
+  totalPax: number,
+  paxPerMinute: number
+): number | null {
+  const ppm = clampBoardingPace(paxPerMinute);
+  if (!Number.isFinite(totalPax) || totalPax <= 0 || ppm <= 0) return null;
+  return Math.ceil((totalPax / ppm) * 60);
+}
+
+/** Formatea segundos como `M:SS` (ej. 142 → "2:22"). */
+export function formatEtaMinSec(totalSeconds: number | null | undefined): string {
+  if (totalSeconds == null || !Number.isFinite(totalSeconds)) return "—";
+  const s = Math.max(0, Math.round(totalSeconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}

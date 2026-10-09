@@ -1,4 +1,5 @@
 import React from "react";
+import { useTranslation } from "react-i18next";
 import { AnnouncementInfo } from "../../types";
 
 interface VoiceIndicatorProps {
@@ -9,16 +10,15 @@ interface VoiceIndicatorProps {
 
 interface ChannelDef {
   role: "captain" | "crew" | "gate";
-  label: string;
-  badge: string;
+  labelKey: string;
   color: string;
   icon: string;
 }
 
 const CHANNELS: ChannelDef[] = [
-  { role: "captain", label: "Comandante", badge: "Capitán", color: "#2563eb", icon: "🎙️" },
-  { role: "crew", label: "Jefe de Tripulación", badge: "Tripulación", color: "#16a34a", icon: "🎤" },
-  { role: "gate", label: "Agente de Puerta", badge: "Agente de Puerta", color: "#ea580c", icon: "📢" },
+  { role: "captain", labelKey: "flight_view.commander", color: "#2563eb", icon: "🎙️" },
+  { role: "crew", labelKey: "flight_view.crew_chief", color: "#16a34a", icon: "🎤" },
+  { role: "gate", labelKey: "flight_view.role_gate", color: "#ea580c", icon: "📢" },
 ];
 
 /**
@@ -33,10 +33,11 @@ export default function VoiceIndicator({
   isPlaying,
   getSpeakerName,
 }: VoiceIndicatorProps) {
+  const { t } = useTranslation();
   return (
     <div className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 shadow-lg space-y-4 text-white">
       <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider border-b border-white/10 pb-2 font-bold">
-        Canales de Voz de Tripulación
+        {t("flight_view.crew_channels")}
       </h3>
 
       <div className="space-y-3">
@@ -78,7 +79,7 @@ export default function VoiceIndicator({
                 </div>
                 <div>
                   <span className="text-[10px] font-mono text-white/45 block uppercase font-bold">
-                    {ch.label}
+                    {t(ch.labelKey)}
                   </span>
                   <span
                     className="text-[12px] font-sans font-black tracking-wide"
@@ -96,7 +97,7 @@ export default function VoiceIndicator({
                     : { backgroundColor: "rgba(0,0,0,0.4)", color: "rgba(255,255,255,0.3)" }
                 }
               >
-                {active ? "Hablando" : "A la escucha"}
+                {active ? t("flight_view.speaking") : t("flight_view.listening")}
               </span>
             </div>
           );

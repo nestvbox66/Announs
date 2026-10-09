@@ -38,6 +38,14 @@ const DEFAULT_VARIABLE_DEFINITIONS: Record<string, Record<string, VariableDefini
     vertical_speed: { source: "telemetry", source_path: "verticalSpeed" },
     heading: { source: "telemetry", source_path: "heading" },
   },
+  // Hora local de arribo (destino). `arrivalTime` ya viene localizada desde
+  // el contexto; si falta, la variable usa su fallback textual (required:false).
+  descent_capt_close_desc: {
+    arrival_time: { source: "flight", source_path: "arrivalTime", fallback: "el horario programado", required: false },
+  },
+  taxitogate_crew_welcome: {
+    local_time: { source: "flight", source_path: "arrivalTime", fallback: "la hora local", required: false },
+  },
 };
 
 export class EventContextBuilder {
@@ -71,6 +79,23 @@ export class EventContextBuilder {
     const isTestMode = flightContext.getContext()?.isTestMode || false;
 
     const eventData = variableResolver.resolveVariables(variableDefs, flightContext, isTestMode, eventKey);
+
+    // Regla de cabina: los horarios que se NARRAN (p. ej. `departure_time`)
+    // siempre van en hora LOCAL del aeropuerto, nunca UTC. El resolver trae
+    // `departureTime` (UTC) venga del catálogo remoto o del fallback local,
+    // así que se corrige en este único punto de salida.
+    try {
+      const flight = flightContext.getFlight() as { departureTimeLocal?: unknown };
+      const local = typeof flight?.departureTimeLocal === "string" ? flight.departureTimeLocal.trim() : "";
+      if (local !== "" && eventData.departure_time !== undefined && eventData.departure_time !== local) {
+        console.log("[EventContextBuilder] departure_time UTC → local:", {
+          eventKey,
+          utc: eventData.departure_time,
+          local,
+        });
+        eventData.departure_time = local;
+      }
+    } catch {}
 
     console.log("[DEBUG] EventContextBuilder.build() - Variables resueltas:", {
       eventKey,

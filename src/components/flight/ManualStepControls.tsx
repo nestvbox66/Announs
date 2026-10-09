@@ -1,4 +1,5 @@
 import React, { useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { Play, SkipForward } from "lucide-react";
 import { NarrativeStep } from "../../scenarios/narrative/NarrativeStep";
 
@@ -21,25 +22,31 @@ export default function ManualStepControls({
   onSkip,
   busy,
 }: ManualStepControlsProps) {
-  if (!step) {
-    return (
-      <div className="text-[10px] font-mono text-white/40 italic">
-        Sin pasos manuales pendientes
-      </div>
-    );
-  }
+  const { t } = useTranslation();
 
+  // El efecto va ANTES de cualquier return anticipado (Rules of Hooks):
+  // antes, cuando `step` pasaba de null a objeto, cambiaba el orden de
+  // hooks entre renders y React rompía ("Rendered more hooks...").
   useEffect(() => {
+    if (!step) return;
     console.log(
       `[ManualStepControls] Botón: "Siguiente paso" (paso pendiente: ${step.eventKey}, ${Math.min(index + 1, total)}/${total})`
     );
   }, [step, index, total]);
 
+  if (!step) {
+    return (
+      <div className="text-[10px] font-mono text-white/40 italic">
+        {t("manual_step.none")}
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-2">
       <div className="flex flex-col gap-0.5">
         <span className="text-[9px] font-mono font-extrabold tracking-widest text-[#45AFFF]/80 uppercase">
-          Proximo paso
+          {t("manual_step.next_label")}
         </span>
         <span className="text-[11px] font-mono text-white font-bold">
           {step.eventKey}
@@ -48,11 +55,11 @@ export default function ManualStepControls({
           ) : null}
         </span>
         <span className="text-[10px] font-mono text-white/55">
-          Paso {Math.min(index + 1, total)} de {total}
+          {t("manual_step.step_of", { current: Math.min(index + 1, total), total })}
           {step.optional ? (
-            <span className="text-[#45AFFF]/80"> · opcional</span>
+            <span className="text-[#45AFFF]/80">{t("manual_step.optional")}</span>
           ) : null}
-          <span className="text-[#43E600]/80"> · pendiente</span>
+          <span className="text-[#43E600]/80">{t("manual_step.pending")}</span>
         </span>
       </div>
 
@@ -69,7 +76,7 @@ export default function ManualStepControls({
           className="bg-[#43E600] hover:bg-[#3cd000] disabled:bg-[#43E600]/40 disabled:cursor-not-allowed text-black font-black px-4 py-1.5 rounded-[5px] text-[11px] font-mono flex items-center justify-center gap-1.5 transition-all cursor-pointer text-center"
         >
           <Play className="w-3 h-3 fill-black" strokeWidth={3} />
-          Siguiente paso
+          {t("manual_step.next_btn")}
         </button>
 
         {step.optional && (
@@ -80,7 +87,7 @@ export default function ManualStepControls({
             className="bg-[#002440] hover:bg-[#00345C] disabled:bg-[#002440]/50 disabled:cursor-not-allowed text-white/80 hover:text-white border border-[#3B7EB2]/45 px-3 py-1.5 rounded-[5px] text-[11px] font-mono font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer"
           >
             <SkipForward className="w-3 h-3" />
-            Saltar paso
+            {t("manual_step.skip_btn")}
           </button>
         )}
       </div>

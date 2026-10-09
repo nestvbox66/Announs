@@ -25,6 +25,10 @@ export interface FlightXpBreakdown {
   discipline: XpBonus[];
   /** Bonificaciones de Entorno y Suscripción. */
   environment: XpBonus[];
+  /** Bonus de campaña vigente (null si no aplica o aún sin migrar). */
+  campaign: { multiplier: number; xp: number } | null;
+  /** Bonus de pasajeros (null si no aplica o aún sin migrar). */
+  passenger: { xp: number; score: number | null } | null;
   /** Total consolidado del vuelo. */
   totalXp: number;
 }
@@ -34,7 +38,6 @@ export const XP_PER_MINUTE = 10;
 
 /** Etiquetas en español para cada columna de bonus (reexportadas). */
 export { BONUS_LABELS };
-
 const DISCIPLINE_KEYS = [
   "disc_taxi_lights_xp",
   "disc_landing_lights_xp",
@@ -59,6 +62,76 @@ const XP_BREAKDOWN_COLUMNS = [
   "total_flight_xp",
 ].join(",");
 
+/**
+ * Bonus de campaña de un vuelo (best-effort): lee `campaign_xp` de
+ * `flight_xp_breakdown` y `campaign_xp_multiplier` de `flights`. Si las
+ * columnas de la migración 20260929_campaign_xp aún no existen (o no hay
+ * bonus), devuelve null sin fallar.
+ */
+async function loadCampaignBonus(
+  flightId: string,
+  userId: string
+): Promise<{ multiplier: number; xp: number } | null> {
+  try {
+    const [breakdownRes, flightRes] = await Promise.all([
+      supabase
+        .from("flight_xp_breakdown")
+        .select("campaign_xp")
+        .eq("flight_id", flightId)
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+      supabase
+        .from("flights")
+        .select("campaign_xp_multiplier")
+        .eq("id", flightId)
+        .eq("user_id", userId)
+        .maybeSingle(),
+    ]);
+    if (breakdownRes.error || flightRes.error) return null;
+    const xp = Math.round(
+      Number((breakdownRes.data as unknown as Record<string, unknown> | null)?.campaign_xp ?? 0) || 0
+    );
+    const mult = Number(
+      (flightRes.data as unknown as Record<string, unknown> | null)?.campaign_xp_multiplier ?? 1
+    );
+    const multiplier = Number.isFinite(mult) && mult > 1 ? Math.round(mult * 100) / 100 : 1;
+    if (xp <= 0 && multiplier <= 1) return null;
+    return { multiplier, xp: Math.max(0, xp) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Bonus de pasajeros de un vuelo (best-effort): lee `passenger_xp_awarded` y
+ * `global_satisfaction` de `flights`. Si las columnas de la migración de
+ * satisfacción aún no existen (o no hay bonus), devuelve null sin fallar.
+ */
+async function loadPassengerBonus(
+  flightId: string,
+  userId: string
+): Promise<{ xp: number; score: number | null } | null> {
+  try {
+    const { data, error } = await supabase
+      .from("flights")
+      .select("passenger_xp_awarded, global_satisfaction")
+      .eq("id", flightId)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (error || !data) return null;
+    const row = data as unknown as Record<string, unknown> | null;
+    const xp = Math.round(Number(row?.passenger_xp_awarded ?? 0) || 0);
+    const rawScore = Number(row?.global_satisfaction);
+    const score = Number.isFinite(rawScore) ? Math.round(rawScore) : null;
+    if (xp <= 0 && score === null) return null;
+    return { xp: Math.max(0, xp), score };
+  } catch {
+    return null;
+  }
+}
+
 export class ProgressionService {
   /**
    * Desglose de XP de un vuelo desde `flight_xp_breakdown` (una fila por
@@ -73,7 +146,7 @@ export class ProgressionService {
       ? Math.round(airTimeMinutes)
       : null;
     const baseXp = minutes !== null ? minutes * XP_PER_MINUTE : 0;
-    const empty: FlightXpBreakdown = { baseMinutes: minutes, baseXp, discipline: [], environment: [], totalXp: baseXp };
+    const empty: FlightXpBreakdown = { baseMinutes: minutes, baseXp, discipline: [], environment: [], campaign: null, passenger: null, totalXp: baseXp };
 
     try {
       const { data: { user }, error: authErr } = await supabase.auth.getUser();
@@ -111,12 +184,20 @@ export class ProgressionService {
         xp: amountOf(key),
       }));
       const bonusesTotal = [...discipline, ...environment].reduce((sum, item) => sum + item.xp, 0);
+      // Bonus de campaña (best-effort: columnas de la migración
+      // 20260929_campaign_xp; si aún no existen, queda null sin romper).
+      const campaign = await loadCampaignBonus(flightId, user.id);
+      // Bonus de pasajeros (best-effort: columnas de la migración de
+      // satisfacción; si aún no existen, queda null sin romper).
+      const passenger = await loadPassengerBonus(flightId, user.id);
 
       return ok({
         baseMinutes: minutes,
         baseXp: Number.isFinite(storedBase) && storedBase > 0 ? Math.round(storedBase) : baseXp,
         discipline,
         environment,
+        campaign,
+        passenger,
         totalXp: Number.isFinite(storedTotal) && storedTotal > 0
           ? Math.round(storedTotal)
           : baseXp + bonusesTotal,

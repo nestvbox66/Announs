@@ -17,6 +17,8 @@ import {
   EVENT_CONFIG_DEFAULT_VALUE,
   EVENT_CONFIG_FLAVOR_KEY,
   NORMAL_SCENARIO_KEY,
+  SAFETY_VIDEO_EVENT_KEY,
+  SAFETY_VIDEO_PACKAGE_STORAGE_KEY,
   EventSwitchValue,
   isConfigurableEvent,
   isEventSwitchValue,
@@ -30,7 +32,6 @@ import {
   Globe, 
   Mic, 
   SlidersHorizontal,
-  FolderSync,
   VolumeX,
   Sparkles,
   Headphones,
@@ -46,14 +47,57 @@ import {
   ShieldAlert,
   Play,
   Plus,
-  FolderOpen,
   Search
 } from "lucide-react";
 import { SimBriefData, ConfigVoces, ConfigAudio } from "../types";
 import { BoardingMusicService, BoardingMusicTrack } from "../services/BoardingMusicService";
 import { RANDOM_MUSIC_ID } from "../services/MusicController";
 import MusicPreview from "./music/MusicPreview";
+import MusicDistortionPreview from "./music/MusicDistortionPreview";
 import VoicesPage from "../pages/configuration/VoicesPage";
+import PackagesTab from "./packages/PackagesTab";
+import SafetyVideoPackSelector from "./packages/SafetyVideoPackSelector";
+import BoardingAudioPackSelector from "./packages/BoardingAudioPackSelector";
+import { safetyVideoPackService } from "../services/SafetyVideoPackService";
+import {
+  BOARDING_AUDIO_PACKAGE_STORAGE_KEY,
+  BOARDING_AUDIO_SOURCE_STORAGE_KEY,
+  boardingAudioPackService,
+  toBoardingAudioSource,
+  type BoardingAudioSource,
+} from "../services/BoardingAudioPackService";
+import type { PackageRecord } from "../services/PackagesService";
+import {
+  BOARDING_PACE_DEFAULT_PPM,
+  BOARDING_PACE_MAX_PPM,
+  BOARDING_PACE_MIN_PPM,
+  BOARDING_PACE_STORAGE_KEY,
+  clampBoardingPace,
+} from "../utils/flightUtils";
+
+/** Foto de la voz seleccionada (40px). Fuera del componente para no perder estado. */
+function StaffVoiceAvatar({ url, name }: { url: string | null; name: string }) {
+  const [broken, setBroken] = useState(false);
+  if (url && !broken) {
+    return (
+      <img
+        src={url}
+        alt={name}
+        loading="lazy"
+        onError={() => setBroken(true)}
+        className="w-10 h-10 rounded-full object-cover border border-[#3B7EB2]/50 shrink-0 bg-black/40"
+      />
+    );
+  }
+  return (
+    <div
+      className="w-10 h-10 rounded-full bg-[#00345C] border border-[#3B7EB2]/40 flex items-center justify-center shrink-0"
+      title={name}
+    >
+      <Mic className="w-4 h-4 text-white/50" />
+    </div>
+  );
+}
 
 interface ConfigViewProps {
   simBriefData: SimBriefData;
@@ -117,8 +161,12 @@ export default function ConfigView({
       if (cancelled || error) return;
 
       if (data) {
-        if (data.passenger_boarding_time_seconds != null)
-          setPassengerBoardingTimeSeconds(data.passenger_boarding_time_seconds);
+        if (data.boarding_pax_per_minute != null)
+          setBoardingPaxPerMinute(clampBoardingPace(data.boarding_pax_per_minute));
+        if ((data as any).boarding_music_distortion != null)
+          setBoardingMusicDistortion(Boolean((data as any).boarding_music_distortion));
+        if ((data as any).boarding_music_source != null)
+          setBoardingAudioSource(toBoardingAudioSource((data as any).boarding_music_source));
         if (data.mute_ann_when_user_not_in_cabin != null)
           setMuteAnnWhenNotInCabin(data.mute_ann_when_user_not_in_cabin);
         if (data.auto_detect_flight_phase != null)
@@ -177,7 +225,9 @@ export default function ConfigView({
           localStorage.setItem("cfg_gate_agent_voice_id", (data as any).gate_agent_voice_id);
         }
       } else {
-        setPassengerBoardingTimeSeconds(90);
+        setBoardingPaxPerMinute(BOARDING_PACE_DEFAULT_PPM);
+        setBoardingMusicDistortion(true);
+        setBoardingAudioSource("ia");
         setMuteAnnWhenNotInCabin(false);
         setAutoDetectFlightPhase(true);
         setStartAfterSimulatorConnect(false);
@@ -311,13 +361,13 @@ export default function ConfigView({
         if (stockIds.length > 0) {
           let stockResult: any = await supabase
             .from("voices_stock")
-            .select("id, voice_name, voice_role, languages")
+            .select("id, voice_name, voice_role, avatar_url, languages")
             .in("id", stockIds);
           if (stockResult.error) {
             // Schema sin columna `languages`: reintentar sin ella.
             stockResult = await supabase
               .from("voices_stock")
-              .select("id, voice_name, voice_role")
+              .select("id, voice_name, voice_role, avatar_url")
               .in("id", stockIds);
           }
           if (stockResult.error) throw stockResult.error;
@@ -331,6 +381,10 @@ export default function ConfigView({
               : vs.languages
                 ? [vs.languages]
                 : [],
+            avatarUrl:
+              typeof vs.avatar_url === "string" && vs.avatar_url.trim() !== ""
+                ? vs.avatar_url.trim()
+                : null,
           }));
         }
         if (!cancelled) setStaffVoiceList(mapped);
@@ -345,25 +399,6 @@ export default function ConfigView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
-  // NEW PACKAGES TAB STATES
-  const [packagesDir, setPackagesDir] = useState<string>(() => {
-    return localStorage.getItem("cfg_packages_directory") || "C:\\Users\\User\\AppData\\Roaming\\Microsoft Flight Simulator\\Packages\\Community";
-  });
-  
-  const [packagesList, setPackagesList] = useState(() => {
-    const raw = localStorage.getItem("cfg_packages_list");
-    if (raw) return JSON.parse(raw);
-    return [
-      { id: "p1", name: "Aerolíneas Argentinas AR Pack", description: "Locuciones nativas con acento rioplatense y música de embarque clásica de la compañía.", enabled: true, author: "FSEspañol Team", version: "2.4.1", lang1: "Español (AR)", lang2: "Inglés (US)" },
-      { id: "p2", name: "LATAM Real Voice Pack v2", description: "Set completo de tripulación de cabina y comandante para rutas regionales de Sudamérica.", enabled: false, author: "SimAudio Labs", version: "1.0.8", lang1: "Español (ES)", lang2: "Portugués (BR)" },
-      { id: "p3", name: "Iberia Premium Audio", description: "Mensajes realistas de cabina grabados en alta definición con acento de España y avisos ATC transatlánticos.", enabled: false, author: "IberiaVirtual group", version: "3.1.0", lang1: "Español (ES)", lang2: "Inglés (UK)" },
-      { id: "p4", name: "Flybondi Low-Cost set", description: "Voces desenfadas, anuncios cómicos para vuelos turísticos de cabotaje.", enabled: false, author: "FlySim Devs", version: "1.1.2", lang1: "Español (AR)", lang2: "Ninguno" },
-      { id: "p5", name: "Default FS Soundset", description: "Biblioteca genérica del simulador de vuelo con avisos automáticos y chimes integrados.", enabled: true, author: "Asobo Studio", version: "1.0.0", lang1: "Español (ES)", lang2: "Inglés (US)" }
-    ];
-  });
-
-  const [isScanning, setIsScanning] = useState(false);
-  const [scanMessage, setScanMessage] = useState("");
   const [toastNotification, setToastNotification] = useState<string | null>(null);
 
   // NEW VOCES TAB STATES
@@ -412,25 +447,6 @@ export default function ConfigView({
     };
   }, [isRecording]);
 
-  const handleScanDirectory = () => {
-    setIsScanning(true);
-    setScanMessage("Escaneando ubicación: " + packagesDir);
-    setTimeout(() => {
-      setScanMessage("Analizando paquetes de voz e inmersión...");
-      setTimeout(() => {
-        setIsScanning(false);
-        setScanMessage("");
-        setToastNotification("¡Escaneo completado con éxito! Se sincronizaron 5 paquetes de audio.");
-        setTimeout(() => setToastNotification(null), 4000);
-      }, 1200);
-    }, 1000);
-  };
-
-  const handleOpenDirectory = () => {
-    setToastNotification(`📁 Abriendo explorador en: "${packagesDir}"`);
-    setTimeout(() => setToastNotification(null), 3500);
-  };
-
   const playSyntheticVoicePreview = (name: string, voiceId: string) => {
     if (playingVoiceId === voiceId) {
       setPlayingVoiceId(null);
@@ -474,8 +490,22 @@ export default function ConfigView({
   // ==================== STATE MANAGEMENT & LOCAL STORAGE PERSISTENCE ====================
   
   // Bloque 1: Preferencias - Generales del Sistema
-  const [passengerBoardingTimeSeconds, setPassengerBoardingTimeSeconds] = useState<number>(() => {
-    return Number(localStorage.getItem("cfg_Passenger_Boarding_Time_Seconds") || "90");
+  // Ritmo de embarque global del piloto (pax/min). Reemplaza al ajuste
+  // legacy de segundos (columna `passenger_boarding_time_seconds`, sin uso).
+  const [boardingPaxPerMinute, setBoardingPaxPerMinute] = useState<number>(() => {
+    try {
+      return clampBoardingPace(localStorage.getItem(BOARDING_PACE_STORAGE_KEY));
+    } catch {
+      return BOARDING_PACE_DEFAULT_PPM;
+    }
+  });
+  // Efecto de distorsión en música de embarque (default: Sí).
+  const [boardingMusicDistortion, setBoardingMusicDistortion] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("cfg_boarding_music_distortion") !== "false";
+    } catch {
+      return true;
+    }
   });
   const [muteAnnWhenNotInCabin, setMuteAnnWhenNotInCabin] = useState<boolean>(() => {
     return localStorage.getItem("cfg_Mute_Ann_When_User_Not_In_Cabin") === "true";
@@ -555,6 +585,7 @@ export default function ConfigView({
     name: string;
     role: string;
     languages: string[];
+    avatarUrl: string | null;
   }
   const [staffLanguageList, setStaffLanguageList] = useState<{ id: string; name: string }[]>([]);
   const [staffLanguagesLoading, setStaffLanguagesLoading] = useState(false);
@@ -572,6 +603,10 @@ export default function ConfigView({
   const staffCaptainVoiceOptions = getStaffVoiceOptionsForRole("captain");
   const staffCrewVoiceOptions = getStaffVoiceOptionsForRole("crew");
   const staffGateVoiceOptions = getStaffVoiceOptionsForRole("gate");
+
+  /** Avatar de la voz seleccionada (con fallback si no hay imagen o falla). */
+  const staffSelectedAvatar = (options: StaffVoiceOption[], voiceId: string): StaffVoiceOption | null =>
+    options.find((v) => v.id === voiceId) ?? null;
 
   // ── Consistencia idioma ↔ voces (Personal de Vuelo) ──────────────────
   // Si una voz guardada (preferencia del usuario) NO pertenece al idioma
@@ -645,6 +680,13 @@ export default function ConfigView({
   // Pestaña "Eventos" settings
   const [selectedPackage, setSelectedPackage] = useState<string>(() => {
     return localStorage.getItem("cfg_selected_package") || "";
+  });
+  // Package de video de seguridad por defecto (modo PACK de
+  // `taxi_crew_safety_brief`). Solo se guarda el id; el registro completo lo
+  // resuelve el selector (con auto-selección del primero por defecto).
+  const [safetyPackage, setSafetyPackage] = useState<PackageRecord | null>(null);
+  const [storedSafetyPackageId] = useState<string | null>(() => {
+    return localStorage.getItem(SAFETY_VIDEO_PACKAGE_STORAGE_KEY);
   });
   const [activeGroupTab, setActiveGroupTab] = useState<string>("immersion");
   const [announcementFlavor, setAnnouncementFlavor] = useState<"operative" | "cultural" | "scenic" | "casual">(() => {
@@ -798,7 +840,8 @@ export default function ConfigView({
   // Guardar todas las configuraciones
   const handleSaveAll = () => {
     // Bloque 1
-    localStorage.setItem("cfg_Passenger_Boarding_Time_Seconds", String(passengerBoardingTimeSeconds));
+    localStorage.setItem(BOARDING_PACE_STORAGE_KEY, String(boardingPaxPerMinute));
+    localStorage.setItem("cfg_boarding_music_distortion", String(boardingMusicDistortion));
     localStorage.setItem("cfg_Mute_Ann_When_User_Not_In_Cabin", String(muteAnnWhenNotInCabin));
     localStorage.setItem("cfg_Auto_Detect_Flight_Phase", String(autoDetectFlightPhase));
     localStorage.setItem("cfg_start_after_simulator_connect", String(startAfterSimulatorConnect));
@@ -840,6 +883,9 @@ export default function ConfigView({
 
     // Eventos
     localStorage.setItem("cfg_selected_package", selectedPackage);
+    if (safetyPackage) {
+      localStorage.setItem(SAFETY_VIDEO_PACKAGE_STORAGE_KEY, safetyPackage.id);
+    }
     localStorage.setItem("cfg_event_config", JSON.stringify(eventConfig));
     localStorage.setItem("cfg_announcement_flavor", announcementFlavor);
 
@@ -857,9 +903,7 @@ export default function ConfigView({
       efectoRadio: enableCabinVoiceEffect
     });
 
-    // Guardar Packages y Voces adicionales
-    localStorage.setItem("cfg_packages_directory", packagesDir);
-    localStorage.setItem("cfg_packages_list", JSON.stringify(packagesList));
+    // Voces adicionales (legacy local)
     localStorage.setItem("cfg_voices_list", JSON.stringify(voicesList));
 
     setShowSaveAlert(true);
@@ -870,7 +914,6 @@ export default function ConfigView({
         try {
           const upsertPayload = {
             user_id: userId,
-            passenger_boarding_time_seconds: parseInt(String(passengerBoardingTimeSeconds), 10),
             mute_ann_when_user_not_in_cabin: muteAnnWhenNotInCabin,
             auto_detect_flight_phase: autoDetectFlightPhase,
             start_after_simulator_connect: startAfterSimulatorConnect,
@@ -915,6 +958,30 @@ export default function ConfigView({
 
           if (genResult.error) throw genResult.error;
           if (!annResult.success) throw new Error(annResult.error ?? "Error al guardar la configuración de eventos");
+
+          // Ritmo de embarque + distorsión: columnas nuevas (migraciones
+          // 20261007). Best-effort separado para no romper el guardado si las
+          // migraciones aún no se aplicaron (localStorage ya los tiene).
+          for (const [column, value] of [
+            ["boarding_pax_per_minute", boardingPaxPerMinute],
+            ["boarding_music_distortion", boardingMusicDistortion],
+            ["boarding_music_source", boardingAudioSource],
+          ] as const) {
+            try {
+              const { error: colErr } = await supabase
+                .from("setting_general")
+                .update({ [column]: value })
+                .eq("user_id", userId);
+              if (colErr) {
+                console.warn(
+                  `[ConfigView] ${column} no persistido en la nube (¿migración pendiente?):`,
+                  colErr.message
+                );
+              }
+            } catch (colCatch) {
+              console.warn(`[ConfigView] ${column} no persistido en la nube:`, colCatch);
+            }
+          }
         } catch (err) {
           console.error("Supabase save error:", err);
           setToastNotification("⚠️ Error al guardar en la nube. Los cambios locales están seguros.");
@@ -955,61 +1022,23 @@ export default function ConfigView({
   };
 
   // ==================== DEFINICIÓN DE EVENTOS (desde el escenario) ====================
+  // Inmersión: solo las opciones activas (música de embarque + voz del
+  // agente de puerta, esta última como tarjeta separada). El resto eran
+  // mockups y se eliminaron de la UI (los estados persisten con defaults).
   const immersionOptions = [
-    {
-      key: "play_chime_sound_before_ann",
-      briefKey: "config.immersion_chime_brief",
-      deepKey: "config.immersion_chime_deep",
-      setter: setPlayChimeBeforeAnn,
-      getter: playChimeBeforeAnn
-    },
-    {
-      key: "play_ambient_sound_during_flight",
-      briefKey: "config.immersion_ambient_brief",
-      deepKey: "config.immersion_ambient_deep",
-      setter: setPlayAmbientDuringFlight,
-      getter: playAmbientDuringFlight
-    },
-    {
-      key: "crew_greeting_passengers_at_gate",
-      briefKey: "config.immersion_greeting_brief",
-      deepKey: "config.immersion_greeting_deep",
-      setter: setCrewGreetingGate,
-      getter: crewGreetingGate
-    },
-    {
-      key: "passenger_reaction_to_planes_movement",
-      briefKey: "config.immersion_reaction_brief",
-      deepKey: "config.immersion_reaction_deep",
-      setter: setPassengerReactionPlanesMovement,
-      getter: passengerReactionPlanesMovement
-    },
-    {
-      key: "play_passenger_reaction_during_landing",
-      briefKey: "config.immersion_landing_brief",
-      deepKey: "config.immersion_landing_deep",
-      setter: setPassengerReactionLanding,
-      getter: passengerReactionLanding
-    },
     {
       key: "play_boarding_music",
       briefKey: "config.immersion_music_brief",
       deepKey: "config.immersion_music_deep",
       setter: setPlayBoardingMusic,
       getter: playBoardingMusic
-    },
-    {
-      key: "speed_kph",
-      briefKey: "config.immersion_speed_brief",
-      deepKey: "config.immersion_speed_deep",
-      setter: setSpeedKph,
-      getter: speedKph
     }
   ];
 
   // Grupos de la pestaña de eventos: "Fase 0" (inmersión) + fases del escenario.
+  // Inmersión cuenta la tarjeta de música + la de voz del agente de puerta.
   const eventGroups: EventGroup[] = [
-    { id: "immersion", labelKey: "config.events.groups.immersion", count: immersionOptions.length },
+    { id: "immersion", labelKey: "config.events.groups.immersion", count: immersionOptions.length + 1 },
     ...(scenarioSnapshot?.phases ?? []).map((phase) => ({
       id: phase.key,
       labelKey: phase.name,
@@ -1037,6 +1066,61 @@ export default function ConfigView({
     }));
   };
 
+  // Selección del video de seguridad (modo PACK): persiste el id por defecto
+  // y lo deja activo en el servicio para el próximo vuelo.
+  const handleSafetyPackageChange = (pkg: PackageRecord | null) => {
+    setSafetyPackage(pkg);
+    if (pkg) {
+      localStorage.setItem(SAFETY_VIDEO_PACKAGE_STORAGE_KEY, pkg.id);
+      safetyVideoPackService.setActivePackage(pkg);
+    } else {
+      localStorage.removeItem(SAFETY_VIDEO_PACKAGE_STORAGE_KEY);
+    }
+  };
+
+  // Fuente de música de embarque por defecto (`ia` = catálogo, `pack` =
+  // audio de la comunidad) + package elegido. Igual que el safety video.
+  const [boardingAudioSource, setBoardingAudioSource] = useState<BoardingAudioSource>(() => {
+    try {
+      return toBoardingAudioSource(localStorage.getItem(BOARDING_AUDIO_SOURCE_STORAGE_KEY));
+    } catch {
+      return "ia";
+    }
+  });
+  const [boardingAudioPackage, setBoardingAudioPackage] = useState<PackageRecord | null>(null);
+  const [storedBoardingAudioPackageId] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(BOARDING_AUDIO_PACKAGE_STORAGE_KEY);
+    } catch {
+      return null;
+    }
+  });
+  const handleBoardingAudioSourceChange = (source: BoardingAudioSource) => {
+    setBoardingAudioSource(source);
+    try {
+      localStorage.setItem(BOARDING_AUDIO_SOURCE_STORAGE_KEY, source);
+    } catch {
+      // almacenamiento no disponible: la selección sigue en memoria
+    }
+  };
+  const handleBoardingAudioPackageChange = (pkg: PackageRecord | null) => {
+    setBoardingAudioPackage(pkg);
+    if (pkg) {
+      try {
+        localStorage.setItem(BOARDING_AUDIO_PACKAGE_STORAGE_KEY, pkg.id);
+      } catch {
+        // ignorar
+      }
+      boardingAudioPackService.setActivePackage(pkg);
+    } else {
+      try {
+        localStorage.removeItem(BOARDING_AUDIO_PACKAGE_STORAGE_KEY);
+      } catch {
+        // ignorar
+      }
+    }
+  };
+
   // Pista de música seleccionada actualmente (para el preview de audio).
   const selectedMusicTrack = musicTracks.find((track) => track.id === songBoardingMusic) ?? null;
 
@@ -1047,24 +1131,24 @@ export default function ConfigView({
       <div id="config-header" className="flex items-center justify-between border-b border-[#3B7EB2]/50 pb-4">
         <div>
           <h1 className="font-display font-black text-3xl tracking-tight text-[#45AFFF] flex items-center gap-2 uppercase">
-            <Settings className="w-8 h-8 text-[#43E600] animate-pulse" /> CONFIGURACIÓN DEL SISTEMA
+            <Settings className="w-8 h-8 text-[#43E600] animate-pulse" /> {t("config.title")}
           </h1>
           <p className="text-xs font-mono text-white/70">
-            Customize acoustic EQ bands, pilot details, passenger reactions, and automatic simulated triggers.
+            {t("config.subtitle")}
           </p>
         </div>
 
         <div className="flex items-center gap-3">
           {showSaveAlert && (
             <span className="bg-[#43E600] text-black text-[10px] font-mono font-black px-3 py-2 rounded-[5px] flex items-center gap-1.5 shadow-[0_0_15px_rgba(67,230,0,0.3)] animate-fadeIn">
-              <Check className="w-3.5 h-3.5" /> ¡CAMBIOS REGISTRADOS!
+              <Check className="w-3.5 h-3.5" /> {t("config.saved")}
             </span>
           )}
           <button
             onClick={handleSaveAll}
             className="bg-[#43E600] text-black font-mono font-black hover:bg-[#3bcc00] px-4 py-2 rounded-[5px] text-xs transition-all shadow-[0_0_12px_rgba(67,230,0,0.25)] hover:scale-[1.01] active:scale-[0.99] cursor-pointer inline-flex items-center gap-1.5 h-9"
           >
-            GUARDAR AJUSTES
+            {t("config.save")}
           </button>
         </div>
       </div>
@@ -1123,165 +1207,6 @@ export default function ConfigView({
             {/* COLUMN LEFT: Preference Blocks */}
             <div className="space-y-6">
               
-              {/* PREFERENCIAS DEL SISTEMA */}
-              <div className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 shadow-md flex flex-col gap-4">
-                <div className="border-b border-white/10 pb-2.5">
-                  <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider flex items-center gap-2 font-black">
-                    <SlidersHorizontal className="w-4.5 h-4.5 text-[#43E600]" /> {t("config.system_preferences")}
-                  </h3>
-                  <p className="text-[10px] text-white/50 font-mono mt-1">{t("config.system_preferences_desc")}</p>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  {/* Passenger Boarding Time Seconds */}
-                  <div className="bg-black/35 p-3 rounded border border-white/5 flex flex-col justify-between">
-                    <div>
-                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">{t("config.boarding_time")}</span>
-                      <span className="text-[9px] text-white/45 block mt-0.5">{t("config.boarding_time_helper")}</span>
-                    </div>
-                    <div className="mt-2.5 flex items-center gap-2">
-                      <input 
-                        type="range"
-                        min="5"
-                        max="180"
-                        step="5"
-                        className="flex-1 accent-[#45AFFF] h-1"
-                        value={passengerBoardingTimeSeconds}
-                        onChange={(e) => setPassengerBoardingTimeSeconds(Number(e.target.value))}
-                      />
-                      <span className="font-mono text-xs text-[#43E600] font-bold shrink-0 min-w-[45px] text-right">{passengerBoardingTimeSeconds}s</span>
-                    </div>
-                  </div>
-
-                  {/* Mute Ann When User Not In Cabin */}
-                  <label className="bg-black/35 p-3 rounded border border-white/5 flex items-center justify-between cursor-pointer hover:bg-black/45 transition-colors">
-                    <div className="pr-2">
-                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">{t("config.mute_outside_cabin")}</span>
-                      <span className="text-[9px] text-white/45 block mt-0.5">{t("config.mute_outside_cabin_helper")}</span>
-                    </div>
-                    <input 
-                      type="checkbox"
-                      className="accent-[#43E600] h-4 w-4 shrink-0 transition-all"
-                      checked={muteAnnWhenNotInCabin}
-                      onChange={(e) => setMuteAnnWhenNotInCabin(e.target.checked)}
-                    />
-                  </label>
-
-                  {/* Auto_Detect_Flight_Phase */}
-                  <label className="bg-black/35 p-3 rounded border border-white/5 flex items-center justify-between cursor-pointer hover:bg-black/45 transition-colors">
-                    <div className="pr-2">
-                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">{t("config.auto_detect_phase")}</span>
-                      <span className="text-[9px] text-white/45 block mt-0.5">{t("config.auto_detect_phase_helper")}</span>
-                    </div>
-                    <input 
-                      type="checkbox"
-                      className="accent-[#43E600] h-4 w-4 shrink-0"
-                      checked={autoDetectFlightPhase}
-                      onChange={(e) => setAutoDetectFlightPhase(e.target.checked)}
-                    />
-                  </label>
-
-                  {/* start_after_simulator_connect */}
-                  <label className="bg-black/35 p-3 rounded border border-white/5 flex items-center justify-between cursor-pointer hover:bg-black/45 transition-colors">
-                    <div className="pr-2">
-                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">{t("config.sim_connect_trigger")}</span>
-                      <span className="text-[9px] text-white/45 block mt-0.5">{t("config.sim_connect_trigger_helper")}</span>
-                    </div>
-                    <input 
-                      type="checkbox"
-                      className="accent-[#43E600] h-4 w-4 shrink-0"
-                      checked={startAfterSimulatorConnect}
-                      onChange={(e) => setStartAfterSimulatorConnect(e.target.checked)}
-                    />
-                  </label>
-
-                  {/* enable_cabin_voice_effect */}
-                  <label className="bg-black/35 p-3 rounded border border-white/5 flex items-center justify-between cursor-pointer hover:bg-black/45 transition-colors">
-                    <div className="pr-2">
-                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">{t("config.cabin_voice_effect")}</span>
-                      <span className="text-[9px] text-white/45 block mt-0.5">{t("config.cabin_voice_effect_helper")}</span>
-                    </div>
-                    <input 
-                      type="checkbox"
-                      className="accent-[#43E600] h-4 w-4 shrink-0"
-                      checked={enableCabinVoiceEffect}
-                      onChange={(e) => setEnableCabinVoiceEffect(e.target.checked)}
-                    />
-                  </label>
-
-                  {/* disable_prompts_when_changing_flight_state_manually */}
-                  <label className="bg-black/35 p-3 rounded border border-white/5 flex items-center justify-between cursor-pointer hover:bg-black/45 transition-colors">
-                    <div className="pr-2">
-                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">{t("config.disable_manual_prompts")}</span>
-                      <span className="text-[9px] text-white/45 block mt-0.5">{t("config.disable_manual_prompts_helper")}</span>
-                    </div>
-                    <input 
-                      type="checkbox"
-                      className="accent-[#43E600] h-4 w-4 shrink-0"
-                      checked={disablePromptsManually}
-                      onChange={(e) => setDisablePromptsManually(e.target.checked)}
-                    />
-                  </label>
-
-                  {/* show_ICAO_codes */}
-                  <label className="bg-black/35 p-3 rounded border border-white/5 flex items-center justify-between cursor-pointer hover:bg-black/45 transition-colors">
-                    <div className="pr-2">
-                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">{t("config.show_icao")}</span>
-                      <span className="text-[9px] text-white/45 block mt-0.5">{t("config.show_icao_helper")}</span>
-                    </div>
-                    <input 
-                      type="checkbox"
-                      className="accent-[#43E600] h-4 w-4 shrink-0"
-                      checked={showIcaoCodes}
-                      onChange={(e) => setShowIcaoCodes(e.target.checked)}
-                    />
-                  </label>
-
-                  {/* save_language_settings */}
-                  <label className="bg-black/35 p-3 rounded border border-white/5 flex items-center justify-between cursor-pointer hover:bg-black/45 transition-colors">
-                    <div className="pr-2">
-                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">{t("config.save_language")}</span>
-                      <span className="text-[9px] text-white/45 block mt-0.5">{t("config.save_language_helper")}</span>
-                    </div>
-                    <input 
-                      type="checkbox"
-                      className="accent-[#43E600] h-4 w-4 shrink-0"
-                      checked={saveLanguageSettings}
-                      onChange={(e) => setSaveLanguageSettings(e.target.checked)}
-                    />
-                  </label>
-
-                  {/* show_local_time_of_simulator */}
-                  <label className="bg-black/35 p-3 rounded border border-white/5 flex items-center justify-between cursor-pointer hover:bg-black/45 transition-colors">
-                    <div className="pr-2">
-                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">{t("config.show_local_time")}</span>
-                      <span className="text-[9px] text-white/45 block mt-0.5">{t("config.show_local_time_helper")}</span>
-                    </div>
-                    <input 
-                      type="checkbox"
-                      className="accent-[#43E600] h-4 w-4 shrink-0"
-                      checked={showLocalTimeSim}
-                      onChange={(e) => setShowLocalTimeSim(e.target.checked)}
-                    />
-                  </label>
-
-                  {/* show_ai_generation_progress_on_pre_flight_screen */}
-                  <label className="bg-black/35 p-3 rounded border border-white/5 flex items-center justify-between cursor-pointer hover:bg-black/45 transition-colors">
-                    <div className="pr-2">
-                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">{t("config.show_ai_progress")}</span>
-                      <span className="text-[9px] text-white/45 block mt-0.5">{t("config.show_ai_progress_helper")}</span>
-                    </div>
-                    <input 
-                      type="checkbox"
-                      className="accent-[#43E600] h-4 w-4 shrink-0"
-                      checked={showAiProgressPreflight}
-                      onChange={(e) => setShowAiProgressPreflight(e.target.checked)}
-                    />
-                  </label>
-                </div>
-
-              </div>
-
               {/* IDIOMA Y PERSONAL DE VUELO */}
               <div id="cfg-bloque-staff" className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 shadow-md flex flex-col gap-3">
                 <div className="border-b border-white/10 pb-2">
@@ -1308,7 +1233,7 @@ export default function ConfigView({
                       className="w-full bg-[#00345C]/75 border border-[#3B7EB2]/60 rounded p-2 text-xs text-white font-mono focus:outline-none focus:border-[#45AFFF]"
                     >
                       {staffLanguagesLoading ? (
-                        <option value="" disabled>Cargando...</option>
+                        <option value="" disabled>{t("config.loading")}</option>
                       ) : staffLanguageList.length === 0 ? (
                         <option value="" disabled>{staffLanguagesError || "Sin idiomas disponibles"}</option>
                       ) : (
@@ -1324,24 +1249,30 @@ export default function ConfigView({
                     <label className="font-mono text-[11px] font-bold text-white uppercase tracking-wider block">
                       {t("current_flight.not_started.crew.gate_voice")}
                     </label>
-                    <select
-                      value={gateAgentVoiceId}
-                      onChange={(e) => setGateAgentVoiceId(e.target.value)}
-                      className="w-full bg-[#00345C]/75 border border-[#3B7EB2]/60 rounded p-2 text-xs text-white font-mono focus:outline-none focus:border-[#45AFFF]"
-                    >
-                      {staffVoicesLoading ? (
-                        <option value="" disabled>Cargando...</option>
-                      ) : staffGateVoiceOptions.length === 0 ? (
-                        <option value="" disabled>{staffVoicesError || "Sin voces de agente de puerta para este idioma"}</option>
-                      ) : (
-                        <>
-                          <option value="" disabled>{t("current_flight.not_started.crew.select_voice")}</option>
-                          {staffGateVoiceOptions.map((v) => (
-                            <option key={v.id} value={v.id}>{v.name}</option>
-                          ))}
-                        </>
-                      )}
-                    </select>
+                    <div className="flex items-center gap-3">
+                      <StaffVoiceAvatar
+                        url={staffSelectedAvatar(staffGateVoiceOptions, gateAgentVoiceId)?.avatarUrl ?? null}
+                        name={staffSelectedAvatar(staffGateVoiceOptions, gateAgentVoiceId)?.name ?? ""}
+                      />
+                      <select
+                        value={gateAgentVoiceId}
+                        onChange={(e) => setGateAgentVoiceId(e.target.value)}
+                        className="flex-1 min-w-0 bg-[#00345C]/75 border border-[#3B7EB2]/60 rounded p-2 text-xs text-white font-mono focus:outline-none focus:border-[#45AFFF]"
+                      >
+                        {staffVoicesLoading ? (
+                          <option value="" disabled>{t("config.loading")}</option>
+                        ) : staffGateVoiceOptions.length === 0 ? (
+                          <option value="" disabled>{staffVoicesError || "Sin voces de agente de puerta para este idioma"}</option>
+                        ) : (
+                          <>
+                            <option value="" disabled>{t("current_flight.not_started.crew.select_voice")}</option>
+                            {staffGateVoiceOptions.map((v) => (
+                              <option key={v.id} value={v.id}>{v.name}</option>
+                            ))}
+                          </>
+                        )}
+                      </select>
+                    </div>
                   </div>
 
                   {/* Voz del Capitán */}
@@ -1349,24 +1280,30 @@ export default function ConfigView({
                     <label className="font-mono text-[11px] font-bold text-white uppercase tracking-wider block">
                       {t("current_flight.not_started.crew.captain_voice")}
                     </label>
-                    <select
-                      value={selectedCaptainVoiceId}
-                      onChange={(e) => setSelectedCaptainVoiceId(e.target.value)}
-                      className="w-full bg-[#00345C]/75 border border-[#3B7EB2]/60 rounded p-2 text-xs text-white font-mono focus:outline-none focus:border-[#45AFFF]"
-                    >
-                      {staffVoicesLoading ? (
-                        <option value="" disabled>Cargando...</option>
-                      ) : staffCaptainVoiceOptions.length === 0 ? (
-                        <option value="" disabled>{staffVoicesError || "Sin voces de capitán para este idioma"}</option>
-                      ) : (
-                        <>
-                          <option value="" disabled>{t("current_flight.not_started.crew.select_voice")}</option>
-                          {staffCaptainVoiceOptions.map((v) => (
-                            <option key={v.id} value={v.id}>{v.name}</option>
-                          ))}
-                        </>
-                      )}
-                    </select>
+                    <div className="flex items-center gap-3">
+                      <StaffVoiceAvatar
+                        url={staffSelectedAvatar(staffCaptainVoiceOptions, selectedCaptainVoiceId)?.avatarUrl ?? null}
+                        name={staffSelectedAvatar(staffCaptainVoiceOptions, selectedCaptainVoiceId)?.name ?? ""}
+                      />
+                      <select
+                        value={selectedCaptainVoiceId}
+                        onChange={(e) => setSelectedCaptainVoiceId(e.target.value)}
+                        className="flex-1 min-w-0 bg-[#00345C]/75 border border-[#3B7EB2]/60 rounded p-2 text-xs text-white font-mono focus:outline-none focus:border-[#45AFFF]"
+                      >
+                        {staffVoicesLoading ? (
+                          <option value="" disabled>{t("config.loading")}</option>
+                        ) : staffCaptainVoiceOptions.length === 0 ? (
+                          <option value="" disabled>{staffVoicesError || "Sin voces de capitán para este idioma"}</option>
+                        ) : (
+                          <>
+                            <option value="" disabled>{t("current_flight.not_started.crew.select_voice")}</option>
+                            {staffCaptainVoiceOptions.map((v) => (
+                              <option key={v.id} value={v.id}>{v.name}</option>
+                            ))}
+                          </>
+                        )}
+                      </select>
+                    </div>
                   </div>
 
                   {/* Voz de la Tripulación */}
@@ -1374,24 +1311,30 @@ export default function ConfigView({
                     <label className="font-mono text-[11px] font-bold text-white uppercase tracking-wider block">
                       {t("current_flight.not_started.crew.cabin_voice")}
                     </label>
-                    <select
-                      value={selectedCrewVoiceId}
-                      onChange={(e) => setSelectedCrewVoiceId(e.target.value)}
-                      className="w-full bg-[#00345C]/75 border border-[#3B7EB2]/60 rounded p-2 text-xs text-white font-mono focus:outline-none focus:border-[#45AFFF]"
-                    >
-                      {staffVoicesLoading ? (
-                        <option value="" disabled>Cargando...</option>
-                      ) : staffCrewVoiceOptions.length === 0 ? (
-                        <option value="" disabled>{staffVoicesError || "Sin voces de tripulación para este idioma"}</option>
-                      ) : (
-                        <>
-                          <option value="" disabled>{t("current_flight.not_started.crew.select_voice")}</option>
-                          {staffCrewVoiceOptions.map((v) => (
-                            <option key={v.id} value={v.id}>{v.name}</option>
-                          ))}
-                        </>
-                      )}
-                    </select>
+                    <div className="flex items-center gap-3">
+                      <StaffVoiceAvatar
+                        url={staffSelectedAvatar(staffCrewVoiceOptions, selectedCrewVoiceId)?.avatarUrl ?? null}
+                        name={staffSelectedAvatar(staffCrewVoiceOptions, selectedCrewVoiceId)?.name ?? ""}
+                      />
+                      <select
+                        value={selectedCrewVoiceId}
+                        onChange={(e) => setSelectedCrewVoiceId(e.target.value)}
+                        className="flex-1 min-w-0 bg-[#00345C]/75 border border-[#3B7EB2]/60 rounded p-2 text-xs text-white font-mono focus:outline-none focus:border-[#45AFFF]"
+                      >
+                        {staffVoicesLoading ? (
+                          <option value="" disabled>{t("config.loading")}</option>
+                        ) : staffCrewVoiceOptions.length === 0 ? (
+                          <option value="" disabled>{staffVoicesError || "Sin voces de tripulación para este idioma"}</option>
+                        ) : (
+                          <>
+                            <option value="" disabled>{t("current_flight.not_started.crew.select_voice")}</option>
+                            {staffCrewVoiceOptions.map((v) => (
+                              <option key={v.id} value={v.id}>{v.name}</option>
+                            ))}
+                          </>
+                        )}
+                      </select>
+                    </div>
                   </div>
 
                   {/* Hint */}
@@ -1404,202 +1347,82 @@ export default function ConfigView({
 
             </div>
 
-            {/* COLUMN RIGHT: Audio Equalization, Staff, and Passenger Experience */}
+            {/* COLUMN RIGHT: Preferencias del Sistema (solo opciones activas) */}
             <div className="space-y-6">
+              {/* PREFERENCIAS DEL SISTEMA */}
+              <div className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 shadow-md flex flex-col gap-4">
+                <div className="border-b border-white/10 pb-2.5">
+                  <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider flex items-center gap-2 font-black">
+                    <SlidersHorizontal className="w-4.5 h-4.5 text-[#43E600]" /> {t("config.system_preferences")}
+                  </h3>
+                  <p className="text-[10px] text-white/50 font-mono mt-1">{t("config.system_preferences_desc")}</p>
+                </div>
+
+                <div className="flex flex-col gap-4">
+                  {/* 1. Ritmo de embarque (pax/min) — default global del piloto */}
+                  <div className="bg-black/35 p-3.5 rounded border border-white/5 flex flex-col gap-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider">
+                        {t("config.boarding_pace")}
+                      </span>
+                      <span className="font-mono text-xs text-[#43E600] font-bold shrink-0">
+                        {t("config.boarding_pace_value", { count: boardingPaxPerMinute })}
+                      </span>
+                    </div>
+                    <span className="text-[9px] text-white/45 block">{t("config.boarding_pace_helper")}</span>
+                    <input
+                      type="range"
+                      min={BOARDING_PACE_MIN_PPM}
+                      max={BOARDING_PACE_MAX_PPM}
+                      step="5"
+                      className="w-full accent-[#45AFFF] h-1 cursor-pointer"
+                      value={boardingPaxPerMinute}
+                      onChange={(e) => setBoardingPaxPerMinute(clampBoardingPace(Number(e.target.value)))}
+                      aria-label={t("config.boarding_pace")}
+                    />
+                  </div>
+
+                  {/* 2. Efecto de distorsión en música de embarque */}
+                  <div className="bg-black/35 p-3.5 rounded border border-white/5 flex flex-col gap-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="pr-1 min-w-0">
+                        <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">
+                          {t("config.music_distortion_label")}
+                        </span>
+                        <span className="text-[9px] text-white/45 block mt-0.5">
+                          {t("config.music_distortion_helper")}
+                        </span>
+                      </div>
+                      <div className="flex bg-black/60 border border-white/15 rounded-[4px] p-0.5 shrink-0 h-fit w-[120px] justify-between font-mono">
+                        <button
+                          type="button"
+                          onClick={() => setBoardingMusicDistortion(true)}
+                          className={`px-3 py-1 rounded-[3px] text-[9px] font-black uppercase tracking-wider border cursor-pointer transition-all flex-1 text-center ${
+                            boardingMusicDistortion
+                              ? "bg-[#43E600]/20 text-[#43E600] border-[#43E600]/30 font-extrabold shadow-sm"
+                              : "text-white/30 border-transparent hover:text-white/60"
+                          }`}
+                        >
+                          {t("config.events.yes")}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setBoardingMusicDistortion(false)}
+                          className={`px-3 py-1 rounded-[3px] text-[9px] font-black uppercase tracking-wider border cursor-pointer transition-all flex-1 text-center ${
+                            !boardingMusicDistortion
+                              ? "bg-red-500/20 text-red-300 border-red-500/35 font-extrabold shadow-sm"
+                              : "text-white/30 border-transparent hover:text-white/60"
+                          }`}
+                        >
+                          {t("config.events.no")}
+                        </button>
+                      </div>
+                    </div>
+                    <MusicDistortionPreview tracks={musicTracks} />
+                  </div>
+                </div>
+              </div>
               
-              {/* AUDIO Y ECUALIZADOR */}
-              <div id="cfg-bloque-audio" className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 shadow-md space-y-4">
-                <div className="border-b border-white/10 pb-2 flex justify-between items-center">
-                  <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider flex items-center gap-2 font-black">
-                    <Headphones className="w-4.5 h-4.5 text-[#43E600]" /> {t("config.mixer_title")}
-                  </h3>
-                  {/* audio_3d_enabled switch */}
-                  <label className="inline-flex items-center gap-1.5 bg-black/40 border border-white/10 px-2.5 py-1 rounded-[4px] cursor-pointer text-[10px] text-white/80 font-mono">
-                    <input 
-                      type="checkbox"
-                      className="accent-[#43E600] h-3 w-3"
-                      checked={audio3dEnabled}
-                      onChange={(e) => setAudio3dEnabled(e.target.checked)}
-                    />
-                    <span>{t("config.audio_3d")}</span>
-                  </label>
-                </div>
-
-                <div className="space-y-5">
-                  {/* EQ Comandante / Captain */}
-                  <div className="space-y-1.5">
-                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
-                      <span className="text-[11px] font-mono font-black text-[#ffab2d] uppercase">🎙️ {t("config.eq_captain")}</span>
-                      
-                      {/* Presets dropdown */}
-                      <div className="flex items-center gap-1.5 text-xs">
-                        <span className="text-[10px] text-white/50 font-mono">{t("config.preset")}</span>
-                        <select
-                          className="bg-black/55 text-white text-[11px] font-mono border border-white/25 rounded px-2.5 py-1 focus:outline-none"
-                          value={eqCaptainPreset}
-                          onChange={(e) => handleCaptainPresetChange(e.target.value)}
-                        >
-                          <option value="estandar">{t("config.preset_standard")}</option>
-                          <option value="vhf">{t("config.preset_vhf")}</option>
-                          <option value="muffled_pa">{t("config.preset_muffled")}</option>
-                          <option value="custom">{t("config.preset_custom")}</option>
-                        </select>
-                      </div>
-                    </div>
-
-                    {/* 10 Band Faders Visualizer */}
-                    <div className="bg-black/40 border border-white/10 rounded-lg p-3 overflow-hidden">
-                      <div className="grid grid-cols-10 gap-1 text-center items-center">
-                        {eqCaptainBands.map((bandVal, index) => (
-                          <div key={index} className="flex flex-col items-center gap-1.5 group">
-                            <span className="text-[8px] font-mono text-white/40 block leading-none">{FREQUENCIES[index]}</span>
-                            <div className="h-20 sm:h-24 flex items-center justify-center w-full">
-                              <input 
-                                type="range"
-                                min="-12"
-                                max="12"
-                                value={bandVal}
-                                orient="vertical"
-                                onChange={(e) => handleCaptainBandChange(index, Number(e.target.value))}
-                                className="h-full w-full max-w-[24px] accent-[#ffab2d] cursor-ns-resize"
-                                style={{ writingMode: "bt-lr", WebkitAppearance: "slider-vertical" } as any}
-                              />
-                            </div>
-                            <span className="text-[9px] font-mono font-bold text-[#ffab2d] block min-w-[18px]">
-                              {bandVal > 0 ? `+${bandVal}` : bandVal}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* EQ Tripulantes / Cabin Crew */}
-                  <div className="space-y-1.5 border-t border-white/5 pt-4">
-                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
-                      <span className="text-[11px] font-mono font-black text-[#57b8ff] uppercase">🎙️ {t("config.eq_crew")}</span>
-                      
-                      {/* Presets dropdown */}
-                      <div className="flex items-center gap-1.5 text-xs font-mono">
-                        <span className="text-[10px] text-white/50 block">{t("config.preset")}</span>
-                        <select
-                          className="bg-black/55 text-white text-[11px] font-mono border border-white/25 rounded px-2.5 py-1 focus:outline-none"
-                          value={eqCrewPreset}
-                          onChange={(e) => handleCrewPresetChange(e.target.value)}
-                        >
-                          <option value="estandar">{t("config.preset_standard")}</option>
-                          <option value="vhf">{t("config.preset_vhf")}</option>
-                          <option value="muffled_pa">{t("config.preset_muffled")}</option>
-                          <option value="custom">{t("config.preset_custom")}</option>
-                        </select>
-                      </div>
-                    </div>
-
-                    {/* 10 Band Faders Visualizer */}
-                    <div className="bg-black/40 border border-white/10 rounded-lg p-3 overflow-hidden">
-                      <div className="grid grid-cols-10 gap-1 text-center items-center">
-                        {eqCrewBands.map((bandVal, index) => (
-                          <div key={index} className="flex flex-col items-center gap-1.5 group">
-                            <span className="text-[8px] font-mono text-white/40 block leading-none">{FREQUENCIES[index]}</span>
-                            <div className="h-20 sm:h-24 flex items-center justify-center w-full">
-                              <input 
-                                type="range"
-                                min="-12"
-                                max="12"
-                                value={bandVal}
-                                orient="vertical"
-                                onChange={(e) => handleCrewBandChange(index, Number(e.target.value))}
-                                className="h-full w-full max-w-[24px] accent-[#57b8ff] cursor-ns-resize"
-                                style={{ writingMode: "bt-lr", WebkitAppearance: "slider-vertical" } as any}
-                              />
-                            </div>
-                            <span className="text-[9px] font-mono font-bold text-[#57b8ff] block min-w-[18px]">
-                              {bandVal > 0 ? `+${bandVal}` : bandVal}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-
-                </div>
-              </div>
-
-              {/* EXPERIENCIA DEL PASAJERO */}
-              <div id="cfg-bloque-passenger-exp" className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 shadow-md flex flex-col gap-3">
-                <div className="border-b border-white/10 pb-2">
-                  <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider flex items-center gap-2 font-black">
-                    <Activity className="w-4.5 h-4.5 text-[#43E600]" /> {t("config.passenger_title")}
-                  </h3>
-                  <p className="text-[10px] text-white/50 font-mono mt-1">{t("config.passenger_desc")}</p>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3.5">
-                  <label className="bg-black/25 p-2.5 rounded border border-white/5 hover:bg-black/45 flex items-center justify-between cursor-pointer transition-colors font-mono">
-                    <span className="text-[10px] text-white/90 uppercase font-black">{t("config.passenger_gforce")}</span>
-                    <input 
-                      type="checkbox"
-                      className="accent-[#43E600] h-3.5 w-3.5"
-                      checked={pfGforce}
-                      onChange={(e) => setPfGforce(e.target.checked)}
-                    />
-                  </label>
-
-                  <label className="bg-black/25 p-2.5 rounded border border-white/5 hover:bg-black/45 flex items-center justify-between cursor-pointer transition-colors font-mono">
-                    <span className="text-[10px] text-white/90 uppercase font-black">{t("config.passenger_vertical_speed")}</span>
-                    <input 
-                      type="checkbox"
-                      className="accent-[#43E600] h-3.5 w-3.5"
-                      checked={pfVerticalSpeed}
-                      onChange={(e) => setPfVerticalSpeed(e.target.checked)}
-                    />
-                  </label>
-
-                  <label className="bg-black/25 p-2.5 rounded border border-white/5 hover:bg-black/45 flex items-center justify-between cursor-pointer transition-colors font-mono">
-                    <span className="text-[10px] text-white/90 uppercase font-black">{t("config.passenger_landing_force")}</span>
-                    <input 
-                      type="checkbox"
-                      className="accent-[#43E600] h-3.5 w-3.5"
-                      checked={pfLandingForce}
-                      onChange={(e) => setPfLandingForce(e.target.checked)}
-                    />
-                  </label>
-
-                  <label className="bg-black/25 p-2.5 rounded border border-white/5 hover:bg-black/45 flex items-center justify-between cursor-pointer transition-colors font-mono">
-                    <span className="text-[10px] text-white/90 uppercase font-black">{t("config.passenger_irregular_ground")}</span>
-                    <input 
-                      type="checkbox"
-                      className="accent-[#43E600] h-3.5 w-3.5"
-                      checked={pfIrregularGroundSpeed}
-                      onChange={(e) => setPfIrregularGroundSpeed(e.target.checked)}
-                    />
-                  </label>
-
-                  <label className="bg-black/25 p-2.5 rounded border border-white/5 hover:bg-black/45 flex items-center justify-between cursor-pointer transition-colors font-mono">
-                    <span className="text-[10px] text-white/90 uppercase font-black">{t("config.passenger_acceleration")}</span>
-                    <input 
-                      type="checkbox"
-                      className="accent-[#43E600] h-3.5 w-3.5"
-                      checked={pfAccelerationGroundSpeed}
-                      onChange={(e) => setPfAccelerationGroundSpeed(e.target.checked)}
-                    />
-                  </label>
-
-                  <label className="bg-black/25 p-2.5 rounded border border-white/5 hover:bg-black/45 flex items-center justify-between cursor-pointer transition-colors font-mono relative">
-                    <div className="pr-1">
-                      <span className="text-[10px] text-white/90 uppercase font-black block">{t("config.passenger_delay_feedback")}</span>
-                      <span className="text-[8px] text-white/40 font-normal block mt-0.5">{t("config.passenger_delay_feedback_helper")}</span>
-                    </div>
-                    <input 
-                      type="checkbox"
-                      className="accent-[#43E600] h-3.5 w-3.5 shrink-0"
-                      checked={pfDelayFeedback}
-                      onChange={(e) => setPfDelayFeedback(e.target.checked)}
-                    />
-                  </label>
-                </div>
-              </div>
-
             </div>
 
           </div>
@@ -1615,24 +1438,6 @@ export default function ConfigView({
                 <h3 className="font-display font-bold text-base text-[#45AFFF] uppercase tracking-wider font-black">
                   {t("config.eventos_title")}
                 </h3>
-              </div>
-
-              {/* Package selector mimicking Flight screen */}
-              <div id="cfg-package-selector" className="flex items-center gap-3 bg-black/30 border border-white/10 rounded-[5px] px-3 py-1.5 shrink-0 max-w-full overflow-x-auto">
-                <label className="text-[9px] font-mono font-bold text-white/55 uppercase tracking-wider whitespace-nowrap">{t("config.package_active_label")}</label>
-                <select
-                  id="package-select"
-                  value={selectedPackage}
-                  onChange={(e) => setSelectedPackage(e.target.value)}
-                  className="bg-black/55 border border-[#3B7EB2]/45 text-xs text-white font-mono font-bold rounded-[3px] px-2 py-0.5 focus:outline-none cursor-pointer hover:border-[#45AFFF] transition-colors"
-                >
-                  <option value="">{t("config.package_no_package")}</option>
-                  <option value="aerolineas">Aerolíneas Argentinas AR Pack</option>
-                  <option value="latam">LATAM Real Voice Pack v2</option>
-                  <option value="iberia">Iberia Premium Audio</option>
-                  <option value="flybondi">Flybondi Low-Cost set</option>
-                  <option value="default">Default FS Soundset</option>
-                </select>
               </div>
             </div>
 
@@ -1743,7 +1548,7 @@ export default function ConfigView({
                             {t("config.immersion_music_label")}
                           </span>
                           <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
-                            <select 
+                            <select
                               className="bg-[#00172e] border border-[#3B7EB2]/50 text-white rounded-[4px] px-2.5 py-1 text-xs font-mono focus:outline-none w-full sm:w-auto min-w-[220px]"
                               value={songBoardingMusic}
                               onChange={(e) => setSongBoardingMusic(e.target.value)}
@@ -1764,6 +1569,50 @@ export default function ConfigView({
                               previewUrl={selectedMusicTrack?.previewUrl ?? null}
                             />
                           </div>
+                        </div>
+                      )}
+
+                      {/* Fuente de música: catálogo (IA) o audio de la comunidad (Pack) */}
+                      {item.key === "play_boarding_music" && item.getter && (
+                        <div className="border-t border-white/5 pt-3 mt-1 flex flex-col gap-2">
+                          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+                            <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">
+                              {t("config.boarding_source_label")}
+                            </span>
+                            <div className="flex bg-black/60 border border-white/15 rounded-[4px] overflow-hidden shrink-0 h-fit w-[165px]">
+                              {(["ia", "pack"] as const).map((mode) => {
+                                const isSelected = boardingAudioSource === mode;
+                                let activeStyle = "text-white/30 border-transparent hover:text-white/60 text-[9px] font-semibold";
+                                if (isSelected) {
+                                  if (mode === "pack") activeStyle = "bg-amber-500/20 text-amber-300 border-amber-500/40 font-black shadow-sm text-[9px]";
+                                  else activeStyle = "bg-sky-500/20 text-sky-400 border-[#45AFFF]/35 font-black shadow-sm text-[9px]";
+                                }
+                                return (
+                                  <button
+                                    key={mode}
+                                    type="button"
+                                    onClick={() => handleBoardingAudioSourceChange(mode)}
+                                    className={`px-1.5 py-1 rounded-[3px] font-mono uppercase tracking-wider border cursor-pointer transition-all flex-1 text-center ${activeStyle}`}
+                                  >
+                                    {mode === "pack" ? t("config.events.mode_pack_label") : t("config.events.mode_ia_label")}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                          {boardingAudioSource === "pack" && (
+                            <BoardingAudioPackSelector
+                              airlineIcao={null}
+                              value={boardingAudioPackage?.id ?? storedBoardingAudioPackageId}
+                              onChange={handleBoardingAudioPackageChange}
+                              idPrefix="cfg-boarding-pack"
+                              title={
+                                boardingAudioPackage
+                                  ? `${t("boarding_pack.selector_title")} - ${boardingAudioPackage.package_name}`
+                                  : t("boarding_pack.selector_title")
+                              }
+                            />
+                          )}
                         </div>
                       )}
                     </div>
@@ -1832,13 +1681,31 @@ export default function ConfigView({
                             <span className={`w-1.5 h-1.5 rounded-full ${isCaptain ? "bg-[#e68b00]" : "bg-[#45AFFF]"}`}></span>
                             <span>{t("config.events.narrator_label")} <strong className={isCaptain ? "text-[#ffb340]" : "text-[#45AFFF]"}>{getNarratorLabel(item.speakerRole)}</strong></span>
                           </div>
+                          {/* Selector del video de seguridad (modo PACK):
+                              catálogo de la comunidad; sin vuelo asociado
+                              muestra todas las aerolíneas. */}
+                          {item.eventKey === SAFETY_VIDEO_EVENT_KEY && currentValue === "PACK" && (
+                            <SafetyVideoPackSelector
+                              airlineIcao={null}
+                              value={safetyPackage?.id ?? storedSafetyPackageId}
+                              onChange={handleSafetyPackageChange}
+                              idPrefix="cfg-safety-pack"
+                            />
+                          )}
                       </div>
 
                       {/* Selector Mode Pill */}
                       <div className="flex bg-black/60 border border-white/15 rounded-[4px] overflow-hidden shrink-0 h-fit w-[165px]">
                         {(["OFF", "PACK", "IA"] as const).map((mode) => {
                           const isSelected = currentValue === mode;
-                          const isPackModeDisabled = mode === "PACK" && !selectedPackage;
+                          // El video de seguridad (PACK de taxi_crew_safety_brief)
+                          // usa los packages de la comunidad (safety_video), no
+                          // el sound pack legacy: su opción PACK siempre está
+                          // habilitada.
+                          const isPackModeDisabled =
+                            mode === "PACK" &&
+                            item.eventKey !== SAFETY_VIDEO_EVENT_KEY &&
+                            !selectedPackage;
                           let activeStyle = "text-white/30 border-transparent hover:text-white/60 text-[9px] font-semibold";
                           if (isSelected) {
                             if (mode === "OFF") activeStyle = "bg-red-500/20 text-red-300 border-red-500/35 font-black shadow-sm text-[9px]";
@@ -1871,132 +1738,7 @@ export default function ConfigView({
         )}
 
         {/* ==================== TAB 3: PACKAGES ==================== */}
-        {activeTab === "packages" && (
-          <div className="bg-[#2C6591]/20 border border-white/20 rounded-[5px] p-5 shadow-lg space-y-6 w-full animate-fadeIn">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-white/10 pb-4">
-              <div>
-                <h3 className="text-base font-display font-black text-[#45AFFF] uppercase tracking-wider flex items-center gap-2">
-                  📦 Directorio de Control de Audio Packages
-                </h3>
-                <p className="text-xs text-white/60 font-mono mt-1">
-                  Administre las carpetas de recursos fónicos y sets de sonido de aerolíneas reales.
-                </p>
-              </div>
-              <div className="flex gap-2 shrink-0">
-                <button
-                  type="button"
-                  onClick={handleScanDirectory}
-                  disabled={isScanning}
-                  className="bg-[#45AFFF] text-[#00172e] hover:bg-[#6ec2ff] font-mono font-black px-4 py-2 rounded-[5px] text-xs transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-40"
-                >
-                  <FolderSync className={`w-4 h-4 ${isScanning ? "animate-spin" : ""}`} />
-                  ESCANEAR DIRECTORIO
-                </button>
-                <button
-                  type="button"
-                  onClick={handleOpenDirectory}
-                  className="border border-white/30 hover:bg-white/5 text-white font-mono font-bold px-4 py-2 rounded-[5px] text-xs transition-all flex items-center gap-1.5 cursor-pointer"
-                >
-                  <FolderOpen className="w-4 h-4 text-[#43E600]" />
-                  ABRIR DIRECTORIO
-                </button>
-              </div>
-            </div>
-
-            {/* Scanning Feedback Alert */}
-            {isScanning && (
-              <div className="bg-black/40 border border-[#3b7eb2]/50 p-4 rounded-[5px] flex items-center gap-3 animate-pulse">
-                <div className="w-2.5 h-2.5 rounded-full bg-[#43E600] animate-ping" />
-                <span className="font-mono text-xs text-[#45AFFF] font-bold uppercase">{scanMessage}</span>
-              </div>
-            )}
-
-            {/* Input para el directorio */}
-            <div className="bg-black/30 border border-white/10 p-4 rounded-[5px] flex flex-col gap-2">
-              <label htmlFor="packages-dir-input" className="text-xs font-mono text-white/80 font-black uppercase tracking-wider">
-                Directorio de ubicación de packages:
-              </label>
-              <div className="relative">
-                <FolderOpen className="absolute left-3 top-2.5 h-4 w-4 text-white/45" />
-                <input
-                  id="packages-dir-input"
-                  type="text"
-                  value={packagesDir}
-                  onChange={(e) => setPackagesDir(e.target.value)}
-                  placeholder="Ej: C:\Users\User\AppData\Roaming\Microsoft Flight Simulator\Packages\Community"
-                  className="w-full bg-[#00213d] border border-[#3B7EB2]/50 rounded-[4px] py-2 pl-10 pr-4 text-xs font-mono text-white focus:outline-none focus:border-[#43E600] transition-colors"
-                />
-              </div>
-              <p className="text-[10px] text-white/45 font-mono mt-0.5">
-                Ruta absoluta del simulador de vuelo MSFS / Community donde se despliegan las librerías físicas (.wav / .gai).
-              </p>
-            </div>
-
-            {/* Lista de cards de paquetes */}
-            <div className="space-y-4">
-              <h4 className="text-xs font-mono text-[#43E600] uppercase font-black tracking-wider border-b border-white/5 pb-1">
-                Paquetes de Sonido Detectados ({packagesList.length})
-              </h4>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {packagesList.map((pkg: any) => (
-                  <div
-                    key={pkg.id}
-                    className={`p-4 rounded-[6px] border transition-all flex flex-col justify-between ${
-                      pkg.enabled
-                        ? "bg-[#002440]/65 border-[#3B7EB2]/55 shadow-md shadow-[#2C6591]/10"
-                        : "bg-black/25 border-white/10 opacity-60 hover:opacity-85"
-                    }`}
-                  >
-                    <div>
-                      <div className="flex justify-between items-start gap-4">
-                        <h5 className="font-sans font-bold text-sm text-white leading-tight tracking-wide">
-                          {pkg.name}
-                        </h5>
-                        <label className="relative inline-flex items-center cursor-pointer select-none">
-                          <input
-                            type="checkbox"
-                            checked={pkg.enabled}
-                            onChange={(e) => {
-                              const updated = packagesList.map((p: any) =>
-                                p.id === pkg.id ? { ...p, enabled: e.target.checked } : p
-                              );
-                              setPackagesList(updated);
-                            }}
-                            className="sr-only peer"
-                          />
-                          <div className="w-8 h-4.5 bg-white/15 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-500 after:border after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:bg-[#43E600]"></div>
-                        </label>
-                      </div>
-                      <p className="text-xs text-white/70 font-mono mt-2 leading-relaxed">
-                        {pkg.description}
-                      </p>
-                    </div>
-
-                    {/* Información secundaria de menor relevancia */}
-                    <div className="grid grid-cols-2 gap-y-2 gap-x-4 border-t border-white/5 pt-3 mt-4 text-[10px] font-mono text-white/55">
-                      <div>
-                        <span className="block text-white/35 uppercase text-[9px]">Autor:</span>
-                        <span className="text-[#45AFFF] font-semibold">{pkg.author}</span>
-                      </div>
-                      <div>
-                        <span className="block text-white/35 uppercase text-[9px]">Versión:</span>
-                        <span className="font-semibold text-white/85">{pkg.version}</span>
-                      </div>
-                      <div>
-                        <span className="block text-white/35 uppercase text-[9px]">Lenguaje 1:</span>
-                        <span className="text-white/85 font-semibold">{pkg.lang1}</span>
-                      </div>
-                      <div>
-                        <span className="block text-white/35 uppercase text-[9px]">Lenguaje 2:</span>
-                        <span className="text-white/85 font-semibold">{pkg.lang2}</span>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
+        {activeTab === "packages" && <PackagesTab />}
 
         {/* ==================== TAB 4: VOCES ==================== */}
         {activeTab === "voces" && <VoicesPage />}

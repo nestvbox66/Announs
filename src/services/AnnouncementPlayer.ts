@@ -6,6 +6,11 @@ import {
   resolvePinnedSpeaker,
 } from "./speakerResolver";
 import { fileLogger } from "./FileLogger";
+import { telemetryPositionParams } from "./AnnouncementService";
+import {
+  SAFETY_VIDEO_EVENT_KEY,
+  safetyVideoPackService,
+} from "./SafetyVideoPackService";
 
 export class AnnouncementPlayer {
   private queue: AnnouncementQueue;
@@ -50,13 +55,36 @@ export class AnnouncementPlayer {
     const languageId = pinned.languageId ?? flight.captainPrimaryLang;
     const { role: speakerRole, voiceId } = pinned;
 
-    return this.queue.enqueue({
+    const params = {
       eventKey: context.eventKey,
       flightId: flight.flightId,
       languageId,
       ...(voiceId ? { voiceId } : {}),
       ...(speakerRole ? { speakerRole } : {}),
       eventData: context.eventData,
-    });
+      ...telemetryPositionParams(fc),
+    };
+
+    // Safety Video PACK: mismo desvío que el handler (sin audio-get, video en IFE).
+    if (context.eventKey === SAFETY_VIDEO_EVENT_KEY) {
+      try {
+        const packMode = fc.getSettings().eventConfig?.[SAFETY_VIDEO_EVENT_KEY] === "PACK";
+        const pkg = safetyVideoPackService.getActivePackage();
+        if (packMode && pkg?.package_url) {
+          return this.queue.enqueueSafetyVideo(params, {
+            eventKey: context.eventKey,
+            packageId: pkg.id,
+            packageName: pkg.package_name,
+            objectUrl: safetyVideoPackService.getActiveObjectUrl(),
+            remoteUrl: pkg.package_url,
+            durationSeconds: pkg.duration_seconds,
+          });
+        }
+      } catch {
+        // fallback a la vía de audio tradicional
+      }
+    }
+
+    return this.queue.enqueue(params);
   }
 }

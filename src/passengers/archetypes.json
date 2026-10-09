@@ -1,0 +1,75 @@
+{
+  "_nota": "Valores iniciales propuestos (placeholders a calibrar en vuelos de prueba). 10 arquetipos x 4 atributos x 2 multiplicadores = 80 numeros. 1.0 = comportamiento base.",
+  "archetypes": [
+    {
+      "id": "fearful_flyer",
+      "name": "Miedo a volar",
+      "deteriorationMultipliers": { "saciedad": 1.0, "confortFisiologico": 1.0, "calma": 2.0, "entretenimiento": 1.0 },
+      "recoveryMultipliers": { "saciedad": 1.0, "confortFisiologico": 1.0, "calma": 1.5, "entretenimiento": 1.0 },
+      "boardingRanges": { "calma": [20, 50] }
+    },
+    {
+      "id": "busy_executive",
+      "name": "Ejecutivo apurado",
+      "deteriorationMultipliers": { "saciedad": 1.0, "confortFisiologico": 1.1, "calma": 0.5, "entretenimiento": 1.5 },
+      "recoveryMultipliers": { "saciedad": 1.0, "confortFisiologico": 1.0, "calma": 0.5, "entretenimiento": 1.0 },
+      "boardingRanges": { "calma": [70, 100] }
+    },
+    {
+      "id": "family_with_kids",
+      "name": "Familia con chicos",
+      "deteriorationMultipliers": { "saciedad": 1.2, "confortFisiologico": 1.2, "calma": 1.2, "entretenimiento": 2.0 },
+      "recoveryMultipliers": { "saciedad": 1.1, "confortFisiologico": 1.0, "calma": 1.0, "entretenimiento": 1.2 },
+      "boardingRanges": { "entretenimiento": [70, 100] }
+    },
+    {
+      "id": "frequent_flyer",
+      "name": "Viajero frecuente",
+      "deteriorationMultipliers": { "saciedad": 0.8, "confortFisiologico": 0.8, "calma": 0.7, "entretenimiento": 0.6 },
+      "recoveryMultipliers": { "saciedad": 1.0, "confortFisiologico": 1.0, "calma": 0.8, "entretenimiento": 0.8 },
+      "boardingRanges": { "calma": [70, 100] }
+    },
+    {
+      "id": "first_time_tourist",
+      "name": "Turista primerizo",
+      "deteriorationMultipliers": { "saciedad": 1.0, "confortFisiologico": 1.0, "calma": 1.4, "entretenimiento": 0.8 },
+      "recoveryMultipliers": { "saciedad": 1.0, "confortFisiologico": 1.0, "calma": 1.2, "entretenimiento": 1.3 },
+      "boardingRanges": { "calma": [40, 70] }
+    },
+    {
+      "id": "elderly",
+      "name": "Persona mayor",
+      "deteriorationMultipliers": { "saciedad": 1.2, "confortFisiologico": 1.5, "calma": 0.9, "entretenimiento": 0.8 },
+      "recoveryMultipliers": { "saciedad": 1.0, "confortFisiologico": 0.8, "calma": 1.1, "entretenimiento": 1.0 },
+      "boardingRanges": { "confortFisiologico": [80, 95] }
+    },
+    {
+      "id": "young_backpacker",
+      "name": "Mochilero joven",
+      "deteriorationMultipliers": { "saciedad": 1.1, "confortFisiologico": 0.9, "calma": 0.8, "entretenimiento": 1.6 },
+      "recoveryMultipliers": { "saciedad": 1.1, "confortFisiologico": 1.0, "calma": 1.0, "entretenimiento": 1.3 },
+      "boardingRanges": { "saciedad": [70, 90] }
+    },
+    {
+      "id": "night_sleeper",
+      "name": "Durmiente",
+      "deteriorationMultipliers": { "saciedad": 0.9, "confortFisiologico": 1.1, "calma": 0.6, "entretenimiento": 0.5 },
+      "recoveryMultipliers": { "saciedad": 1.0, "confortFisiologico": 1.0, "calma": 1.0, "entretenimiento": 0.6 },
+      "boardingRanges": { "entretenimiento": [40, 70] }
+    },
+    {
+      "id": "parent_with_baby",
+      "name": "Viaja con bebé",
+      "deteriorationMultipliers": { "saciedad": 1.1, "confortFisiologico": 1.6, "calma": 1.3, "entretenimiento": 1.1 },
+      "recoveryMultipliers": { "saciedad": 1.0, "confortFisiologico": 0.9, "calma": 1.1, "entretenimiento": 1.0 },
+      "boardingRanges": { "confortFisiologico": [75, 95], "calma": [40, 70] }
+    },
+    {
+      "id": "connected_teen",
+      "name": "Adolescente conectado",
+      "deteriorationMultipliers": { "saciedad": 1.0, "confortFisiologico": 0.9, "calma": 0.9, "entretenimiento": 1.8 },
+      "recoveryMultipliers": { "saciedad": 1.0, "confortFisiologico": 1.0, "calma": 1.0, "entretenimiento": 1.2 },
+      "boardingRanges": { "entretenimiento": [75, 100] }
+    }
+  ]
+}
