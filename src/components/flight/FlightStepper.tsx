@@ -106,7 +106,7 @@ export default function FlightStepper({
                 {isCompleted ? "✓" : idx + 1}
               </div>
 
-              {/* Step Text Label */}
+              {/* Step Text Label (solo etiqueta principal; sin segunda línea) */}
               <div className="flex flex-col md:items-center min-w-0">
                 <span
                   className={`font-sans text-[10px] font-semibold tracking-tight transition-all duration-300 leading-snug break-words hyphens-auto ${
@@ -118,11 +118,6 @@ export default function FlightStepper({
                   }`}
                 >
                   {getLabel(phase)}
-                </span>
-
-                {/* Small sub-indicator */}
-                <span className="text-[7.5px] font-mono text-white/20 tracking-wider uppercase mt-0.5 hidden xl:block">
-                  {t(`flight.tag.${phase.toLowerCase()}`, { defaultValue: "FLIGHT" })}
                 </span>
               </div>
             </button>

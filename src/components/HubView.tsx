@@ -115,6 +115,9 @@ interface HubViewProps {
   isLoggedIn?: boolean;
   onLogin?: () => void;
   onLogout?: () => void;
+  /** Vuelo recién finalizado a abrir directamente en su detalle (una sola vez). */
+  pendingDetailFlight?: VueloReciente | null;
+  onDetailFlightConsumed?: () => void;
 }
 
 export default function HubView({ 
@@ -123,11 +126,23 @@ export default function HubView({
   onStartFlightShortcut,
   isLoggedIn = false,
   onLogin,
-  onLogout
+  onLogout,
+  pendingDetailFlight = null,
+  onDetailFlightConsumed
 }: HubViewProps) {
   const { t, i18n } = useTranslation();
   const [subView, setSubView] = useState<"overview" | "stats" | "passport" | "campaigns" | "account">("overview");
   const [selectedFlight, setSelectedFlight] = useState<VueloReciente | null>(null);
+  // Apertura directa del detalle del vuelo recién finalizado (botón
+  // "Finalizar" en AT_GATE). Se consume una sola vez para no reabrirse al
+  // volver manualmente al Hub.
+  useEffect(() => {
+    if (pendingDetailFlight) {
+      setSelectedFlight(pendingDetailFlight);
+      onDetailFlightConsumed?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingDetailFlight]);
   // Historial real desde Supabase (`public.flights` del usuario autenticado).
   const [recentFlights, setRecentFlights] = useState<FlightHistoryEntry[] | null>(null);
   const [historyTotal, setHistoryTotal] = useState(0);

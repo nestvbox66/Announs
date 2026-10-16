@@ -5,8 +5,10 @@
  *  - `of_airlines` (airline_id, name, alias, iata, icao, ...): opciones y filtro.
  *  - `of_routes` (airline, airline_id, source_airport[_id],
  *    destination_airport[_id], equipment, ...): rutas + equipos.
- *  - `of_airports` (airport_id, name, city, country, iata, icao, ...):
- *    filtros de aeropuertos y enriquecimiento de la grilla.
+ *  - `of_airports` (airport_id, name, city, country, iata, icao,
+ *    latitude, longitude, ...):
+ *    filtros de aeropuertos y enriquecimiento de la grilla (incluye
+ *    distancia ortodrómica origen→destino en km).
  *  - `of_planes` (name, iata_code, icao_code, ...): traducción del equipo
  *    de la ruta (formato IATA, ej. "738") al código ICAO que espera
  *    SimBrief (ej. "B738").
@@ -18,6 +20,7 @@
  */
 import { supabase } from "../lib/supabase";
 import { ServiceResult, ok, fail } from "./ServiceResult";
+import { haversineNm } from "./flightHistoryFormat";
 
 export interface RealRouteFilters {
   originCity: string;
@@ -47,6 +50,33 @@ export interface RealRouteResult {
   destName: string;
   destCity: string;
   equipment: string;
+  /** Distancia ortodrómica origen→destino en km enteros (null si faltan coords). */
+  distanceKm: number | null;
+}
+
+/** NM → km (1 NM = 1.852 km). */
+const NM_TO_KM = 1.852;
+
+/**
+ * Distancia geodésica en km enteros entre dos pares lat/lon.
+ * Reutiliza `haversineNm` (misma fórmula que el resto de la app).
+ * Null si alguna coordenada falta o no es finita.
+ */
+export function calcDistanceKm(
+  lat1: number | null | undefined,
+  lon1: number | null | undefined,
+  lat2: number | null | undefined,
+  lon2: number | null | undefined
+): number | null {
+  const nm = haversineNm(lat1, lon1, lat2, lon2);
+  if (nm === null || !Number.isFinite(nm)) return null;
+  return Math.round(nm * NM_TO_KM);
+}
+
+/** Coerce a número finito o null (coords de `of_airports` vienen como numeric/texto). */
+function toFiniteNumberOrNull(raw: unknown): number | null {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  return Number.isFinite(n) ? n : null;
 }
 
 /** Límite de filas de la grilla (las rutas pueden ser miles). */
@@ -371,19 +401,21 @@ export async function searchRealRoutes(
     );
     const airlineIdList = Array.from(new Set(routes.map((r) => String(r.airline_id))));
     const [airportsRes, airlinesRes] = await Promise.all([
-      supabase.from("of_airports").select("airport_id, icao, iata, name, city").in("airport_id", airportIds),
+      supabase.from("of_airports").select("airport_id, icao, iata, name, city, latitude, longitude").in("airport_id", airportIds),
       supabase.from("of_airlines").select("airline_id, name, iata, icao").in("airline_id", airlineIdList),
     ]);
     if (airportsRes.error) return fail(airportsRes.error.message);
     if (airlinesRes.error) return fail(airlinesRes.error.message);
 
     const airportById = new Map(
-      ((airportsRes.data ?? []) as Array<{ airport_id: unknown; icao: unknown; iata: unknown; name: unknown; city: unknown }>).map((a) => [
+      ((airportsRes.data ?? []) as Array<{ airport_id: unknown; icao: unknown; iata: unknown; name: unknown; city: unknown; latitude: unknown; longitude: unknown }>).map((a) => [
         String(a.airport_id),
         {
           code: String(a.icao ?? a.iata ?? "").toUpperCase() || "—",
           name: String(a.name ?? "").trim() || "—",
           city: String(a.city ?? "").trim(),
+          lat: toFiniteNumberOrNull(a.latitude),
+          lon: toFiniteNumberOrNull(a.longitude),
         },
       ])
     );
@@ -400,8 +432,8 @@ export async function searchRealRoutes(
 
     return ok(
       routes.map((r) => {
-        const origin = airportById.get(String(r.source_airport_id)) ?? { code: "—", name: "—", city: "" };
-        const dest = airportById.get(String(r.destination_airport_id)) ?? { code: "—", name: "—", city: "" };
+        const origin = airportById.get(String(r.source_airport_id)) ?? { code: "—", name: "—", city: "", lat: null, lon: null };
+        const dest = airportById.get(String(r.destination_airport_id)) ?? { code: "—", name: "—", city: "", lat: null, lon: null };
         const airline = airlineById.get(String(r.airline_id)) ?? { name: "—", icao: "", iata: "" };
         return {
           airlineName: airline.name,
@@ -414,6 +446,7 @@ export async function searchRealRoutes(
           destName: dest.name,
           destCity: dest.city,
           equipment: String(r.equipment ?? "").toUpperCase() || "—",
+          distanceKm: calcDistanceKm(origin.lat, origin.lon, dest.lat, dest.lon),
         };
       })
     );

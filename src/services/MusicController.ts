@@ -290,13 +290,24 @@ export class MusicController {
   // ── Internos ───────────────────────────────────────────────────────
 
   private resolveTrack(): BoardingMusicTrack | null {
-    if (!this.selectedTrackId) return null;
     if (this.selectedTrackId === RANDOM_MUSIC_ID) {
       if (this.tracks.length === 0) return null;
       const idx = Math.floor(Math.random() * this.tracks.length);
       return this.tracks[idx];
     }
-    return this.tracks.find((t) => t.id === this.selectedTrackId) ?? null;
+    if (this.selectedTrackId) {
+      return this.tracks.find((t) => t.id === this.selectedTrackId) ?? null;
+    }
+    // Sin selección explícita (p. ej. fuente pack sin package para la
+    // aerolínea): aleatoria del catálogo en vez de silencio, siempre que haya
+    // pistas cargadas. El on/off lo gobierna `enabled`, no la selección.
+    if (this.tracks.length === 0) return null;
+    const idx = Math.floor(Math.random() * this.tracks.length);
+    console.info(
+      "[MusicController] Sin pista elegida: aleatoria del catálogo",
+      { trackId: this.tracks[idx]?.id ?? null, count: this.tracks.length }
+    );
+    return this.tracks[idx];
   }
 
   /**

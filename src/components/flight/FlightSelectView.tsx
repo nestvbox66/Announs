@@ -133,7 +133,7 @@ export default function FlightSelectView({
   onImportSimbrief,
   onNavigateToAccount,
 }: FlightSelectViewProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [filters, setFilters] = useState<RouteFilters>(EMPTY_FILTERS);
   // Resultados: null = sin búsqueda (o tras limpiar); [] = sin coincidencias.
   const [results, setResults] = useState<RealRouteResult[] | null>(null);
@@ -150,10 +150,22 @@ export default function FlightSelectView({
   // Paginación de la grilla (5 filas por página).
   const [page, setPage] = useState(1);
   const RESULTS_PER_PAGE = 5;
-  const totalPages = results ? Math.max(1, Math.ceil(results.length / RESULTS_PER_PAGE)) : 1;
+  // Orden de la columna Distancia: null = orden de la DB; "asc"/"desc" = por km (nulos al final).
+  const [distanceSort, setDistanceSort] = useState<"asc" | "desc" | null>(null);
+  const sortedResults = useMemo(() => {
+    if (!results || !distanceSort) return results;
+    const dir = distanceSort === "asc" ? 1 : -1;
+    return [...results].sort((a, b) => {
+      if (a.distanceKm == null && b.distanceKm == null) return 0;
+      if (a.distanceKm == null) return 1;
+      if (b.distanceKm == null) return 1;
+      return (a.distanceKm - b.distanceKm) * dir;
+    });
+  }, [results, distanceSort]);
+  const totalPages = sortedResults ? Math.max(1, Math.ceil(sortedResults.length / RESULTS_PER_PAGE)) : 1;
   const safePage = Math.min(page, totalPages);
-  const pageRows = results
-    ? results.slice((safePage - 1) * RESULTS_PER_PAGE, safePage * RESULTS_PER_PAGE)
+  const pageRows = sortedResults
+    ? sortedResults.slice((safePage - 1) * RESULTS_PER_PAGE, safePage * RESULTS_PER_PAGE)
     : [];
   const [airlineOptions, setAirlineOptions] = useState<string[]>([]);
   const [equipmentOptions, setEquipmentOptions] = useState<string[]>([]);
@@ -250,6 +262,23 @@ export default function FlightSelectView({
     setResolvedIcao(null);
   };
 
+  // Alterna el orden de la columna Distancia (asc ↔ desc) y resetea
+  // paginación/selección para que el índice siga apuntando a la fila visible.
+  const handleToggleDistanceSort = () => {
+    setDistanceSort((prev) => (prev === "asc" ? "desc" : "asc"));
+    setPage(1);
+    setSelectedIdx(null);
+    setSendWarning(null);
+    setResolvedIcao(null);
+  };
+
+  // Km enteros con separador de miles según idioma ("1.139 km" / "1,139 km"); "—" sin dato.
+  const formatDistanceKm = (km: number | null | undefined): string => {
+    if (km == null || !Number.isFinite(km)) return "—";
+    const locale = i18n.language === "en" ? "en-US" : "es-ES";
+    return `${Math.round(km).toLocaleString(locale)} km`;
+  };
+
   // Exporta un vuelo de campaña al despacho de SimBrief (redirect con
   // origen, destino, aerolínea, ICAO de aeronave y n° vuelo/fecha si hay).
   const handleCampaignExport = async (flight: CampaignFlight) => {
@@ -280,7 +309,7 @@ export default function FlightSelectView({
   // Sin selección no se envía nada: se muestra el aviso de validación.
   // En desktop se abre el navegador por defecto (window.open no funciona en Tauri).
   const handleSendToSimbrief = async () => {
-    const selected = selectedIdx !== null ? results?.[selectedIdx] ?? null : null;
+    const selected = selectedIdx !== null ? sortedResults?.[selectedIdx] ?? null : null;
     if (!selected) {
       setSendWarning(t("volar.no_selection"));
       return;
@@ -308,7 +337,7 @@ export default function FlightSelectView({
       setIsSending(false);
     }
   };
-  const selectedRoute = selectedIdx !== null ? results?.[selectedIdx] ?? null : null;
+  const selectedRoute = selectedIdx !== null ? sortedResults?.[selectedIdx] ?? null : null;
   const selectedCampaignFlight = campaigns
     ?.flatMap((c) => c.flights)
     .find((f) => f.id === selectedCampaignFlightId) ?? null;
@@ -830,24 +859,38 @@ export default function FlightSelectView({
                       <th className="py-2 px-3">{t("volar.grid_origin")}</th>
                       <th className="py-2 px-3">{t("volar.grid_destination")}</th>
                       <th className="py-2 px-3">{t("volar.grid_aircraft")}</th>
+                      <th className="py-2 px-3">
+                        <button
+                          type="button"
+                          onClick={handleToggleDistanceSort}
+                          title={t("volar.grid_distance_sort")}
+                          aria-label={t("volar.grid_distance_sort")}
+                          className="inline-flex items-center gap-1 uppercase tracking-wider font-bold cursor-pointer hover:text-white transition-colors"
+                        >
+                          {t("volar.grid_distance")}
+                          <span aria-hidden="true" className="text-[9px]">
+                            {distanceSort === "asc" ? "▲" : distanceSort === "desc" ? "▼" : "⇅"}
+                          </span>
+                        </button>
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
-                    {results === null ? (
+                    {sortedResults === null ? (
                       <tr>
-                        <td colSpan={4} className="py-4 px-3 text-center text-[11px] font-mono text-white/40 italic">
+                        <td colSpan={5} className="py-4 px-3 text-center text-[11px] font-mono text-white/40 italic">
                           {t("volar.grid_initial")}
                         </td>
                       </tr>
                     ) : isSearching ? (
                       <tr>
-                        <td colSpan={4} className="py-4 px-3 text-center">
+                        <td colSpan={5} className="py-4 px-3 text-center">
                           <Loader2 className="w-5 h-5 text-[#45AFFF] animate-spin inline" />
                         </td>
                       </tr>
-                    ) : results.length === 0 ? (
+                    ) : sortedResults.length === 0 ? (
                       <tr>
-                        <td colSpan={4} className="py-4 px-3 text-center text-[11px] font-mono text-white/40 italic">
+                        <td colSpan={5} className="py-4 px-3 text-center text-[11px] font-mono text-white/40 italic">
                           {t("volar.grid_empty")}
                         </td>
                       </tr>
@@ -876,6 +919,7 @@ export default function FlightSelectView({
                             {r.destCode} <span className="text-white/40">· {r.destName}{r.destCity ? ` (${r.destCity})` : ""}</span>
                           </td>
                           <td className="py-2 px-3 font-mono font-bold text-[#43E600]">{r.equipment}</td>
+                          <td className="py-2 px-3 font-mono text-white/75 whitespace-nowrap">{formatDistanceKm(r.distanceKm)}</td>
                         </tr>
                         );
                       })
@@ -922,6 +966,7 @@ export default function FlightSelectView({
                       <span> ({selectedRoute.airlineIcao || selectedRoute.airlineIata})</span>
                     )}
                     {" · "}{selectedRoute.equipment}
+                    {" · "}{formatDistanceKm(selectedRoute.distanceKm)}
                     {isResolvingIcao ? (
                       <span className="text-white/40"> → …</span>
                     ) : (

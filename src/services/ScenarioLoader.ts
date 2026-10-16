@@ -300,6 +300,13 @@ export class ScenarioLoader {
         decision_maker: adaptedStep.decision_maker,
         detection_strategy: adaptedStep.detection_strategy,
         producers: adaptedStep.producers,
+        // Transición + delay + precondiciones: sin estos, una espera
+        // (AFTER_DELAY largo o WAIT_CONDITION) es indistinguible de un
+        // cuelgue en los logs. Siempre visibles (no detrás de flags).
+        transition: NarrativeTransition[adaptedStep.transition],
+        delayMs: adaptedStep.delayMs ?? 0,
+        hasPreconditions: preconditions !== undefined && preconditions !== null,
+        hasSchedulerRule: schedulerRule !== null,
       });
 
       if (adaptedStep.eventKey === "transition_to_taxi") {

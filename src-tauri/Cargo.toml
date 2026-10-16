@@ -21,9 +21,11 @@ tauri-build = { version = "2.6.2", features = [] }
 # La feature `simconnect` compila el puente real a MSFS. Requiere:
 #   1. MSFS SDK instalado (SimConnect.h / SimConnect.lib)
 #   2. LLVM/libclang (bindgen) — setear LIBCLANG_PATH al directorio de libclang.dll
-# Por defecto se usa el stub sintético para que el proyecto compile sin esos requisitos.
-default = []
+# La feature `xplane-udp` compila el puente UDP a X-Plane 12 (RREF, std only,
+# sin SDK ni libclang): va en default para que funcione sin flags extra.
+default = ["xplane-udp"]
 simconnect = ["dep:simconnect-sdk"]
+xplane-udp = []
 
 [dependencies]
 serde_json = "1.0"

@@ -509,6 +509,54 @@ export default function DebugMonitor({
     }
   }, [flightController, tick]);
 
+  // ── Paridad onAnyRunway X-Plane (geometría / fallback / ausente) ──────
+  // Fuente del valor que alimenta la regla ON_ANY_RUNWAY (transition_to_
+  // takeoff / transition_to_taxi_in). Solo X-Plane expone estos getters
+  // (duck-typing); otros proveedores muestran "—".
+  interface RunwayParityInfo {
+    source: string;
+    value: boolean | null;
+    matchedDesignator: string | null;
+    planMismatch: boolean;
+    airportIcao: string | null;
+  }
+  interface RunwayParityStatus {
+    source: string;
+    parkingSource: string;
+    departIcao: string | null;
+    arriveIcao: string | null;
+    planRwy: string | null;
+    departCount: number;
+    arriveCount: number;
+    departRamps: number;
+    arriveRamps: number;
+    departSource: string | null;
+    arriveSource: string | null;
+  }
+  interface RunwayParkingInfo {
+    source: string;
+    value: boolean | null;
+    standName: string | null;
+    airportIcao: string | null;
+  }
+  const runwayParity = useMemo(() => {
+    void tick;
+    try {
+      const ctrl = flightController as unknown as {
+        getRunwayInfo?: () => RunwayParityInfo | null;
+        getRunwayStatus?: () => RunwayParityStatus | null;
+        getParkingInfo?: () => RunwayParkingInfo | null;
+      } | null;
+      const info = ctrl?.getRunwayInfo?.() ?? null;
+      const status = ctrl?.getRunwayStatus?.() ?? null;
+      const parking = ctrl?.getParkingInfo?.() ?? null;
+      if (!info && !status && !parking) return null;
+      return { info, status, parking };
+    } catch {
+      return null;
+    }
+  }, [flightController, tick]);
+
   // ── XP disciplina (XpBonusTracker: luces por fase, velocidad, perfil) ────
   const xpBonus = useMemo(() => {
     void tick;
@@ -1473,6 +1521,41 @@ export default function DebugMonitor({
               <div className="mt-2 pt-2 border-t border-white/5">
                 <div className="text-[10px] font-mono text-white/40 mb-1 px-2">Controller.getTelemetry() (directo)</div>
                 <KeyValueGrid data={controllerTelemetry} units={TELEMETRY_UNITS} />
+              </div>
+            )}
+            {runwayParity && (
+              <div className="mt-2 pt-2 border-t border-white/5">
+                <div className="text-[10px] font-mono text-white/40 mb-1 px-2">
+                  onAnyRunway por paridad (X-Plane) — fuente: {runwayParity.info?.source ?? runwayParity.status?.source ?? "—"}
+                </div>
+                <KeyValueGrid
+                  data={
+                    {
+                      onAnyRunway: runwayParity.info?.value ?? (telemetry as Record<string, unknown>)?.onAnyRunway ?? "—",
+                      fuente: runwayParity.info?.source ?? runwayParity.status?.source ?? "—",
+                      pista: runwayParity.info?.matchedDesignator ?? "—",
+                      aeropuerto: runwayParity.info?.airportIcao ?? "—",
+                      planificada: runwayParity.status?.planRwy ?? "—",
+                      mismatchPlan: runwayParity.info?.planMismatch === true ? "SÍ (dispara igual)" : "no",
+                      atcParking: runwayParity.parking?.value ?? (telemetry as Record<string, unknown>)?.atcOnParkingSpot ?? "—",
+                      parkingFuente: runwayParity.parking?.source ?? runwayParity.status?.parkingSource ?? "—",
+                      stand: runwayParity.parking?.standName ?? runwayParity.parking?.airportIcao ?? "—",
+                      salida: runwayParity.status
+                        ? `${runwayParity.status.departIcao ?? "—"} (${runwayParity.status.departCount} pistas)`
+                        : "—",
+                      destino: runwayParity.status
+                        ? `${runwayParity.status.arriveIcao ?? "—"} (${runwayParity.status.arriveCount} pistas)`
+                        : "—",
+                    } as Record<string, unknown>
+                  }
+                />
+                {(runwayParity.status?.departSource || runwayParity.status?.arriveSource) && (
+                  <div className="text-[10px] font-mono text-white/30 mt-1 px-2 break-all">
+                    {[runwayParity.status?.departSource, runwayParity.status?.arriveSource]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </div>
+                )}
               </div>
             )}
           </Section>

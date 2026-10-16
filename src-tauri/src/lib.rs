@@ -1,4 +1,7 @@
 mod simconnect;
+mod telemetry;
+mod xplane;
+mod runways;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -27,7 +30,13 @@ pub fn run() {
       simconnect::simconnect_disconnect,
       simconnect::simconnect_subscribe,
       simconnect::simconnect_poll,
-      simconnect::simconnect_emit_telemetry
+      simconnect::simconnect_emit_telemetry,
+      xplane::xplane_connect,
+      xplane::xplane_disconnect,
+      xplane::xplane_subscribe,
+      xplane::xplane_poll,
+      xplane::xplane_emit_telemetry,
+      runways::get_runways
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

@@ -45,6 +45,18 @@ export default function App() {
     }
   }, [currentView]);
   
+  // Keep-alive de la vista de vuelo: una vez visitada se mantiene montada y
+  // solo se oculta (display:none) al navegar a otra vista. Sin esto, ir a
+  // Config desmontaba VueloActualView y destruía todos los motores (pasajeros,
+  // scheduler, telemetría...); al volver se remontaba virgen sin rehidratar
+  // y todo quedaba en nulos ("sin muestra activa").
+  const [vueloAlive, setVueloAlive] = useState(false);
+  useEffect(() => {
+    if (currentView === "vuelo") {
+      setVueloAlive(true);
+    }
+  }, [currentView]);
+  
   // Storage states
   const [vuelos, setVuelos] = useState<VueloReciente[]>(initialVuelos);
   const [logros, setLogros] = useState<Logro[]>(initialLogros);
@@ -59,11 +71,16 @@ export default function App() {
   const [selectedPasajero, setSelectedPasajero] = useState<Pasajero | null>(null);
   const [landingFpm, setLandingFpm] = useState<number>(-125); // fpm rate
   const [isConnected, setIsConnected] = useState<boolean>(true);
+  // Vuelo recién finalizado pendiente de mostrar en su pantalla de detalle
+  // (Hub). Se consume una sola vez al abrir el detalle.
+  const [pendingDetailFlight, setPendingDetailFlight] = useState<VueloReciente | null>(null);
 
   // Force Hub view if pilot logs out or session is disconnected
   useEffect(() => {
     if (!isLoggedIn) {
       setCurrentView("hub");
+      // Sin sesión no hay vuelo vivo: soltar el keep-alive también.
+      setVueloAlive(false);
     }
   }, [isLoggedIn]);
 
@@ -198,13 +215,23 @@ export default function App() {
     setLogros(prev => prev.map(l => l.id === "l-4" ? { ...l, unlocked: true, fechaDesbloqueo: "05 Jun 2026" } : l));
   };
 
-  // Reset core simulation loop
-  const handleResetSimulation = () => {
+  // Reset core simulation loop. Si se recibe el vuelo recién finalizado
+  // (con `flightId`), se navega a su pantalla de detalle en el Hub; si no,
+  // se vuelve al inicio de "volar" como antes.
+  const handleResetSimulation = (finishedFlight?: VueloReciente | null) => {
     setPassengers(initialPassengers);
     setLandingFpm(-125);
     setCurrentState(FlightState.NoIniciado);
     setLastAnnouncement(null);
-    setCurrentView("vuelo");
+    // Soltar el keep-alive: la próxima visita a "vuelo" remonta en fresco
+    // (motores/buffers reseteados), como antes del keep-alive.
+    setVueloAlive(false);
+    if (finishedFlight?.flightId) {
+      setPendingDetailFlight(finishedFlight);
+      setCurrentView("hub");
+    } else {
+      setCurrentView("vuelo");
+    }
   };
 
   return (
@@ -238,10 +265,16 @@ export default function App() {
             isLoggedIn={isLoggedIn}
             onLogin={() => setIsLoggedIn(true)}
             onLogout={() => setIsLoggedIn(false)}
+            pendingDetailFlight={pendingDetailFlight}
+            onDetailFlightConsumed={() => setPendingDetailFlight(null)}
           />
         )}
 
-        {currentView === "vuelo" && (
+        {vueloAlive && (
+          <div
+            id="vuelo-keepalive"
+            style={{ display: currentView === "vuelo" ? undefined : "none" }}
+          >
           <VueloActualView 
             currentState={currentState}
             onStateChange={(state) => {
@@ -292,6 +325,7 @@ export default function App() {
             onTriggerBriefImport={handleTriggerBriefImport}
             onNavigateToAccount={() => setCurrentView("hub")}
           />
+          </div>
         )}
 
         {currentView === "config" && (

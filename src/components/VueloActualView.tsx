@@ -45,16 +45,24 @@ import {
   Activity,
   Trophy
 } from "lucide-react";
-import { FlightState, Pasajero, SimBriefData, ConfigVoces, ConfigAudio, UltimoAnuncio, AnnouncementInfo } from "../types";
+import { FlightState, Pasajero, SimBriefData, ConfigVoces, ConfigAudio, UltimoAnuncio, AnnouncementInfo, VueloReciente } from "../types";
 import { FlightPhase } from "../engine/FlightEngine";
 import { AnnouncementQueue } from "../services/AnnouncementQueue";
 import { FlightContext, FlightInfo } from "../services/FlightContext";
 import { SimulationController } from "../services/SimulationController";
 import { Scheduler } from "../services/Scheduler";
-import { MockFlightController } from "../services/MockFlightController";
-import { MsfsFlightController } from "../services/MsfsFlightController";
+import {
+  createFlightController,
+  getEffectiveSimProvider,
+  isRealSimProvider,
+  setEffectiveSimProvider,
+  type SimProvider,
+} from "../services/FlightControllerFactory";
 import { FlightPhaseDetector } from "../services/FlightPhaseDetector";
 import type { FlightController } from "../services/FlightController";
+import {
+  RunwayProximityService,
+} from "../services/RunwayProximityService";
 import { config } from "../config";
 import { ScenarioResolver } from "../services/ScenarioResolver";
 import { ScenarioLoader } from "../services/ScenarioLoader";
@@ -71,6 +79,7 @@ import { UserEventDefaultsService } from "../services/UserEventDefaultsService";
 import { FlightEventConfigService } from "../services/FlightEventConfigService";
 import { ScenarioConfigService } from "../services/ScenarioConfigService";
 import { FlightPathRecorder } from "../services/FlightPathRecorder";
+import type { FlightPathPoint } from "../services/FlightPathRecorder";
 import { XpBonusTracker } from "../services/XpBonusTracker";
 import { PassengerEngine } from "../passengers/PassengerEngine";
 import {
@@ -154,6 +163,7 @@ import DebugMonitor from "./flight/DebugMonitor";
 import DebugMonitorButton from "./flight/DebugMonitorButton";
 import { connectionStatusService } from "../services/ConnectionStatusService";
 import { isTauri } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import FlightStartPopup from "./flight/FlightStartPopup";
 import FlightSelectView from "./flight/FlightSelectView";
 import type { FlightStartPreferences } from "../services/FlightContext";
@@ -201,7 +211,9 @@ interface VueloActualViewProps {
   onSimulateAction: (action: string) => void;
   landingFpm: number;
   onLandingFpmChange: (fpm: number) => void;
-  onResetSimulation: () => void;
+  /** Vuelo recién finalizado (con `flightId`) para navegar a su detalle.
+      Sin `flightId` (vuelo sin despacho) se navega al inicio de "volar". */
+  onResetSimulation: (finishedFlight?: VueloReciente | null) => void;
   onTriggerBriefImport: (realData?: any) => void;
   onNavigateToAccount?: () => void;
 }
@@ -397,6 +409,10 @@ export default function VueloActualView({
   // y modo pruebas (permite iniciar sin conexión real).
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [isTestMode, setIsTestMode] = useState<boolean>(false);
+  // Proveedor de telemetría efectivo (selección manual obligatoria v1:
+  // MSFS / X-Plane 12 / Mock). Persistido en localStorage; solo conmutable
+  // sin vuelo activo (el selector vive en pre-vuelo).
+  const [simProvider, setSimProvider] = useState<SimProvider>(() => getEffectiveSimProvider());
   const [showFlightStartPopup, setShowFlightStartPopup] = useState<boolean>(false);
   const [pendingFlightMode, setPendingFlightMode] = useState<"normal" | "test">("normal");
   const [activeGroupTab, setActiveGroupTab] = useState<string>("immersion");
@@ -679,20 +695,18 @@ export default function VueloActualView({
     simControllerRef.current = new SimulationController(flightFSMRef.current);
   }
 
-  // Fase 3+4: FlightController — MsfsFlightController (MSFS) con fallback
-  // a MockFlightController. El Mock ahora simula vuelo completo GATE→AT_GATE
-  // con timeline determinístico. Detector independiente para transiciones.
+  // Fase 3+4 (+ X-Plane Fase 2): FlightController según el proveedor efectivo
+  // (selección manual persistida o VITE_SIM_PROVIDER). El Mock simula el vuelo
+  // completo GATE→AT_GATE con timeline determinístico. Detector independiente
+  // para transiciones.
   // autoStart: false → no conectar automáticamente al montar, solo en handleStartFlight
   const flightControllerRef = useRef<FlightController | null>(null);
   if (!flightControllerRef.current) {
-    flightControllerRef.current =
-      config.sim.provider === "msfs"
-        ? new MsfsFlightController()
-        : new MockFlightController({
-            speedMultiplier: config.mock.speedMultiplier,
-            autoTransition: config.mock.autoTransition,
-            autoStart: false,
-          });
+    flightControllerRef.current = createFlightController(getEffectiveSimProvider(), {
+      speedMultiplier: config.mock.speedMultiplier,
+      autoTransition: config.mock.autoTransition,
+      autoStart: false,
+    });
   }
 
   // Mantener alias para compatibilidad con código que esperaba mockControllerRef
@@ -705,6 +719,10 @@ export default function VueloActualView({
   // recién tras un guardado exitoso en `flight_paths`.
   const flightPathRecorderRef = useRef<FlightPathRecorder | null>(null);
   if (!flightPathRecorderRef.current) flightPathRecorderRef.current = new FlightPathRecorder();
+  // Archivo acumulativo para el mapa IFE: segmentos ya volcados a Supabase
+  // (safety-recovery) que el buffer vivo ya no contiene. El mapa dibuja
+  // archivo + vivo para mostrar la trayectoria completa desde el inicio.
+  const displayPathRef = useRef<FlightPathPoint[]>([]);
   // Tracker de bonos XP de disciplina (se alimenta muestra a muestra junto al recorder)
   const xpBonusTrackerRef = useRef<XpBonusTracker | null>(null);
   if (!xpBonusTrackerRef.current) xpBonusTrackerRef.current = new XpBonusTracker();
@@ -717,6 +735,15 @@ export default function VueloActualView({
   // Detector de turbulencia (edge-triggered): alimenta applyNegativeEvent.
   const turbulenceRef = useRef<TurbulenceDetector | null>(null);
   if (!turbulenceRef.current) turbulenceRef.current = new TurbulenceDetector();
+  // Paridad onAnyRunway (X-Plane): geometría de pistas salida+destino vía
+  // comando Tauri `get_runways` + caché. El invoke va inyectado para poder
+  // testear el servicio sin Tauri.
+  const runwayProximityRef = useRef<RunwayProximityService | null>(null);
+  if (!runwayProximityRef.current) {
+    runwayProximityRef.current = new RunwayProximityService(
+      async (cmd, args) => tauriInvoke(cmd, args as Record<string, unknown>)
+    );
+  }
   // Etiqueta transitoria del panel de cabina (daño o mitigación): se muestra
   // ~3.4s y se desvanece sola, sin interacción.
   const [paxFlash, setPaxFlash] = useState<{
@@ -780,6 +807,26 @@ export default function VueloActualView({
     const ctx = flightContextRef.current!;
     const scheduler = schedulerRef.current!;
     const fsm = flightFSMRef.current!;
+    // Vía paridad onAnyRunway (X-Plane): el controlador la calcula por muestra
+    // con el servicio (geometría/fallback) solo si el backend la trae ausente.
+    // MSFS/Mock no exponen el setter y quedan intactos (duck-typing).
+    try {
+      const maybeXplane = controller as unknown as {
+        setOnAnyRunwayProvider?: (p: ((snap: any) => unknown) | null) => void;
+        setRunwayStatusProvider?: (p: (() => unknown) | null) => void;
+        setParkingProvider?: (p: ((snap: any) => unknown) | null) => void;
+      };
+      const svc = runwayProximityRef.current;
+      if (typeof maybeXplane.setOnAnyRunwayProvider === "function" && svc) {
+        maybeXplane.setOnAnyRunwayProvider((snap: any) => svc.evaluateSnap(snap));
+      }
+      if (typeof maybeXplane.setRunwayStatusProvider === "function" && svc) {
+        maybeXplane.setRunwayStatusProvider(() => svc.getStatus());
+      }
+      if (typeof maybeXplane.setParkingProvider === "function" && svc) {
+        maybeXplane.setParkingProvider((snap: any) => svc.evaluateParking(snap));
+      }
+    } catch {}
     controller.onTelemetry = (snap) => {
       ctx.updateTelemetry(snap);
       scheduler.notifyTelemetry(snap);
@@ -892,6 +939,51 @@ export default function VueloActualView({
     };
   }, []);
 
+  // Cambio manual del proveedor de telemetría (selector pre-vuelo, v1).
+  // Solo conmutable sin vuelo activo ni conexión establecida: desconecta el
+  // controlador anterior (si no está conectado), persiste la selección, crea
+  // el nuevo vía factory, lo enlaza y lo publica en ConnectionStatusService
+  // (que ya reconoce msfs/xplane/mock por `constructor.name`). Con un
+  // proveedor real se intenta conectar de inmediato (como al montar); si el
+  // simulador no está corriendo se conserva la selección en desconectado y la
+  // conexión se reintenta al "Iniciar Vuelo" — sin fallback silencioso a Mock.
+  const handleSimProviderChange = useCallback((provider: SimProvider) => {
+    const current = flightControllerRef.current;
+    if (current?.isConnected()) {
+      console.warn("[VueloActualView] Cambio de simulador ignorado: hay conexión activa");
+      fileLogger.warn("[VueloActualView] Cambio de simulador ignorado (conectado)", { provider });
+      return;
+    }
+    try { current?.disconnect(); } catch {}
+    setEffectiveSimProvider(provider);
+    setSimProvider(provider);
+    const next = createFlightController(provider, {
+      speedMultiplier: config.mock.speedMultiplier,
+      autoTransition: config.mock.autoTransition,
+      autoStart: false,
+    });
+    flightControllerRef.current = next;
+    bindFlightController(next);
+    connectionStatusService.setActiveController(next);
+    connectionStatusService.refresh();
+    console.log("[VueloActualView] Proveedor de telemetría:", provider);
+    fileLogger.log("[VueloActualView] Proveedor de telemetría cambiado", { provider });
+    if (isRealSimProvider(provider)) {
+      void next.connect().then(() => {
+        connectionStatusService.setActiveController(next);
+        connectionStatusService.refresh();
+        fileLogger.log("[VueloActualView] ✅ Conexión con proveedor manual", { provider });
+      }).catch((err) => {
+        // Simulador apagado: se mantiene la selección en desconectado.
+        fileLogger.log("[VueloActualView] ⚠️ Proveedor manual sin conexión (se reintenta al iniciar)", {
+          provider,
+          error: String(err),
+        });
+        connectionStatusService.refresh();
+      });
+    }
+  }, [bindFlightController]);
+
   // Sincronizar controlador activo con ConnectionStatusService
   useEffect(() => {
     const ctrl = flightControllerRef.current;
@@ -935,12 +1027,12 @@ export default function VueloActualView({
   useEffect(() => {
     console.log('[VueloActualView] 🔍 Creando FlightController');
     console.log('[VueloActualView] 📡 Configuración:', {
-      provider: config.sim.provider,
+      provider: getEffectiveSimProvider(),
       autoConnect: config.sim.autoConnect
     });
     fileLogger.log('[VueloActualView] 🔍 Creando FlightController');
     fileLogger.log('[VueloActualView] 📡 Configuración', {
-      provider: config.sim.provider,
+      provider: getEffectiveSimProvider(),
       autoConnect: config.sim.autoConnect,
       isTauri: isTauri()
     });
@@ -976,9 +1068,9 @@ export default function VueloActualView({
   }, []);
 
   // Detección temprana de conexión al entrar a "Vuelo Actual": intenta conectar
-  // el controlador real (MSFS); si falla (p. ej. simulador cerrado), hace
-  // fallback a Mock. Para provider `mock` no se conecta al montar (autoStart:false
-  // conserva el flujo existente de "Iniciar Vuelo").
+  // el controlador real (MSFS / X-Plane 12); si falla (p. ej. simulador
+  // cerrado), hace fallback a Mock. Para provider `mock` no se conecta al
+  // montar (autoStart:false conserva el flujo existente de "Iniciar Vuelo").
   //
   // Compatible con React StrictMode (doble montaje en dev): el cleanup del primer
   // montaje NO desconecta una conexión ya establecida, y el segundo montaje
@@ -996,7 +1088,7 @@ export default function VueloActualView({
         connected: controller.isConnected(),
       });
 
-      if (config.sim.provider !== "msfs") return;
+      if (!isRealSimProvider(getEffectiveSimProvider())) return;
 
       // Ya conectado (p. ej. segundo montaje de StrictMode): no reconectar.
       if (controller.isConnected()) {
@@ -1020,11 +1112,12 @@ export default function VueloActualView({
         // Detener watchdog del controlador real huérfano antes de sustituirlo por Mock
         try { controller.disconnect(); } catch {}
         // Fallback a Mock
-        const mock = new MockFlightController({
+        const mock = createFlightController("mock", {
           speedMultiplier: config.mock.speedMultiplier,
           autoTransition: config.mock.autoTransition,
           autoStart: false,
         });
+        setSimProvider("mock");
         flightControllerRef.current = mock;
         bindFlightController(mock);
         connectionStatusService.setActiveController(mock);
@@ -1405,6 +1498,27 @@ export default function VueloActualView({
           console.warn(`${tag} resumen de pasajeros no disponible:`, err);
           setPaxFinal(null);
         }
+        // Archivar el segmento para el mapa IFE antes de liberar el buffer: el
+        // mapa dibuja archivo + vivo para la trayectoria completa. En cierre
+        // final ('ended') el archivo se descarta (vista reseteada abajo).
+        if (status !== "ended") {
+          try {
+            const seg = recorder.toSnapshot().points;
+            if (seg.length > 0) {
+              const arch = displayPathRef.current;
+              const lastArch = arch[arch.length - 1];
+              const firstSeg = seg[0];
+              const sameJunction =
+                lastArch !== undefined &&
+                firstSeg !== undefined &&
+                lastArch[0] === firstSeg[0] &&
+                lastArch[1] === firstSeg[1];
+              displayPathRef.current = sameJunction ? [...arch, ...seg.slice(1)] : [...arch, ...seg];
+            }
+          } catch {}
+        } else {
+          displayPathRef.current = [];
+        }
         recorder.reset();
         xpBonusTrackerRef.current?.reset();
         passengerEngineRef.current?.reset();
@@ -1542,14 +1656,38 @@ export default function VueloActualView({
   // Botón "Finalizar Vuelo": persiste el recorrido y recién después resetea la
   // UI. El `await` garantiza que onResetSimulation (que puede desmontar /
   // limpiar estado) NUNCA corre antes de que Supabase responda.
+  // Tras el cierre se navega al detalle del vuelo recién finalizado (vía
+  // `finishedFlight` con `flightId`); sin `flightId` se vuelve al inicio.
   const handleFinalizarVuelo = async (): Promise<void> => {
     console.log("[FLUSH_DEBUG:finalizar-vuelo] botón Finalizar pulsado; esperando flush antes del reset");
     fileLogger.log("[FLUSH_DEBUG:finalizar-vuelo] botón pulsado");
+    const finishedIdBefore = flightIdRef.current ?? flightId ?? null;
     try {
       await flushFlightPath("finalizar-vuelo");
     } finally {
       console.log("[FLUSH_DEBUG:finalizar-vuelo] flush terminado (ok o fallo); reseteando UI");
-      onResetSimulation();
+      const finishedId = flightIdRef.current ?? finishedIdBefore ?? null;
+      let finishedFlight: VueloReciente | null = null;
+      if (finishedId && typeof finishedId === "string" && finishedId.trim() !== "") {
+        const id = finishedId.trim();
+        finishedFlight = {
+          id,
+          flightId: id,
+          codigo: (flightCode || simBriefData.vueloCodigo || id.slice(0, 8)).toString(),
+          origen: (originICAO || simBriefData.origen || "").toString(),
+          origenCiudad: (originCityName || getAirportName(originICAO) || originICAO || "").toString(),
+          destino: (destICAO || simBriefData.destino || "").toString(),
+          destinoCiudad: (destCityName || getAirportName(destICAO) || destICAO || "").toString(),
+          fecha: "Hoy",
+          fpmLanding: landingFpm,
+          satisfaccionMedia: paxFinal !== null ? Math.round(paxFinal.overallScore) : 0,
+          puntuacion: xpCompletion?.totalFlightXp ?? 0,
+          duracion: (simBriefData as { blockTime?: string })?.blockTime ?? "",
+          aerolinea: (getAirlineName(airline) || airline || "").toString(),
+          isPlaceholderStats: true,
+        };
+      }
+      onResetSimulation(finishedFlight);
     }
   };
 
@@ -1584,11 +1722,22 @@ export default function VueloActualView({
     if (!advanced && !airborne) {
       console.log(`${tag} fase temprana en tierra: se descarta sin guardar`);
       fileLogger.log(`${tag} descarte en fase temprana`, { phase });
+      const resumePhase = phase;
+      const resumeScenario = recorder.getScenarioKey();
       recorder.reset();
       xpBonusTrackerRef.current?.reset();
       passengerEngineRef.current?.reset();
       turbulenceRef.current?.reset();
       passengerLastTickMsRef.current = null;
+      // Reanudar grabación vacía para no dejar el resto del vuelo sin track
+      // (antes quedaba detenido: el mapa IFE y el recorrido morían acá).
+      recorder.start({ phase: resumePhase, scenarioKey: resumeScenario });
+      xpBonusTrackerRef.current?.start();
+      xpBonusTrackerRef.current?.setAirMinutesProvider(
+        () => flightPathRecorderRef.current?.getAirMinutes() ?? null
+      );
+      passengerEngineRef.current?.startFlight();
+      fileLogger.log(`${tag} grabación reanudada tras descarte temprano`, { phase: resumePhase });
       return;
     }
     // Congelar el segmento, volcar como 'saved' y reanudar por si vuelve la señal.
@@ -1625,6 +1774,21 @@ export default function VueloActualView({
         console.log("[FLUSH_DEBUG:safety-recovery] transición connected → disconnected detectada");
         fileLogger.log("[FLUSH_DEBUG:safety-recovery] desconexión detectada", { status });
         void handleSimDisconnect();
+      }
+      // Reconexión con vuelo activo: si el recorder quedó detenido (p. ej.
+      // rutas que no lo reanudaron), reanudarlo para no perder el track ni
+      // dejar el mapa IFE congelado. Con vuelo cerrado (NoIniciado) no tocar.
+      if (!was && status.connected) {
+        try {
+          const rec = flightPathRecorderRef.current;
+          if (
+            rec && !rec.isRecording() &&
+            currentStateRef.current !== FlightState.NoIniciado
+          ) {
+            rec.start({ phase: schedulerRef.current?.getCurrentPhase() ?? null });
+            fileLogger.log("[FLUSH_DEBUG:safety-recovery] grabación reanudada al reconectar", {});
+          }
+        } catch {}
       }
     });
     return unsub;
@@ -3036,6 +3200,20 @@ export default function VueloActualView({
           departureTime: departureTimeStr,
         },
       });
+      // Vía paridad onAnyRunway (X-Plane): configurar salida+destino y pista
+      // planificada (`origin.plan_rwy` del OFP, si existe) y precargar la
+      // geometría antes de conectar. Para otros proveedores es no-op.
+      try {
+        const planRwy =
+          (simbriefRawData as any)?.origin?.plan_rwy ??
+          (simbriefRawData as any)?.origin?.planRwy ??
+          null;
+        runwayProximityRef.current?.configureFlight({
+          departIcao: originICAO,
+          arriveIcao: destICAO,
+          planRwy: typeof planRwy === "string" ? planRwy : null,
+        });
+      } catch {}
       // Iniciar el FlightController (autoStart: false → solo al hacer clic en "Iniciar Vuelo")
       if (flightControllerRef.current && !flightControllerRef.current.isConnected()) {
         try {
@@ -3044,13 +3222,14 @@ export default function VueloActualView({
           connectionStatusService.setActiveController(flightControllerRef.current);
         } catch (e) {
           console.warn("[handleStartFlight] FlightController connect falló:", e);
-          if (config.sim.provider === "msfs") {
+          if (isRealSimProvider(getEffectiveSimProvider())) {
             try { flightControllerRef.current.disconnect(); } catch {}
-            const mock = new MockFlightController({
+            const mock = createFlightController("mock", {
               speedMultiplier: config.mock.speedMultiplier,
               autoTransition: config.mock.autoTransition,
               autoStart: false,
             });
+            setSimProvider("mock");
             flightControllerRef.current = mock;
             bindFlightController(mock);
             await mock.connect();
@@ -3069,6 +3248,7 @@ export default function VueloActualView({
 
       await schedulerRef.current?.startFlight(mode);
       // Arrancar el registro del recorrido para este vuelo (limpia buffer previo).
+      displayPathRef.current = [];
       flightPathRecorderRef.current?.start({
         phase: schedulerRef.current?.getCurrentPhase() ?? null,
         scenarioKey: selectedScenarioKey,
@@ -3758,18 +3938,12 @@ export default function VueloActualView({
     }
   }, [currentState]);
 
-  // Phase 7 specific effects (AI report generation and manifest collapse)
+  // Manifiesto: sin comportamiento especial por fase (AT_GATE mantiene el
+  // mismo layout que la fase anterior; el detalle post-vuelo está en la
+  // pantalla de detalle del vuelo).
   React.useEffect(() => {
-    if (currentSubStage === "Plataforma") {
-      setIsReportGenerating(true);
-      setIsManifestCollapsed(true);
-      const timer = setTimeout(() => {
-        setIsReportGenerating(false);
-      }, 3000); // 3 seconds AI Report generation simulation spinner
-      return () => clearTimeout(timer);
-    } else {
-      setIsManifestCollapsed(false);
-    }
+    setIsManifestCollapsed(false);
+    setIsReportGenerating(false);
   }, [currentSubStage]);
 
   // TODO Migration (Stage 18D):
@@ -3837,9 +4011,22 @@ export default function VueloActualView({
     };
   }, []);
   const ifeGetFlownPath = React.useCallback(() => {
-    const pts = flightPathRecorderRef.current?.toSnapshot().points ?? [];
-    // FlightPathPoint = [lon, lat, alt, spd, sec] → [lat, lon].
-    return pts.map((p) => [p[1], p[0]] as [number, number]);
+    const live = flightPathRecorderRef.current?.toSnapshot().points ?? [];
+    const archived = displayPathRef.current;
+    if (archived.length === 0) {
+      // FlightPathPoint = [lon, lat, alt, spd, sec] → [lat, lon].
+      return live.map((p) => [p[1], p[0]] as [number, number]);
+    }
+    // Evitar punto duplicado en la unión archivo→vivo.
+    const firstLive = live[0];
+    const lastArchived = archived[archived.length - 1];
+    const sameJunction =
+      firstLive !== undefined &&
+      lastArchived !== undefined &&
+      firstLive[0] === lastArchived[0] &&
+      firstLive[1] === lastArchived[1];
+    const merged = sameJunction ? [...archived, ...live.slice(1)] : [...archived, ...live];
+    return merged.map((p) => [p[1], p[0]] as [number, number]);
   }, []);
 
   // Compute ETA block minutes from raw SimBrief data
@@ -5028,6 +5215,40 @@ export default function VueloActualView({
                   </div>
                 </div>
               )}
+
+              {/* BLOQUE 0: Simulador (selección manual del proveedor de telemetría) */}
+              <div className="bg-[#00172e]/85 border border-[#3B7EB2]/45 rounded-[8px] px-4 py-3 shadow-lg flex flex-wrap items-center gap-x-4 gap-y-2">
+                <div className="flex items-center gap-2 shrink-0">
+                  <Wifi className="w-4 h-4 text-[#45AFFF]" />
+                  <span className="font-display font-bold text-sm text-[#45AFFF]">
+                    {t("flight.settings.sim_title")}
+                  </span>
+                </div>
+                <div className="flex gap-1.5" role="group" aria-label={t("flight.settings.sim_title")}>
+                  {([
+                    { key: "msfs" as SimProvider, label: t("flight.settings.sim_msfs") },
+                    { key: "xplane" as SimProvider, label: t("flight.settings.sim_xplane") },
+                    { key: "mock" as SimProvider, label: t("flight.settings.sim_mock") },
+                  ]).map((opt) => {
+                    const isSelected = simProvider === opt.key;
+                    return (
+                      <button
+                        key={opt.key}
+                        type="button"
+                        onClick={() => { if (!isSelected) handleSimProviderChange(opt.key); }}
+                        aria-pressed={isSelected}
+                        className={`rounded-[5px] px-3 py-1.5 text-[11px] font-mono font-extrabold uppercase tracking-wider transition-all cursor-pointer border ${
+                          isSelected
+                            ? "bg-[#43E600]/10 border-[#43E600]/60 text-[#43E600] ring-1 ring-[#43E600]/40"
+                            : "bg-black/20 border-white/10 text-white/70 hover:border-[#45AFFF]/45 hover:text-white"
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
 
               {/* BLOQUE 1: Tripulación y Cabina */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -6536,12 +6757,10 @@ export default function VueloActualView({
               </div>
             </div>
 
-            {/* 1b. IFE - ENTRETENIMIENTO A BORDO (misma posición desde
-                PRE-FLIGHT hasta TAXI-TO-GATE; en Plataforma lo reemplaza el
-                resumen de aterrizaje). El monitor queda montado y operativo en
-                todas esas fases; el video de seguridad (modo PACK) se
+            {/* 1b. IFE - ENTRETENIMIENTO A BORDO (mismo layout en todas las
+                fases 2-7, incluida Plataforma/AT_GATE). El monitor queda
+                montado y operativo; el video de seguridad (modo PACK) se
                 reproduce dentro del mismo. */}
-            {currentSubStage !== "Plataforma" && (
               <div className="animate-fadeIn">
                 <IfeScreen
               flight={ifeFlight}
@@ -6552,10 +6771,11 @@ export default function VueloActualView({
               getFlownPath={ifeGetFlownPath}
             />
               </div>
-            )}
 
-            {/* 2. COMPORTAMIENTO DE ETAPA 7 (PLATAFORMA) - RESUMENES DE ATERRIZAJE E IA */}
-            {currentSubStage === "Plataforma" && (
+            {/* 2. Resumen de etapa final deshabilitado: AT_GATE (Plataforma)
+                mantiene el mismo layout que la fase anterior (IFE + manifiesto).
+                El detalle post-vuelo vive en la pantalla de detalle del vuelo. */}
+            {false && (
               <div className="space-y-5 animate-fadeIn">
                 {/* Caja: Resumen de Aterrizaje */}
                 <div className="bg-[#2C6591]/20 rounded-[8px] border-2 border-[#E68B00]/60 p-5 shadow-2xl text-white">
@@ -7018,7 +7238,11 @@ export default function VueloActualView({
       {/* Debug cluster — barra superior derecha (aviso conexión / Monitor).
           Los botones temporales "Descargar / Limpiar logs" se eliminaron. */}
       <div className="fixed top-4 right-4 z-50 flex items-center gap-1.5">
-        {!isConnected && !isTestMode && currentState === FlightState.NoIniciado && (
+        {/* Aviso de conexión: solo cuando se eligió un simulador real (MSFS o
+            X-Plane) y aún no hay conexión. Con Mock seleccionado no hay nada
+            que advertir; antes de elegir tampoco (evita el falso "usará Mock"
+            previo a la selección). */}
+        {!isConnected && !isTestMode && currentState === FlightState.NoIniciado && simProvider !== "mock" && (
           <div className="warning-banner bg-amber-500/10 border border-amber-500/40 rounded-[5px] px-2.5 py-2 text-[11px] font-sans text-amber-300 leading-tight flex items-center gap-2 shadow-lg shadow-black/30">
             <span className="whitespace-nowrap">⚠️ {t("connection.banner")}</span>
             <button

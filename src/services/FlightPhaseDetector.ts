@@ -17,6 +17,10 @@ export class FlightPhaseDetector {
   private stability = 0;
   private readonly STABILITY_THRESHOLD = 3;
   private boardingCompleted = false;
+  // Throttle del aviso de puertas (se evalúa por muestra: a 10Hz inundaba el
+  // log con miles de líneas idénticas). Ventana de 10s entre avisos.
+  private lastDoorsWarnAt = 0;
+  private static readonly DOORS_WARN_THROTTLE_MS = 10000;
   // Latch de arribo (monotónico): una vez que el detector CONFIRMA una fase de
   // llegada (DESCENT/APPROACH/LANDING) queda en true hasta reset(). Gobierna el
   // mapeo direccional TAXI vs TAXI_IN.
@@ -261,8 +265,12 @@ export class FlightPhaseDetector {
     if (snap.doorsClosed && !this.boardingCompleted) {
       const wouldBePreFlight = this.computePhase(snap) === FlightPhase.PRE_FLIGHT;
       if (wouldBePreFlight) {
-        console.warn('[PhaseDetector] Puertas cerradas pero BOARDING no completado');
-        fileLogger.warn('[PhaseDetector] Puertas cerradas pero BOARDING no completado', { doorsClosed: snap.doorsClosed, boardingCompleted: this.boardingCompleted });
+        const now = Date.now();
+        if (now - this.lastDoorsWarnAt >= FlightPhaseDetector.DOORS_WARN_THROTTLE_MS) {
+          this.lastDoorsWarnAt = now;
+          console.warn('[PhaseDetector] Puertas cerradas pero BOARDING no completado');
+          fileLogger.warn('[PhaseDetector] Puertas cerradas pero BOARDING no completado', { doorsClosed: snap.doorsClosed, boardingCompleted: this.boardingCompleted });
+        }
         return null;
       }
     }

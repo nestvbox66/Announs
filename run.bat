@@ -29,7 +29,7 @@ echo [Announs] Compilando modo produccion...
 cargo tauri build --features simconnect
 echo.
 echo [Announs] Ejecutable generado en:
-echo   src-tauri\target\release\app.exe
+echo   src-tauri\target\release\announs.exe
 pause
 goto end
 

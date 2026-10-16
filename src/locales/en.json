@@ -41,7 +41,11 @@
     },
     "settings": {
       "start_flight_btn": "Start Flight",
-      "start_test_btn": "Start Test"
+      "start_test_btn": "Start Test",
+      "sim_title": "Simulator",
+      "sim_msfs": "MSFS 2020",
+      "sim_xplane": "X-Plane 12",
+      "sim_mock": "Test (Mock)"
     }
   },
   "narrator": {
@@ -89,6 +93,8 @@
     "grid_origin": "Origin",
     "grid_destination": "Destination",
     "grid_aircraft": "Equipment",
+    "grid_distance": "Distance",
+    "grid_distance_sort": "Sort by distance",
     "grid_empty": "No results. Adjust the filters and press Search flights.",
     "grid_initial": "Fill at least one filter and press Search flights.",
     "grid_live_note": "Live search over of_routes (max 100 rows).",

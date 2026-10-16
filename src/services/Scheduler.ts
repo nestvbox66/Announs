@@ -108,6 +108,10 @@ export class Scheduler {
   // fsm.transition → enterPhase) pasan el guard de currentPhase antes de que se
   // actualice tras el await, cargando el escenario dos veces (duplica anuncios).
   private transitionLock = false;
+  // Throttle del aviso de puertas ignoradas (notifyTelemetry lo invoca por
+  // muestra: a 10Hz inundaba el log). Ventana de 10s entre avisos.
+  private lastDoorsIgnoredWarnAt = 0;
+  private static readonly DOORS_WARN_THROTTLE_MS = 10000;
   private delayThresholdsSynced = false;
   // ── Origen de la última transición (diagnóstico para el monitor) ──
   private lastTransitionSource: string = '❓ Desconocido';
@@ -891,10 +895,12 @@ export class Scheduler {
     // disparadas, sea cual sea su transición) se omiten automáticamente para
     // no bloquear el cierre. Solo los pasos NO opcionales bloquean.
     if (!this.boardingStepsCompleted) {
-      try { this.narrativeOrchestrator.cancelPendingTimers(); } catch {}
+      // Omitir opcionales pendientes cancelando SOLO sus timers (mismo
+      // criterio que el cierre automático: nunca los del paso en curso).
       while (!this.narrativeEngine.isCompleted()) {
         const cur = this.narrativeEngine.currentStep();
         if (!cur || !cur.optional) break;
+        try { this.narrativeOrchestrator.cancelStepTimers(cur.eventKey); } catch {}
         logger.narrative(`[Scheduler] Cierre de puertas: omitiendo paso opcional pendiente ${cur.eventKey} (${NarrativeTransition[cur.transition]})`);
         this.narrativeEngine.onStepCompleted();
       }
@@ -911,6 +917,9 @@ export class Scheduler {
         return;
       }
     }
+
+    // Cierre real: recién acá, limpieza total de timers y transición.
+    try { this.narrativeOrchestrator.cancelPendingTimers(); } catch {}
 
     this.doorsClosed = true;
     logger.narrative("[Scheduler] Cierre de puertas (manual) -> PRE_FLIGHT");
@@ -929,11 +938,14 @@ export class Scheduler {
     if (this.doorsClosed || this.currentPhase !== "BOARDING") return;
 
     if (!this.boardingStepsCompleted) {
-      // Mismo criterio que el cierre manual: omitir opcionales pendientes.
-      try { this.narrativeOrchestrator.cancelPendingTimers(); } catch {}
+      // Omitir opcionales pendientes cancelando SOLO sus timers (no los del
+      // paso en curso): antes se cancelaba TODO en cada muestra y, con
+      // puertas siempre cerradas a 10Hz (X-Plane), ningún AFTER_DELAY llegaba
+      // a disparar y BOARDING quedaba muda para siempre (incidente 2026-10-12).
       while (!this.narrativeEngine.isCompleted()) {
         const cur = this.narrativeEngine.currentStep();
         if (!cur || !cur.optional) break;
+        try { this.narrativeOrchestrator.cancelStepTimers(cur.eventKey); } catch {}
         logger.narrative(`[Scheduler] notifyDoorsClosed: omitiendo opcional ${cur.eventKey} para PRE_FLIGHT`);
         this.narrativeEngine.onStepCompleted();
       }
@@ -941,12 +953,19 @@ export class Scheduler {
         this.boardingStepsCompleted = true;
       }
       if (!this.boardingStepsCompleted) {
-        const msg = "[Scheduler] Puertas cerradas (simulador) pero BOARDING no completado; ignorado";
-        console.warn(msg);
-        fileLogger.warn(msg, { currentPhase: this.currentPhase, boardingStepsCompleted: this.boardingStepsCompleted });
+        const now = Date.now();
+        if (now - this.lastDoorsIgnoredWarnAt >= Scheduler.DOORS_WARN_THROTTLE_MS) {
+          this.lastDoorsIgnoredWarnAt = now;
+          const msg = "[Scheduler] Puertas cerradas (simulador) pero BOARDING no completado; ignorado";
+          console.warn(msg);
+          fileLogger.warn(msg, { currentPhase: this.currentPhase, boardingStepsCompleted: this.boardingStepsCompleted });
+        }
         return;
       }
     }
+
+    // Cierre real: recién acá, limpieza total de timers y transición.
+    try { this.narrativeOrchestrator.cancelPendingTimers(); } catch {}
 
     this.doorsClosed = true;
     logger.narrative("[Scheduler] Cierre de puertas detectado desde el simulador -> PRE_FLIGHT");

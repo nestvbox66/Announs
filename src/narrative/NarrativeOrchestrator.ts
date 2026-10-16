@@ -818,6 +818,9 @@ export class NarrativeOrchestrator {
     if (this.pendingTimers.has(id)) return;
     this.pendingTimers.add(id);
     const delayMs = 2000;
+    // Log permanente (mismo criterio que AFTER_DELAY): sin esto, un WAIT que
+    // nunca cumple condiciones parece un cuelgue silencioso.
+    fileLogger.log('[NarrativeOrchestrator] WAIT_CONDITION en espera (poll 2s)', { eventKey: step.eventKey, timerId: id });
     logger.polling(`[NarrativeOrchestrator] WAIT_CONDITION ${step.eventKey} no cumple precondiciones, re-evaluando en ${delayMs}ms`);
     this.timerManager.schedule({
       id,
@@ -1041,9 +1044,13 @@ export class NarrativeOrchestrator {
     mode: "manual" | "auto",
     delayMs: number
   ): void {
-    const id = "preplay:" + this.timerId(step);
+    const id = "preplay:" + this.timerId(step) + ":" + step.eventKey;
     if (this.pendingTimers.has(id)) return;
     this.pendingTimers.add(id);
+
+    // Log permanente: un AFTER_DELAY sin este rastro es indistinguible de un
+    // cuelgue (caso real: paso clavado sin dispatch ni avance ni error).
+    fileLogger.log('[NarrativeOrchestrator] AFTER_DELAY programado', { eventKey: step.eventKey, delayMs, timerId: id });
 
     logger.narrative("[NARRATIVE]");
     logger.narrative("AFTER_DELAY: retrasando reproducción");
@@ -1698,6 +1705,27 @@ export class NarrativeOrchestrator {
     }
     this.pendingTimers.clear();
     this.clearAudioCompletionNet();
+  }
+
+  /**
+   * Cancela solo los timers de un paso (preplay + wait) sin tocar el resto.
+   * Se usa al omitir un paso opcional pendiente (p. ej. cierre de puertas con
+   * opcionales en curso): cancelar TODO ahí mataba los AFTER_DELAY del paso
+   * en curso y dejaba la fase muda — con puertas siempre cerradas a 10Hz
+   * (X-Plane) ningún timer llegaba a disparar (incidente 2026-10-12).
+   * Los ids preplay llevan el eventKey como sufijo (`...:<eventKey>`) y los
+   * de espera son `wait:<eventKey>`.
+   */
+  cancelStepTimers(eventKey: string): void {
+    const ids = Array.from(this.pendingTimers).filter(
+      (id) => id === `wait:${eventKey}` || id.endsWith(`:${eventKey}`)
+    );
+    for (const id of ids) {
+      try {
+        this.timerManager.cancel(id);
+      } catch {}
+      this.pendingTimers.delete(id);
+    }
   }
 
   private scheduleNarrativeDelay(_step: NarrativeStep): void {

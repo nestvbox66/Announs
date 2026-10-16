@@ -8,7 +8,7 @@
 
 import type { FlightController } from "./FlightController";
 import { fileLogger } from "./FileLogger";
-import { config } from "../config";
+import { getEffectiveSimProvider } from "./FlightControllerFactory";
 
 export type ConnectionType = "msfs" | "xplane" | "mock" | "disconnected";
 
@@ -151,7 +151,7 @@ export class ConnectionStatusService {
     if (next.type !== this.status.type || next.connected !== this.status.connected) {
       this.status = next;
       fileLogger.log('[ConnectionStatus] 🔍 Estado actualizado', {
-        provider: config.sim.provider,
+        provider: getEffectiveSimProvider(),
         isConnected: next.connected,
         connectionType: next.type,
       });
