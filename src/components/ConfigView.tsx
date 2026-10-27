@@ -6,6 +6,7 @@
 import React, { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { supabase } from "../lib/supabase";
+import { getEnabledStockIds } from "../services/voiceService";
 import { UserEventDefaultsService } from "../services/UserEventDefaultsService";
 import { ScenarioConfigService } from "../services/ScenarioConfigService";
 import type {
@@ -52,7 +53,17 @@ import {
 import { SimBriefData, ConfigVoces, ConfigAudio } from "../types";
 import { BoardingMusicService, BoardingMusicTrack } from "../services/BoardingMusicService";
 import { RANDOM_MUSIC_ID } from "../services/MusicController";
+import {
+  DEFAULT_BOARDING_MUSIC_ID,
+  normalizeBoardingMusicTrackId,
+} from "../utils/boardingMusicSelection";
+import {
+  FLIGHT_SIMULATORS,
+  isFlightSimulator,
+  type FlightSimulator,
+} from "../utils/flightSimulator";
 import MusicPreview from "./music/MusicPreview";
+import AppUpdaterCard from "./AppUpdaterCard";
 import MusicDistortionPreview from "./music/MusicDistortionPreview";
 import VoicesPage from "../pages/configuration/VoicesPage";
 import PackagesTab from "./packages/PackagesTab";
@@ -167,6 +178,10 @@ export default function ConfigView({
           setBoardingMusicDistortion(Boolean((data as any).boarding_music_distortion));
         if ((data as any).boarding_music_source != null)
           setBoardingAudioSource(toBoardingAudioSource((data as any).boarding_music_source));
+        if (isFlightSimulator((data as any).simulator)) {
+          setPreferredSimulator((data as any).simulator);
+          try { localStorage.setItem("cfg_preferred_simulator", (data as any).simulator); } catch { /* ignorar */ }
+        }
         if (data.mute_ann_when_user_not_in_cabin != null)
           setMuteAnnWhenNotInCabin(data.mute_ann_when_user_not_in_cabin);
         if (data.auto_detect_flight_phase != null)
@@ -254,27 +269,33 @@ export default function ConfigView({
         setPassengerReactionPlanesMovement(true);
         setPassengerReactionLanding(true);
         setPlayBoardingMusic(true);
-        setSongBoardingMusic("");
+        setSongBoardingMusic(DEFAULT_BOARDING_MUSIC_ID);
         setSpeedKph(true);
       }
 
-      // Load gate agent voices from stock
-      const { data: gateVoices, error: gateErr } = await supabase
-        .from("voices_stock")
-        .select("id, voice_name")
-        .eq("voice_role", "gate");
+      // Gate agent: solo voces habilitadas por el usuario en `voices`
+      // (las apagadas en configuración/voces no se ofrecen). Sin registros,
+      // alta inicial con todas las públicas.
+      const enabledGateIds = await getEnabledStockIds(user.id);
+      if (cancelled) return;
 
-      if (cancelled || gateErr) return;
+      let gateList: { id: string; name: string }[] = [];
+      if (enabledGateIds.length > 0) {
+        const { data: gateVoices, error: gateErr } = await supabase
+          .from("voices_stock")
+          .select("id, voice_name")
+          .eq("voice_role", "gate")
+          .in("id", enabledGateIds);
+        if (cancelled || gateErr) return;
+        gateList = ((gateVoices || []) as any[]).map((v: any) => ({ id: v.id, name: v.voice_name }));
+      }
+      setGateAgentVoices(gateList);
 
-      if (gateVoices && gateVoices.length > 0) {
-        setGateAgentVoices(gateVoices.map(v => ({ id: v.id, name: v.voice_name })));
-
-        const loadedGateId = data?.gate_agent_voice_id;
-        if (loadedGateId && gateVoices.some(v => v.id === loadedGateId)) {
-          setGateAgentVoiceId(loadedGateId);
-        } else {
-          setGateAgentVoiceId(gateVoices[0].id);
-        }
+      const loadedGateId = data?.gate_agent_voice_id;
+      if (loadedGateId && gateList.some((v) => v.id === loadedGateId)) {
+        setGateAgentVoiceId(loadedGateId);
+      } else if (gateList.length > 0) {
+        setGateAgentVoiceId(gateList[0].id);
       }
     };
 
@@ -289,7 +310,7 @@ export default function ConfigView({
     (async () => {
       const { data: settings, error } = await supabase
         .from('setting_general')
-        .select('language_id, captain_voice_id, crew_voice_id, gate_agent_voice_id')
+        .select('language_id, captain_voice_id, crew_voice_id, gate_agent_voice_id, simulator')
         .eq('user_id', userId)
         .maybeSingle();
       if (cancelled || error || !settings) {
@@ -312,6 +333,10 @@ export default function ConfigView({
       if ((settings as any).gate_agent_voice_id) {
         setGateAgentVoiceId((settings as any).gate_agent_voice_id);
         localStorage.setItem("cfg_gate_agent_voice_id", (settings as any).gate_agent_voice_id);
+      }
+      if (isFlightSimulator((settings as any).simulator)) {
+        setPreferredSimulator((settings as any).simulator);
+        localStorage.setItem("cfg_preferred_simulator", (settings as any).simulator);
       }
     })();
     return () => { cancelled = true; };
@@ -347,16 +372,10 @@ export default function ConfigView({
     (async () => {
       setStaffVoicesLoading(true);
       try {
-        const { data: userVoices, error: voicesError } = await supabase
-          .from("voices")
-          .select("voicestock_id")
-          .eq("user_id", userId)
-          .eq("voice_enabled", true);
-        if (voicesError) throw voicesError;
+        // Solo voces habilitadas por el usuario; sin registros, alta
+        // inicial con todas las públicas.
+        const stockIds = await getEnabledStockIds(userId);
         if (cancelled) return;
-
-        const stockIds = (userVoices || []).map((v: any) => v.voicestock_id);
-
         let mapped: StaffVoiceOption[] = [];
         if (stockIds.length > 0) {
           let stockResult: any = await supabase
@@ -555,7 +574,15 @@ export default function ConfigView({
     return localStorage.getItem("cfg_play_boarding_music") !== "false"; // default true
   });
   const [songBoardingMusic, setSongBoardingMusic] = useState<string>(() => {
-    return localStorage.getItem("cfg_song_boarding_music") || "";
+    return normalizeBoardingMusicTrackId(localStorage.getItem("cfg_song_boarding_music"));
+  });
+  const [preferredSimulator, setPreferredSimulator] = useState<FlightSimulator | "">(() => {
+    try {
+      const stored = localStorage.getItem("cfg_preferred_simulator");
+      return isFlightSimulator(stored) ? stored : "";
+    } catch {
+      return "";
+    }
   });
   const [musicTracks, setMusicTracks] = useState<BoardingMusicTrack[]>([]);
   const [musicTracksLoading, setMusicTracksLoading] = useState<boolean>(false);
@@ -779,10 +806,11 @@ export default function ConfigView({
         // Migración retrocompatible: si el valor guardado es un nombre de pista
         // (esquema anterior) en lugar de un id, se convierte al id actual.
         setSongBoardingMusic((prev) => {
-          if (!prev || prev === RANDOM_MUSIC_ID) return prev;
+          if (!prev) return DEFAULT_BOARDING_MUSIC_ID;
+          if (prev === RANDOM_MUSIC_ID) return prev;
           if (result.data!.some((track) => track.id === prev)) return prev;
           const byName = result.data!.find((track) => track.name === prev);
-          return byName ? byName.id : "";
+          return byName ? byName.id : DEFAULT_BOARDING_MUSIC_ID;
         });
       } else {
         console.warn("[ConfigView] No se pudieron cargar las pistas de música:", result.error);
@@ -865,6 +893,7 @@ export default function ConfigView({
     localStorage.setItem("cfg_selected_language_id", selectedLanguageId);
     localStorage.setItem("cfg_selected_captain_voice_id", selectedCaptainVoiceId);
     localStorage.setItem("cfg_selected_crew_voice_id", selectedCrewVoiceId);
+    localStorage.setItem("cfg_preferred_simulator", preferredSimulator);
 
     // Bloque 2
     localStorage.setItem("cfg_audio_3d_enabled", String(audio3dEnabled));
@@ -946,6 +975,7 @@ export default function ConfigView({
             language_id: selectedLanguageId || null,
             captain_voice_id: selectedCaptainVoiceId || null,
             crew_voice_id: selectedCrewVoiceId || null,
+            simulator: preferredSimulator || null,
           };
 
           const [genResult, annResult] = await Promise.all([
@@ -966,6 +996,7 @@ export default function ConfigView({
             ["boarding_pax_per_minute", boardingPaxPerMinute],
             ["boarding_music_distortion", boardingMusicDistortion],
             ["boarding_music_source", boardingAudioSource],
+            ["simulator", preferredSimulator || null],
           ] as const) {
             try {
               const { error: colErr } = await supabase
@@ -1345,6 +1376,9 @@ export default function ConfigView({
                 </div>
               </div>
 
+              {/* ACTUALIZACIONES DE LA APP */}
+              <AppUpdaterCard />
+
             </div>
 
             {/* COLUMN RIGHT: Preferencias del Sistema (solo opciones activas) */}
@@ -1422,6 +1456,42 @@ export default function ConfigView({
                   </div>
                 </div>
               </div>
+              {/* SIMULADOR DE VUELO */}
+              <div className="bg-[#2C6591]/20 rounded-[5px] border border-white/20 p-5 shadow-md flex flex-col gap-4">
+                <div className="border-b border-white/10 pb-2.5">
+                  <h3 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider flex items-center gap-2 font-black">
+                    <Compass className="w-4.5 h-4.5 text-[#43E600]" /> {t("config.simulator_title")}
+                  </h3>
+                  <p className="text-[10px] text-white/50 font-mono mt-1">{t("config.simulator_desc")}</p>
+                </div>
+
+                <div className="bg-black/35 p-3.5 rounded border border-white/5 flex flex-col gap-2">
+                  <span className="text-[10.5px] font-mono text-white/95 font-bold uppercase tracking-wider block">
+                    {t("config.simulator_label")}
+                  </span>
+                  <span className="text-[9px] text-white/45 block">{t("config.simulator_helper")}</span>
+                  <div className="flex bg-black/60 border border-white/15 rounded-[4px] p-0.5 shrink-0 h-fit w-full justify-between font-mono">
+                    {FLIGHT_SIMULATORS.map((sim) => {
+                      const selected = preferredSimulator === sim;
+                      return (
+                        <button
+                          key={sim}
+                          type="button"
+                          onClick={() => setPreferredSimulator(sim)}
+                          className={`px-3 py-1 rounded-[3px] text-[9px] font-black uppercase tracking-wider border cursor-pointer transition-all flex-1 text-center ${
+                            selected
+                              ? "bg-[#43E600]/20 text-[#43E600] border-[#43E600]/30 font-extrabold shadow-sm"
+                              : "text-white/30 border-transparent hover:text-white/60"
+                          }`}
+                        >
+                          {sim === "MSFS2024" ? "MSFS 2024" : "X-Plane 12"}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+              
               
             </div>
 
@@ -1554,7 +1624,6 @@ export default function ConfigView({
                               onChange={(e) => setSongBoardingMusic(e.target.value)}
                               disabled={musicTracksLoading}
                             >
-                              <option value="">{t("music.no_music")}</option>
                               <option value={RANDOM_MUSIC_ID}>{t("music.random")}</option>
                               {musicTracksLoading ? (
                                 <option value="" disabled>{t("music.loading_tracks")}</option>
