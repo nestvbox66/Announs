@@ -25,11 +25,32 @@ goto end
 
 :build
 echo.
-echo [Announs] Compilando modo produccion...
-cargo tauri build --features simconnect
+echo [Announs] Incrementando version (minor) antes de compilar...
+node scripts/bump-version.js
+if errorlevel 1 (
+  echo [ERROR] No se pudo incrementar la version. Abortando compilacion.
+  pause
+  goto end
+)
 echo.
-echo [Announs] Ejecutable generado en:
-echo   src-tauri\target\release\announs.exe
+echo [Announs] Compilando modo produccion con firma...
+
+:: Definir la ruta de la clave privada usando %USERPROFILE% (evita el uso de ~)
+set TAURI_SIGNING_PRIVATE_KEY=%USERPROFILE%\.tauri\announs.key
+
+:: La contraseña se toma de la variable de entorno TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+if not defined TAURI_SIGNING_PRIVATE_KEY_PASSWORD (
+  echo [ERROR] Falta la variable de entorno TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+  pause
+  goto end
+)
+
+
+cargo tauri build --features simconnect
+
+echo.
+echo [Announs] Ejecutable y artefactos generados en:
+echo   src-tauri\target\release\bundle\msi\
 pause
 goto end
 

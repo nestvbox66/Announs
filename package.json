@@ -1,7 +1,7 @@
 {
   "name": "react-example",
   "private": true,
-  "version": "0.11.0",
+  "version": "0.14.0",
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
@@ -10,14 +10,24 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "verify:p0-special": "tsx scripts/p0-special-event-skip.verify.ts",
-    "verify:passenger": "tsx scripts/passenger-engine.verify.ts"
+    "verify:boarding-music": "tsx scripts/boarding-music-label.verify.ts",
+    "verify:flight-simulator": "tsx scripts/flight-simulator.verify.ts",
+    "verify:simulator-preference": "tsx scripts/simulator-preference.verify.ts",
+    "verify:passenger": "tsx scripts/passenger-engine.verify.ts",
+    "verify:desktop-auth": "tsx scripts/desktop-auth-deep-link.verify.ts",
+    "verify:voices-filters": "tsx scripts/voices-filters.verify.ts",
+    "verify:translation-overlay": "tsx scripts/translation-overlay.verify.ts",
+    "verify:scenario-phases": "tsx scripts/scenario-phase-names.verify.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
     "@supabase/supabase-js": "^2.108.0",
     "@tailwindcss/vite": "^4.1.14",
     "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-deep-link": "^2.4.0",
+    "@tauri-apps/plugin-process": "^2.4.0",
     "@tauri-apps/plugin-shell": "^2.4.0",
+    "@tauri-apps/plugin-updater": "^2.14.0",
     "@vitejs/plugin-react": "^5.0.4",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
