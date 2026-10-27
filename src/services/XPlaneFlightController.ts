@@ -312,7 +312,7 @@ export class XPlaneFlightController implements FlightController {
     if (snap.onAnyRunway === undefined || snap.onAnyRunway === null) {
       const evalResult = this.onAnyRunwayProvider?.(snap) ?? null;
       if (evalResult !== null && evalResult.value !== null) {
-        (snap as Record<string, unknown>).onAnyRunway = evalResult.value;
+        (snap as unknown as Record<string, unknown>).onAnyRunway = evalResult.value;
         this.runwayInfo = {
           source: evalResult.source,
           value: evalResult.value,
@@ -326,7 +326,7 @@ export class XPlaneFlightController implements FlightController {
     if (snap.atcOnParkingSpot === undefined || snap.atcOnParkingSpot === null) {
       const parkResult = this.parkingProvider?.(snap) ?? null;
       if (parkResult !== null && parkResult.value !== null) {
-        (snap as Record<string, unknown>).atcOnParkingSpot = parkResult.value;
+        (snap as unknown as Record<string, unknown>).atcOnParkingSpot = parkResult.value;
         this.parkingInfo = {
           source: parkResult.source,
           value: parkResult.value,

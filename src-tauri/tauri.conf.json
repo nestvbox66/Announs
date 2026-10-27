@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Announs",
-  "version": "0.10.0",
+  "version": "0.14.0",
   "identifier": "net.announs.app",
   "build": {
     "frontendDist": "../dist",
@@ -24,9 +24,27 @@
       "csp": null
     }
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "announs"
+        ]
+      }
+    },
+    "updater": {
+      "active": true,
+      "dialog": false,
+      "endpoints": [
+        "https://app.announs.net/updates.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM5Q0Y4MjExRDk5Qzg3REMKUldUY2g1elpFWUxQT2UzQ29YWS9iSjllSGNhU0Y4T2tnNnBtZ1k3VWlLUDhud2R1WVNVNnkzY2UK"
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

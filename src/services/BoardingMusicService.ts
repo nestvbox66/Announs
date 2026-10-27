@@ -27,6 +27,8 @@ export interface FlightBoardingMusicSettings {
   enabled: boolean;
   /** `flight_setting_announcements.boarding_music_id` (null = "Sin música"). */
   musicId: string | null;
+  /** false cuando el vuelo aún no tiene configuración persistida. */
+  persisted?: boolean;
 }
 
 export class BoardingMusicService {
@@ -71,11 +73,12 @@ export class BoardingMusicService {
 
       if (error) return fail(error.message);
 
-      if (!data) return ok({ enabled: true, musicId: null });
+      if (!data) return ok({ enabled: true, musicId: null, persisted: false });
 
       return ok({
         enabled: (data as any).boarding_music_enabled ?? true,
         musicId: (data as any).boarding_music_id ?? null,
+        persisted: true,
       });
     } catch (err) {
       return fail(err instanceof Error ? err.message : String(err));

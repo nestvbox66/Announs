@@ -243,6 +243,9 @@ export class FlightPathService {
     // reflejan en las estadísticas globales.
     if (summary.flightStatus === "ended" || summary.flightStatus === "saved") {
       patch.flight_status = summary.flightStatus;
+    if (summary.simulator === "MSFS2024" || summary.simulator === "XPLANE12") {
+      patch.simulator = summary.simulator;
+    }
     }
 
     // Sin ciclo aéreo registrado solo se persiste la distancia del rodaje.
@@ -305,6 +308,8 @@ export interface FlightSummaryUpdate {
   arrivalMs?: number | null;
   /** Estado de cierre del vuelo: 'ended' (normal) o 'saved' (recuperación). */
   flightStatus?: "ended" | "saved" | null;
+  /** Simulador que operó el vuelo: 'MSFS2024' | 'XPLANE12' (null = sin dato). */
+  simulator?: string | null;
 }
 
 /** `HH:MM:SS` en UTC (mismo estándar que el INSERT programado). */

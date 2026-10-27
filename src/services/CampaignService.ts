@@ -13,6 +13,7 @@
  */
 import { supabase } from "../lib/supabase";
 import { ServiceResult, ok, fail } from "./ServiceResult";
+import { localizeRows } from "./translationService";
 import { hasAircraftSilhouette } from "../utils/aircraftSilhouettes";
 import { getAirlineName } from "../utils/airlineMapping";
 
@@ -48,7 +49,10 @@ export interface Campaign {
   id: string;
   title: string;
   description: string;
+  /** Imagen de la página de detalle de la campaña. */
   imageUrl: string;
+  /** Imagen para la tarjeta del menú de Home (resolución vertical 2:3). */
+  imageHomeUrl: string;
   startDate: string;
   endDate: string;
   flights: CampaignFlight[];
@@ -100,6 +104,7 @@ interface CampaignRow {
   title: unknown;
   description: unknown;
   image_url: unknown;
+  image_home_url: unknown;
   start_date: unknown;
   end_date: unknown;
 }
@@ -124,6 +129,7 @@ function toCampaign(row: CampaignRow, flights: CampaignFlight[]): Campaign {
     title: String(row.title ?? "").trim() || "—",
     description: String(row.description ?? "").trim(),
     imageUrl: String(row.image_url ?? "").trim(),
+    imageHomeUrl: String(row.image_home_url ?? "").trim(),
     startDate: String(row.start_date ?? ""),
     endDate: String(row.end_date ?? ""),
     flights,
@@ -262,13 +268,29 @@ export async function loadActiveCampaigns(
 ): Promise<ServiceResult<Campaign[]>> {
   try {
     const today = now.toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
-    const { data: campaigns, error: campaignsError } = await supabase
+    const baseCols = "id, title, description, image_url, start_date, end_date";
+    // `image_home_url` es una columna nueva: si la migración aún no está
+    // aplicada, se reintenta sin ella (la tarjeta de Home cae a su fondo fijo).
+    let campaignsResult = await supabase
       .from("weekly_campaigns")
-      .select("id, title, description, image_url, start_date, end_date")
+      .select(`${baseCols}, image_home_url`)
       .eq("is_active", true)
       .lte("start_date", `${today}T23:59:59.999Z`)
       .gte("end_date", `${today}T00:00:00.000Z`)
       .order("start_date", { ascending: true });
+    if (
+      campaignsResult.error &&
+      /image_home_url/i.test(campaignsResult.error.message)
+    ) {
+      campaignsResult = (await supabase
+        .from("weekly_campaigns")
+        .select(baseCols)
+        .eq("is_active", true)
+        .lte("start_date", `${today}T23:59:59.999Z`)
+        .gte("end_date", `${today}T00:00:00.000Z`)
+        .order("start_date", { ascending: true })) as typeof campaignsResult;
+    }
+    const { data: campaigns, error: campaignsError } = campaignsResult;
     if (campaignsError) return fail(campaignsError.message);
     const rows = ((campaigns ?? []) as CampaignRow[]).filter((r) => String(r.id ?? "") !== "");
     if (rows.length === 0) return ok([]);
@@ -285,15 +307,21 @@ export async function loadActiveCampaigns(
     if (flightsError) return fail(flightsError.message);
 
     const byCampaign = new Map<string, CampaignFlight[]>();
-    const names = await resolveDisplayNames((flights ?? []) as unknown as CampaignFlightRow[]);
-    for (const f of ((flights ?? []) as unknown as CampaignFlightRow[])) {
+    const flightRows = await localizeRows(
+      "weekly_campaign_flights",
+      ((flights ?? []) as unknown as CampaignFlightRow[]),
+      { fields: ["description"] },
+    );
+    const names = await resolveDisplayNames(flightRows);
+    for (const f of flightRows) {
       const flight = toFlight(f, names);
       if (!flight.id || !flight.campaignId) continue;
       const list = byCampaign.get(flight.campaignId) ?? [];
       list.push(flight);
       byCampaign.set(flight.campaignId, list);
     }
-    return ok(rows.map((r) => toCampaign(r, byCampaign.get(String(r.id)) ?? [])));
+    const campaignRows = await localizeRows("weekly_campaigns", rows, { fields: ["title", "description"] });
+    return ok(campaignRows.map((r) => toCampaign(r, byCampaign.get(String(r.id)) ?? [])));
   } catch (err) {
     return fail(err instanceof Error ? err.message : String(err));
   }
@@ -412,7 +440,7 @@ export async function loadCampaignFlightHistory(): Promise<
           .select("id, title, image_url")
           .in("id", campaignIds);
         if (!error && Array.isArray(data)) {
-          for (const c of data as unknown as Array<Record<string, unknown>>) {
+          for (const c of await localizeRows("weekly_campaigns", data as unknown as Array<Record<string, unknown>>, { fields: ["title"] })) {
             const id = str(c.id);
             if (id) {
               campaignsById.set(id, {

@@ -1,5 +1,6 @@
 import namesData from "../data/names.json";
 import type { Pasajero, Incidencia } from "../types";
+import type { ManifestSeatAssignment } from "../types/cabinLayout";
 
 function pick<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
@@ -79,23 +80,37 @@ function buildSeatPool(totalPax: number) {
   return seats;
 }
 
-export function generateManifest(paxCount: number, originICAO: string): Pasajero[] {
+export function generateManifest(
+  paxCount: number,
+  originICAO: string,
+  seatAssignments?: ManifestSeatAssignment[],
+): Pasajero[] {
   const region = getRegionFromICAO(originICAO);
   const pool = (namesData as any)[region] || (namesData as any)["US"];
   const nombresM: string[] = pool.nombresM || (namesData as any)["US"].nombresM;
   const nombresF: string[] = pool.nombresF || (namesData as any)["US"].nombresF;
   const apellidos: string[] = pool.apellidos || (namesData as any)["US"].apellidos;
 
-  const seatPool = buildSeatPool(paxCount);
+  const useLayoutSeats = Array.isArray(seatAssignments) && seatAssignments.length > 0;
+  const seatPool: ManifestSeatAssignment[] = useLayoutSeats
+    ? seatAssignments
+    : buildSeatPool(paxCount).map((seat) => ({
+        asiento: seat.label,
+        clase: seat.clase as ManifestSeatAssignment["clase"],
+      }));
+  const total = useLayoutSeats ? Math.min(paxCount, seatPool.length) : paxCount;
 
   const manifest: Pasajero[] = [];
 
-  for (let i = 0; i < paxCount; i++) {
+  for (let i = 0; i < total; i++) {
     const isMale = Math.random() < 0.5;
     const nombres = isMale ? nombresM : nombresF;
     const nombre = pick(nombres);
     const apellido = pick(apellidos);
-    const seat = seatPool[i] || { clase: "Económica", label: `99${String.fromCharCode(65 + (i % 6))}` };
+    const seat = seatPool[i] || {
+      asiento: `99${String.fromCharCode(65 + (i % 6))}`,
+      clase: "Económica" as const,
+    };
     const genero: "M" | "F" = isMale ? "M" : "F";
 
     manifest.push({
@@ -103,14 +118,14 @@ export function generateManifest(paxCount: number, originICAO: string): Pasajero
       nombre: `${nombre} ${apellido}`,
       nacionalidad: COUNTRY_NAMES[region] || "United States",
       nacionalidadCodigo: COUNTRY_CODES[region] || "US",
-      asiento: seat.label,
+      asiento: seat.asiento,
       edad: randInt(18, 75),
       miedo: genero === "F" ? randInt(15, 60) : randInt(5, 35),
       satisfaccion: randInt(70, 100),
       hambre: randInt(10, 80),
       bano: randInt(5, 50),
       genero,
-      clase: seat.clase as "Primera" | "Ejecutiva" | "Económica",
+      clase: seat.clase,
       incidencias: [] as Incidencia[],
       alert: false,
     });

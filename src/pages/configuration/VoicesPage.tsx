@@ -11,7 +11,8 @@ import { useTranslation } from "react-i18next";
 import { Search, Volume2, Loader2 } from "lucide-react";
 import { supabase } from "../../lib/supabase";
 import { useToast } from "../../components/Toast";
-import { voiceService, VoiceWithStatus, roleBadge } from "../../services/voiceService";
+import { voiceService, VoiceWithStatus, roleBadge, getLastSeedError } from "../../services/voiceService";
+import { ALL_LANGUAGES, availableVoiceLanguages, filterVoicesByLanguage } from "../../utils/voiceFilters";
 import { musicCacheService } from "../../services/MusicCacheService";
 import LanguageFlag from "../../components/LanguageFlag";
 
@@ -42,6 +43,7 @@ export default function VoicesPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState("");
+  const [languageFilter, setLanguageFilter] = useState<string>(ALL_LANGUAGES);
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -63,6 +65,12 @@ export default function VoicesPage() {
         const list = await voiceService.getVoicesWithStatus(user.id);
         if (cancelled) return;
         setVoices(list);
+        // Si la siembra inicial falló (RLS, red), mostrar el motivo real:
+        // en desktop no hay consola visible para ver el warn.
+        const seedError = getLastSeedError();
+        if (seedError) {
+          showToast(t("voices.seed_error", { error: seedError }), "error");
+        }
       } catch (e: any) {
         if (!cancelled) showToast(e?.message || t("voices.load_error"), "error");
       } finally {
@@ -84,14 +92,17 @@ export default function VoicesPage() {
     }
   }, []);
 
+  const languageOptions = useMemo(() => availableVoiceLanguages(voices), [voices]);
+
   const filtered = useMemo(() => {
+    const byLanguage = filterVoicesByLanguage<VoiceWithStatus>(voices, languageFilter);
     const q = search.trim().toLowerCase();
-    if (!q) return voices;
-    return voices.filter((v) =>
+    if (!q) return byLanguage;
+    return byLanguage.filter((v) =>
       v.voice_name.toLowerCase().includes(q) ||
       (v.voice_role || "").toLowerCase().includes(q)
     );
-  }, [voices, search]);
+  }, [voices, search, languageFilter]);
 
   const toggleVoice = (id: string, enabled: boolean) => {
     setVoices((prev) => prev.map((v) => (v.id === id ? { ...v, voice_enabled: enabled } : v)));
@@ -202,6 +213,19 @@ export default function VoicesPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <select
+            value={languageFilter}
+            onChange={(e) => setLanguageFilter(e.target.value)}
+            aria-label={t("voices.language_filter_label")}
+            className="bg-[#00172e] border border-[#3B7EB2]/40 rounded-[4px] px-2 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-[#45AFFF] max-w-[180px] cursor-pointer"
+          >
+            <option value={ALL_LANGUAGES}>{t("voices.language_all")}</option>
+            {languageOptions.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.language_name}
+              </option>
+            ))}
+          </select>
           <div className="relative">
             <Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-white/40" />
             <input

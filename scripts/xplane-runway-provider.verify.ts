@@ -50,9 +50,9 @@ const RWY: RunwayGeometry = {
   ],
 };
 
-function rustPayload(designators = RWY) {
+function rustPayload(icao = "TEST", designators = RWY) {
   return {
-    icao: "TEST",
+    icao,
     runways: [
       {
         width_m: designators.widthM,
@@ -76,8 +76,8 @@ function rustPayload(designators = RWY) {
 
 function invokeOk() {
   return async (cmd: string) => {
-    if (cmd !== "get_runways") throw new Error("cmd inesperado " + cmd);
-    return rustPayload();
+    if (cmd !== "get_runways_batch") throw new Error("cmd inesperado " + cmd);
+    return [rustPayload()];
   };
 }
 
@@ -99,7 +99,7 @@ function snap(over: Record<string, unknown> = {}) {
 {
   const svc = new RunwayProximityService(invokeOk());
   svc.configureFlight({ departIcao: "TEST", arriveIcao: null, planRwy: "09" });
-  await svc["ensureLoaded"]("TEST");
+  await (svc as any).ensureMany(["TEST"]);
   const r = svc.evaluateSnap(snap());
   check("1 plan coincide true/geometría", r?.value === true && r?.source === "geometry", JSON.stringify(r));
   check("1 sin mismatch", r?.planMismatch === false, JSON.stringify(r));
@@ -109,7 +109,7 @@ function snap(over: Record<string, unknown> = {}) {
 {
   const svc = new RunwayProximityService(invokeOk());
   svc.configureFlight({ departIcao: "TEST", arriveIcao: null, planRwy: "27" });
-  await svc["ensureLoaded"]("TEST");
+  await (svc as any).ensureMany(["TEST"]);
   const r = svc.evaluateSnap(snap()); // más cerca del extremo 09
   check("2 mismatch dispara igual", r?.value === true, JSON.stringify(r));
   check("2 flag mismatch", r?.planMismatch === true, JSON.stringify(r));
@@ -119,12 +119,16 @@ function snap(over: Record<string, unknown> = {}) {
 {
   // ICAOs frescos (la caché es compartida en el proceso).
   const svc2 = new RunwayProximityService(async (cmd: string, args: any) => {
-    if (args?.icao === "DSTARR") return rustPayload();
-    throw new Error("sin datos");
+    if (cmd !== "get_runways_batch") throw new Error("cmd inesperado " + cmd);
+    const want: string[] = Array.isArray(args?.icaos) ? args.icaos : [];
+    return want.map((code) =>
+      code === "DSTARR"
+        ? rustPayload("DSTARR")
+        : { icao: code, runways: [], ramps: [], source_file: "", source_mtime: 0, found: false },
+    );
   });
   svc2.configureFlight({ departIcao: "DSTDEP", arriveIcao: "DSTARR", planRwy: null });
-  await (svc2 as any).ensureLoaded("DSTARR");
-  await (svc2 as any).ensureLoaded("DSTDEP");
+  await (svc2 as any).ensureMany(["DSTDEP", "DSTARR"]);
   const r = svc2.evaluateSnap(snap());
   check("3 destino true", r?.value === true && r?.airportIcao === "DSTARR", JSON.stringify(r));
 }
@@ -133,7 +137,7 @@ function snap(over: Record<string, unknown> = {}) {
 {
   const svc = new RunwayProximityService(invokeOk());
   svc.configureFlight({ departIcao: "TEST", arriveIcao: null, planRwy: null });
-  await svc["ensureLoaded"]("TEST");
+  await (svc as any).ensureMany(["TEST"]);
   const r = svc.evaluateSnap(snap({ latitude: 50 / 111320 }));
   check("4 fuera false/geometría", r?.value === false && r?.source === "geometry", JSON.stringify(r));
 }
@@ -145,7 +149,7 @@ function snap(over: Record<string, unknown> = {}) {
   };
   const svc = new RunwayProximityService(failing);
   svc.configureFlight({ departIcao: "NOGEO", arriveIcao: null, planRwy: null });
-  await (svc as any).ensureLoaded("NOGEO");
+  await (svc as any).ensureMany(["NOGEO"]);
   const fast = svc.evaluateSnap(snap({ groundspeed: 35 }));
   check("5 fallback rápido true", fast?.value === true && fast?.source === "fallback", JSON.stringify(fast));
   const slow = svc.evaluateSnap(snap({ groundspeed: 10 }));
@@ -160,22 +164,26 @@ function snap(over: Record<string, unknown> = {}) {
 {
   store.clear();
   let mtime = 1700000000;
-  const invokeV = async () => ({ ...rustPayload(), source_mtime: mtime });
+  const invokeV = async (_cmd: string, args: any) =>
+    ((Array.isArray(args?.icaos) ? args.icaos : ["CACH"]) as string[]).map((code) => ({
+      ...rustPayload(code),
+      source_mtime: mtime,
+    }));
   const svc = new RunwayProximityService(invokeV);
   svc.configureFlight({ departIcao: "CACH", arriveIcao: null, planRwy: null });
-  await (svc as any).ensureLoaded("CACH");
+  await (svc as any).ensureMany(["CACH"]);
   check("9a carga inicial", svc.getRunways("CACH").length === 1, String(svc.getRunways("CACH").length));
   // Falla invoke → sirve caché.
   const svc2 = new RunwayProximityService(async () => {
     throw new Error("caído");
   });
-  await (svc2 as any).ensureLoaded("CACH");
+  await (svc2 as any).ensureMany(["CACH"]);
   check("9b caché ante fallo", svc2.getRunways("CACH").length === 1, String(svc2.getRunways("CACH").length));
   // Cambia mtime → revalida.
   mtime = 1800000000;
   const svc3 = new RunwayProximityService(invokeV);
   svc3.configureFlight({ departIcao: "CACH", arriveIcao: null, planRwy: null });
-  await (svc3 as any).ensureLoaded("CACH");
+  await (svc3 as any).ensureMany(["CACH"]);
   const st = svc3.getStatus();
   check("9c revalida por mtime", st.departSource !== null && st.departSource.includes("1800000000"), st.departSource ?? "null");
 }
@@ -225,7 +233,7 @@ function parkSnap(over: Record<string, unknown> = {}) {
 {
   const svc = new RunwayProximityService(invokeOk());
   svc.configureFlight({ departIcao: "TEST", arriveIcao: null, planRwy: null });
-  await (svc as any).ensureLoaded("TEST");
+  await (svc as any).ensureMany(["TEST"]);
   // Junto a la puerta B2 (1,1), detenido, freno → true/geometry.
   const at = svc.evaluateParking(parkSnap());
   check("12 en puerta true", at?.value === true && at?.source === "geometry", JSON.stringify(at));
@@ -240,14 +248,37 @@ function parkSnap(over: Record<string, unknown> = {}) {
   const far = svc.evaluateParking(parkSnap({ latitude: 0, longitude: 0.005 }));
   check("12 lejos false", far?.value === false, JSON.stringify(far));
   // Sin rampas en ningún aeropuerto → ausente (sin fallback deliberado).
-  const svc2 = new RunwayProximityService(async () => ({
-    icao: "NORAMP", runways: [], ramps: [],
-    source_file: "x", source_mtime: 1, found: true,
-  }));
+  const svc2 = new RunwayProximityService(async () => ([
+    {
+      icao: "NORAMP", runways: [], ramps: [],
+      source_file: "x", source_mtime: 1, found: true,
+    },
+  ]));
   svc2.configureFlight({ departIcao: "NORAMP", arriveIcao: null, planRwy: null });
-  await (svc2 as any).ensureLoaded("NORAMP");
+  await (svc2 as any).ensureMany(["NORAMP"]);
   const absent = svc2.evaluateParking(parkSnap());
   check("12 sin rampas ausente", absent === null, JSON.stringify(absent));
+}
+
+// ── 13. Batch: salida+destino en un solo invoke ──────────────────────
+{
+  store.clear();
+  let calls = 0;
+  let lastIcaos: string[] = [];
+  const svc = new RunwayProximityService(async (cmd: string, args: any) => {
+    calls++;
+    lastIcaos = Array.isArray(args?.icaos) ? [...args.icaos] : [];
+    return lastIcaos.map((code) => ({ ...rustPayload(code) }));
+  });
+  svc.configureFlight({ departIcao: "BDEP", arriveIcao: "BARR", planRwy: null });
+  await (svc as any).ensureMany(["BDEP", "BARR"]);
+  check("13 un solo invoke batch", calls === 1, `llamadas=${calls}`);
+  check(
+    "13 pide ambos ICAO",
+    lastIcaos.includes("BDEP") && lastIcaos.includes("BARR"),
+    JSON.stringify(lastIcaos),
+  );
+  check("13 ambos cargados", svc.getRunways("BDEP").length === 1 && svc.getRunways("BARR").length === 1, "");
 }
 
 // ── Resultado ───────────────────────────────────────────────────────

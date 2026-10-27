@@ -181,7 +181,19 @@ export class RunwayProximityService {
   private lastParkingSource: RunwayValueSource | null = null;
   private mismatchLogged = new Set<string>();
   private readonly invokeFn: InvokeFn | null;
+  // TEMPORAL DEBUG: hook de progreso para diagnosticar el freeze al iniciar
+  // vuelo (sospecha: lectura de apt.dat en disco). Lo setea la UI y debe
+  // removerse en la versión final junto con los emits de este archivo.
+  public onProgress: ((message: string) => void) | null = null;
 
+  // TEMPORAL DEBUG: remover en la versión final junto con el campo onProgress.
+  private emitProgress(message: string): void {
+    try {
+      this.onProgress?.(message);
+    } catch {
+      // Nunca romper la carga por el gancho de debug.
+    }
+  }
   constructor(invokeFn?: InvokeFn | null) {
     this.invokeFn = invokeFn ?? null;
   }
@@ -200,9 +212,8 @@ export class RunwayProximityService {
     this.arriveIcao = norm(opts.arriveIcao);
     this.planRwy = norm(opts.planRwy);
     this.mismatchLogged.clear();
-    for (const icao of [this.departIcao, this.arriveIcao]) {
-      if (icao) void this.ensureLoaded(icao);
-    }
+    const codes = [this.departIcao, this.arriveIcao].filter((c): c is string => c !== null);
+    if (codes.length > 0) void this.ensureMany(codes);
   }
 
   /** Geometría cargada para el ICAO (vacío = aún no / sin datos). */
@@ -246,76 +257,103 @@ export class RunwayProximityService {
     };
   }
 
-  private async ensureLoaded(icao: string): Promise<void> {
-    const code = icao.toUpperCase();
-    if (this.geo.has(code)) return;
-    const ongoing = this.loading.get(code);
+  private async ensureMany(icaos: string[]): Promise<void> {
+    const codes = Array.from(new Set(icaos.map((c) => c.toUpperCase()).filter((c) => c !== "")));
+    const missing = codes.filter((c) => !this.geo.has(c));
+    if (missing.length === 0) return;
+    const key = [...missing].sort().join(",");
+    const ongoing = this.loading.get(key);
     if (ongoing) {
       await ongoing;
       return;
     }
-    const job = this.loadOne(code).finally(() => {
-      this.loading.delete(code);
+    const job = this.loadMany(missing).finally(() => {
+      this.loading.delete(key);
     });
-    this.loading.set(code, job);
+    this.loading.set(key, job);
     await job;
   }
 
-  private async loadOne(code: string): Promise<void> {
-    // 1. Intentar comando Rust (con override manual si existe).
+  private async loadMany(codes: string[]): Promise<void> {
+    // TEMPORAL DEBUG: remover en la versión final.
+    const t0 = Date.now();
+    for (const code of codes) this.emitProgress(`RunwayProximity: preparando geometría ${code}…`);
+    // 1. Comando Rust batcheado (con override manual si existe): un solo
+    // escaneo de apt.dat resuelve salida+destino (índice en memoria/disco).
     if (this.invokeFn) {
       try {
-        const res = (await this.invokeFn("get_runways", {
-          icao: code,
+        // TEMPORAL DEBUG: remover en la versión final.
+        this.emitProgress(`RunwayProximity: leyendo apt.dat para ${codes.join("+")} (get_runways_batch)…`);
+        const res = (await this.invokeFn("get_runways_batch", {
+          icaos: codes,
           xplaneRoot: getXPlaneRootOverride(),
-        })) as RustRunwayResponse;
-        if (res && res.found) {
-          const geoms = (Array.isArray(res.runways) ? res.runways : [])
+        })) as RustRunwayResponse[];
+        // TEMPORAL DEBUG: remover en la versión final.
+        this.emitProgress(`RunwayProximity: respuesta recibida, procesando geometría…`);
+        const items = Array.isArray(res) ? res : [];
+        const batchCache = readCache();
+        let touched = false;
+        for (const item of items) {
+          if (!item || item.found !== true) continue;
+          const code = String(item.icao ?? "").toUpperCase();
+          if (code === "") continue;
+          const geoms = (Array.isArray(item.runways) ? item.runways : [])
             .map(toGeometry)
             .filter((g): g is RunwayGeometry => g !== null);
-          const rampList = (Array.isArray(res.ramps) ? res.ramps : [])
+          const rampList = (Array.isArray(item.ramps) ? item.ramps : [])
             .map(toRamp)
             .filter((r): r is RampStart => r !== null);
           if (geoms.length > 0 || rampList.length > 0) {
             this.geo.set(code, geoms);
             this.ramps.set(code, rampList);
-            this.geoSource.set(code, { sourceFile: res.source_file ?? "", sourceMtime: res.source_mtime ?? 0 });
-            const cache = readCache();
-            cache[code] = {
+            this.geoSource.set(code, { sourceFile: item.source_file ?? "", sourceMtime: item.source_mtime ?? 0 });
+            batchCache[code] = {
               runways: geoms,
               ramps: rampList,
-              sourceFile: res.source_file ?? "",
-              sourceMtime: res.source_mtime ?? 0,
+              sourceFile: item.source_file ?? "",
+              sourceMtime: item.source_mtime ?? 0,
               cachedAt: Date.now(),
             };
-            writeCache(cache);
+            touched = true;
+            // TEMPORAL DEBUG: remover en la versión final.
+            this.emitProgress(`RunwayProximity: geometría de ${code} lista (${Date.now() - t0}ms)`);
             fileLogger.log("[RunwayProximity] Geometría cargada", {
               icao: code,
               runways: geoms.length,
               ramps: rampList.length,
-              source: res.source_file ?? "",
+              source: item.source_file ?? "",
             });
-            return;
           }
         }
+        if (touched) writeCache(batchCache);
       } catch (err) {
-        fileLogger.warn("[RunwayProximity] get_runways falló, probando caché", {
-          icao: code,
+        // TEMPORAL DEBUG: remover en la versión final.
+        this.emitProgress(`RunwayProximity: get_runways_batch falló, probando caché…`);
+        fileLogger.warn("[RunwayProximity] get_runways_batch falló, probando caché", {
+          icaos: codes,
           error: err instanceof Error ? err.message : String(err),
         });
       }
     }
     // 2. Caché local (TTL 7d; la mtime guardada permite detectar cambios).
-    const cached = readCache()[code];
-    if (cached && Array.isArray(cached.runways) && (cached.runways.length > 0 || (Array.isArray(cached.ramps) && cached.ramps.length > 0))) {
-      this.geo.set(code, cached.runways);
-      this.ramps.set(code, Array.isArray(cached.ramps) ? cached.ramps : []);
-      this.geoSource.set(code, { sourceFile: cached.sourceFile, sourceMtime: cached.sourceMtime });
-      fileLogger.log("[RunwayProximity] Geometría desde caché", { icao: code, runways: cached.runways.length });
-      return;
+    const localCache = readCache();
+    for (const code of codes) {
+      if (this.geo.has(code)) continue;
+      const cached = localCache[code];
+      if (cached && Array.isArray(cached.runways) && (cached.runways.length > 0 || (Array.isArray(cached.ramps) && cached.ramps.length > 0))) {
+        this.geo.set(code, cached.runways);
+        this.ramps.set(code, Array.isArray(cached.ramps) ? cached.ramps : []);
+        this.geoSource.set(code, { sourceFile: cached.sourceFile, sourceMtime: cached.sourceMtime });
+        // TEMPORAL DEBUG: remover en la versión final.
+        this.emitProgress(`RunwayProximity: geometría de ${code} desde caché (${Date.now() - t0}ms)`);
+        fileLogger.log("[RunwayProximity] Geometría desde caché", { icao: code, runways: cached.runways.length });
+        continue;
+      }
+      // 3. Sin datos: el evaluador usará fallback degradado.
+      // TEMPORAL DEBUG: remover en la versión final.
+      this.emitProgress(`RunwayProximity: sin geometría para ${code} (fallback degradado)`);
+      fileLogger.warn("[RunwayProximity] Sin geometría para ICAO (fallback degradado)", { icao: code });
     }
-    // 3. Sin datos: el evaluador usará fallback degradado.
-    fileLogger.warn("[RunwayProximity] Sin geometría para ICAO (fallback degradado)", { icao: code });
   }
 
   /**
@@ -324,8 +362,8 @@ export class RunwayProximityService {
    * Puro respecto a la muestra (no muta el snapshot).
    */
   evaluateSnap(snap: TelemetrySnapshot): RunwayEvaluation | null {
-    const lat = Number((snap as Record<string, unknown>).latitude);
-    const lon = Number((snap as Record<string, unknown>).longitude);
+    const lat = Number((snap as unknown as Record<string, unknown>).latitude);
+    const lon = Number((snap as unknown as Record<string, unknown>).longitude);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
       return this.track(null, "absent", null, false, null);
     }
@@ -360,8 +398,8 @@ export class RunwayProximityService {
     // Umbral 30 kt: rodaje normal 10-20 kt, salidas rápidas ≤25 kt; rotación
     // GA ≥55 kt, reactores ≥120 kt. Falso positivo posible rodando >30 kt en
     // calle (raro/agresivo): queda logueado y visible como 'fallback'.
-    const gs = Number((snap as Record<string, unknown>).groundspeed);
-    const onGround = (snap as Record<string, unknown>).simOnGround === true;
+    const gs = Number((snap as unknown as Record<string, unknown>).groundspeed);
+    const onGround = (snap as unknown as Record<string, unknown>).simOnGround === true;
     if (onGround && Number.isFinite(gs)) {
       return this.track(gs >= FALLBACK_GROUNDSPEED_KT, "fallback", null, false, null);
     }

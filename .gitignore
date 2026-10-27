@@ -28,3 +28,6 @@ Thumbs.db
 # Local test artifacts
 *.o
 src-tauri/test.cpp
+
+# Ignorar carpetas erróneas de claves
+~/

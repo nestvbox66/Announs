@@ -24,6 +24,15 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+.v2-flight-shell {
+  font-family: Bahnschrift, "Istok Web", sans-serif;
+}
+
+.v2-flight-shell .font-sans,
+.v2-flight-shell .font-display {
+  font-family: Bahnschrift, "Istok Web", sans-serif;
+}
+
 /* Custom scrollbars for a clean tech look */
 ::-webkit-scrollbar {
   width: 6px;

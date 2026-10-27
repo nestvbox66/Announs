@@ -82,10 +82,11 @@ export const voiceService = {
    * También resuelve idiomas via voice_languages + languages.
    */
   async getVoicesWithStatus(userId: string): Promise<VoiceWithStatus[]> {
-    // 1. Catálogo
+    // 1. Catálogo: solo voces públicas (`user_public = true`).
     const { data: stock, error: stockError } = await supabase
       .from("voices_stock")
       .select("id, voice_id, voice_name, voice_gender, voice_type, voice_provider, voice_role, avatar_url, audio_sample_url, user_public, only_gate_agent")
+      .eq("user_public", true)
       .order("voice_name", { ascending: true });
 
     if (stockError) throw new Error(stockError.message);
@@ -102,6 +103,17 @@ export const voiceService = {
     const enabledMap = new Map<string, boolean>();
     for (const row of (userVoices || []) as any[]) {
       enabledMap.set(row.voicestock_id, !!row.voice_enabled);
+    }
+
+    // 2b. Alta inicial: si el usuario no tiene NINGÚN registro en `voices`,
+    // se habilitan todas las voces públicas (equivale a activarlas a mano
+    // y guardar). A partir de ahí el usuario puede apagar las que quiera.
+    // Nunca lanza: ante un fallo se sigue con lo que haya en la tabla.
+    if ((userVoices || []).length === 0 && stockRows.length > 0) {
+      const seed = await ensureDefaultVoiceSettings(userId, stockRows.map((s) => s.id));
+      if (seed.ok) {
+        for (const s of stockRows) enabledMap.set(s.id, true);
+      }
     }
 
     // 3. Idiomas: voice_languages
@@ -184,6 +196,87 @@ export const voiceService = {
     if (error) throw new Error(error.message);
   },
 };
+
+/**
+ * Alta inicial de preferencias: si el usuario no tiene NINGÚN registro en
+ * `voices`, habilita todas las `stockIds` (voces públicas). Devuelve `true`
+ * si sembró (o ya había registros), `false` si no pudo. Nunca lanza: los
+ * llamadores directos a la tabla (`ConfigView`, pre-vuelo, vistas de vuelo)
+ * la usan para que un usuario nuevo vea todo habilitado desde la primera
+ * carga, igual que `getVoicesWithStatus`.
+ */
+export interface SeedResult {
+  /** true si sembró filas o el usuario ya tenía registros. */
+  ok: boolean;
+  /** Mensaje real del fallo (RLS, red, columnas) o null si no hubo intento fallido. */
+  error: string | null;
+}
+
+/** Último error de siembra (para mostrarlo en la UI, donde la consola no se ve). */
+let lastSeedError: string | null = null;
+
+export function getLastSeedError(): string | null {
+  return lastSeedError;
+}
+
+export async function ensureDefaultVoiceSettings(
+  userId: string,
+  stockIds: string[],
+): Promise<SeedResult> {
+  lastSeedError = null;
+  try {
+    const { data: existing, error: countError } = await supabase
+      .from("voices")
+      .select("voicestock_id")
+      .eq("user_id", userId)
+      .limit(1);
+    if (countError) throw countError;
+    if (existing && existing.length > 0) return { ok: true, error: null };
+    if (stockIds.length === 0) return { ok: false, error: null };
+    await voiceService.saveVoiceSettings(
+      userId,
+      stockIds.map((id) => ({ voicestock_id: id, voice_enabled: true })),
+    );
+    return { ok: true, error: null };
+  } catch (e) {
+    // Sin permiso de escritura, RLS o fallo de red: se guarda el mensaje real
+    // para que la pantalla lo muestre (en desktop no hay consola visible).
+    const message = (e as Error)?.message ?? String(e);
+    lastSeedError = message;
+    console.warn("[voices] auto-enable inicial falló:", message);
+    return { ok: false, error: message };
+  }
+}
+
+/**
+ * Ids de `voices_stock` habilitados por el usuario (`voices.voice_enabled`).
+ * Si el usuario no tiene NINGÚN registro, siembra todas las voces públicas
+ * (alta inicial) y devuelve esos ids. Respeta el apagado manual: un usuario
+ * con registros pero todo deshabilitado recibe `[]`. Lanza ante errores de
+ * lectura para que el llamador muestre su estado de error habitual.
+ */
+export async function getEnabledStockIds(userId: string): Promise<string[]> {
+  const { data, error } = await supabase
+    .from("voices")
+    .select("voicestock_id, voice_enabled")
+    .eq("user_id", userId);
+  if (error) throw new Error(error.message);
+  const rows = (data || []) as any[];
+  if (rows.length > 0) {
+    return rows.filter((r) => r.voice_enabled).map((r) => r.voicestock_id);
+  }
+  const { data: publicStock, error: stockError } = await supabase
+    .from("voices_stock")
+    .select("id")
+    .eq("user_public", true);
+  if (stockError) throw new Error(stockError.message);
+  const publicIds = ((publicStock || []) as any[]).map((v) => v.id);
+  const seed = await ensureDefaultVoiceSettings(userId, publicIds);
+  if (seed.ok) {
+    return publicIds;
+  }
+  return [];
+}
 
 // Named exports para compatibilidad con spec del task
 export async function getVoicesWithStatus(userId: string): Promise<VoiceWithStatus[]> {

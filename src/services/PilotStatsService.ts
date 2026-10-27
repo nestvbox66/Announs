@@ -8,6 +8,7 @@
 import { supabase } from "../lib/supabase";
 import { ServiceResult, ok, fail } from "./ServiceResult";
 import { todayKeyLocal, normalizeDistribution, normalizeTopRoutes } from "./pilotStatsFormat";
+import { FLIGHT_SIMULATORS, type SimulatorShare } from "../utils/flightSimulator";
 
 export interface CareerStats {
   totalFlights: number;
@@ -126,6 +127,41 @@ export class PilotStatsService {
    * 'ended'`), cruzando `depart_icao`/`arrive_icao` con `airports.iso_country`.
    * Por país: operaciones, aeropuertos distintos y fecha del último vuelo.
    */
+  /**
+   * Distribución por simulador sobre vuelos finalizados (`flight_status =
+   * 'ended'): conteos exactos MSFS2024 vs XPLANE12 para la torta del HUB.
+   * Si la columna aún no existe (migración sin aplicar), degrada a ceros
+   * en vez de romper el panel.
+   */
+  static async loadSimulatorDistribution(): Promise<ServiceResult<SimulatorShare[]>> {
+    try {
+      const { data: { user }, error: authErr } = await supabase.auth.getUser();
+      if (authErr || !user) {
+        return fail("Sesión no válida: iniciá sesión para ver tus estadísticas.");
+      }
+
+      const shares: SimulatorShare[] = [];
+      for (const simulator of FLIGHT_SIMULATORS) {
+        const { count, error } = await supabase
+          .from("flights")
+          .select("id", { count: "exact", head: true })
+          .eq("user_id", user.id)
+          .eq("flight_status", "ended")
+          .eq("simulator", simulator);
+        if (error) {
+          if (/simulator/i.test(error.message)) {
+            return ok(FLIGHT_SIMULATORS.map((s) => ({ simulator: s, flights: 0 })));
+          }
+          return fail(error.message);
+        }
+        shares.push({ simulator, flights: count ?? 0 });
+      }
+      return ok(shares);
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   static async loadAtlas(): Promise<ServiceResult<PilotAtlas>> {
     try {
       const { data: { user }, error: authErr } = await supabase.auth.getUser();

@@ -34,11 +34,14 @@
 //! Parseo en streaming (el apt.dat global es grande): se lee línea por línea
 //! y solo se conservan las pistas del ICAO pedido.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
+use tauri::Manager;
 
 // ── Tipos de respuesta ────────────────────────────────────────────────
 
@@ -597,6 +600,343 @@ pub fn get_runways(icao: String, xplane_root: Option<String>) -> Result<RunwayAi
     ))
 }
 
+// ── Índice de aeropuertos (una pasada → seeks directos) ───────────────
+// El apt.dat de Global Airports pesa GBs: escanearlo entero por ICAO
+// (~60s por llamada, peor en paralelo) congelaba la UI por saturación de
+// CPU/disco. El índice mapea ICAO → offset de su cabecera; se conserva en
+// memoria del proceso y en un sidecar en disco (app_data/announs/apt_index)
+// keyed por (ruta, tamaño, mtime). Con índice válido, cada lookup es un seek
+// + parseo de una sola sección (milisegundos).
+
+/// Entrada pendiente mientras se construye el índice de un archivo.
+struct PendingHeader {
+    ident: String,
+    offset: u64,
+    code_1302: Option<String>,
+}
+
+/// Índice ICAO → offset de cabecera para un apt.dat concreto.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AptFileIndex {
+    path: String,
+    size: u64,
+    mtime: u64,
+    entries: HashMap<String, u64>,
+}
+
+static MEM_INDEX: OnceLock<Mutex<HashMap<String, AptFileIndex>>> = OnceLock::new();
+
+fn mem_index() -> &'static Mutex<HashMap<String, AptFileIndex>> {
+    MEM_INDEX.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn file_size(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+fn index_cache_key(path: &Path) -> String {
+    path.display().to_string()
+}
+
+/// Nombre de sidecar estable para un apt.dat (sanitizado + hash).
+fn sidecar_path(dir: &Path, apt_path: &Path) -> PathBuf {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let s = apt_path.display().to_string();
+    let mut h = DefaultHasher::new();
+    s.hash(&mut h);
+    let hash = format!("{:016x}", h.finish());
+    let stem: String = s
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .take(80)
+        .collect();
+    dir.join(format!("{}_{}.json", stem, hash))
+}
+
+fn index_fingerprint_ok(idx: &AptFileIndex, path: &Path) -> bool {
+    idx.path == path.display().to_string()
+        && idx.size == file_size(path)
+        && idx.mtime == file_mtime_secs(path)
+}
+
+/// Construye el índice con una única pasada del archivo.
+fn build_file_index(path: &Path) -> Result<AptFileIndex, String> {
+    let file = File::open(path).map_err(|e| format!("abrir {}: {}", path.display(), e))?;
+    let size = file_size(path);
+    let mtime = file_mtime_secs(path);
+    let mut reader = BufReader::new(file);
+    let mut entries: HashMap<String, u64> = HashMap::new();
+    let mut pending: Option<PendingHeader> = None;
+    let mut flush = |pending: &mut Option<PendingHeader>, entries: &mut HashMap<String, u64>| {
+        if let Some(p) = pending.take() {
+            if let Some(code) = p.code_1302 {
+                entries.entry(code).or_insert(p.offset);
+            } else if !p.ident.is_empty() {
+                entries.entry(p.ident).or_insert(p.offset);
+            }
+        }
+    };
+    let mut pos: u64 = 0;
+    let mut buf: Vec<u8> = Vec::with_capacity(1024);
+    loop {
+        buf.clear();
+        let n = reader
+            .read_until(b'\n', &mut buf)
+            .map_err(|e| format!("leer {}: {}", path.display(), e))?;
+        if n == 0 {
+            break;
+        }
+        let line_start = pos;
+        pos += n as u64;
+        let line = String::from_utf8_lossy(&buf);
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let mut tokens = t.split_whitespace();
+        let head = match tokens.next() {
+            Some(h) => h,
+            None => continue,
+        };
+        match head {
+            "1" | "16" | "17" => {
+                flush(&mut pending, &mut entries);
+                let ident = t
+                    .split_whitespace()
+                    .nth(4)
+                    .map(|s| s.to_uppercase())
+                    .unwrap_or_default();
+                pending = Some(PendingHeader { ident, offset: line_start, code_1302: None });
+            }
+            "1302" => {
+                let mut toks = t.split_whitespace();
+                toks.next();
+                if toks.next() == Some("icao_code") {
+                    if let Some(code) = toks.next() {
+                        if let Some(p) = pending.as_mut() {
+                            p.code_1302 = Some(code.to_uppercase());
+                        }
+                    }
+                }
+            }
+            "99" => {
+                flush(&mut pending, &mut entries);
+                break;
+            }
+            _ => {}
+        }
+    }
+    flush(&mut pending, &mut entries);
+    Ok(AptFileIndex { path: path.display().to_string(), size, mtime, entries })
+}
+
+/// Parsea solo la sección que arranca en `offset` (hasta la próxima
+/// cabecera o `99`). Reutiliza los parsers de filas 100/1300.
+fn parse_section(path: &Path, offset: u64) -> Result<(Vec<RunwayData>, Vec<RampData>), String> {
+    let file = File::open(path).map_err(|e| format!("abrir {}: {}", path.display(), e))?;
+    let mut reader = BufReader::new(file);
+    reader
+        .seek(SeekFrom::Start(offset))
+        .map_err(|e| format!("seek {}: {}", path.display(), e))?;
+    let mut runways = Vec::new();
+    let mut ramps = Vec::new();
+    let mut first = true;
+    for line in reader.lines() {
+        let line = line.map_err(|e| format!("leer {}: {}", path.display(), e))?;
+        if first {
+            first = false;
+            continue; // saltear la cabecera propia
+        }
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let tokens: Vec<&str> = t.split_whitespace().collect();
+        if tokens.is_empty() {
+            continue;
+        }
+        match tokens[0] {
+            "1" | "16" | "17" | "99" => break,
+            "100" => {
+                if let Some((width_m, surface, ends)) = parse_runway_row(&tokens) {
+                    runways.push(RunwayData { width_m, surface, ends });
+                }
+            }
+            "1300" => {
+                if let Some(ramp) = parse_ramp_row(&tokens) {
+                    ramps.push(ramp);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok((runways, ramps))
+}
+
+/// Resuelve el índice de un apt.dat: memoria → sidecar → construir+guardar.
+/// Si el archivo no se puede indexar, devuelve Err y el llamador aplica el
+/// escaneo legacy como fallback.
+fn resolve_file_index(path: &Path, cache_dir: Option<&Path>) -> Result<AptFileIndex, String> {
+    let key = index_cache_key(path);
+    if let Ok(guard) = mem_index().lock() {
+        if let Some(idx) = guard.get(&key) {
+            if index_fingerprint_ok(idx, path) {
+                return Ok(idx.clone());
+            }
+        }
+    }
+    if let Some(dir) = cache_dir {
+        let sidecar = sidecar_path(dir, path);
+        if let Ok(raw) = std::fs::read_to_string(&sidecar) {
+            if let Ok(idx) = serde_json::from_str::<AptFileIndex>(&raw) {
+                if index_fingerprint_ok(&idx, path) {
+                    if let Ok(mut guard) = mem_index().lock() {
+                        guard.insert(key.clone(), idx.clone());
+                    }
+                    return Ok(idx);
+                }
+            }
+        }
+    }
+    let idx = build_file_index(path)?;
+    if let Ok(mut guard) = mem_index().lock() {
+        guard.insert(key, idx.clone());
+    }
+    if let Some(dir) = cache_dir {
+        let _ = std::fs::create_dir_all(dir);
+        if let Ok(raw) = serde_json::to_string(&idx) {
+            let _ = std::fs::write(sidecar_path(dir, path), raw);
+        }
+    }
+    Ok(idx)
+}
+
+/// Escanea N ICAO con una sola pasada por archivo (en orden de prioridad).
+/// Por cada ICAO gana el primer archivo (en prioridad) con datos, igual que
+/// `get_runways` individual. Los no encontrados vuelven con `found: false`.
+fn batch_lookup(
+    targets: &[String],
+    roots: &[PathBuf],
+    cache_dir: Option<&Path>,
+) -> Vec<RunwayAirportData> {
+    let mut pending: HashSet<String> = targets.iter().cloned().collect();
+    let mut hits: HashMap<String, RunwayAirportData> = HashMap::new();
+    for root in roots {
+        if pending.is_empty() {
+            break;
+        }
+        for apt in apt_dat_candidates(root) {
+            if pending.is_empty() {
+                break;
+            }
+            match resolve_file_index(&apt, cache_dir) {
+                Ok(idx) => {
+                    let mut done_here: Vec<String> = Vec::new();
+                    for code in &pending {
+                        if let Some(offset) = idx.entries.get(code) {
+                            match parse_section(&apt, *offset) {
+                                Ok((runways, ramps)) if !runways.is_empty() || !ramps.is_empty() => {
+                                    hits.insert(
+                                        code.clone(),
+                                        RunwayAirportData {
+                                            icao: code.clone(),
+                                            runways,
+                                            ramps,
+                                            source_file: apt.display().to_string(),
+                                            source_mtime: file_mtime_secs(&apt),
+                                            found: true,
+                                        },
+                                    );
+                                    done_here.push(code.clone());
+                                }
+                                // Sección vacía: como el legacy, se sigue al
+                                // siguiente archivo candidato.
+                                _ => {}
+                            }
+                        }
+                    }
+                    for code in done_here {
+                        pending.remove(&code);
+                    }
+                }
+                Err(_) => {
+                    // Fallback legacy por ICAO si el archivo no se pudo indexar.
+                    let mut done_here: Vec<String> = Vec::new();
+                    for code in &pending {
+                        match parse_airport_ground(&apt, code) {
+                            Ok((runways, ramps)) if !runways.is_empty() || !ramps.is_empty() => {
+                                hits.insert(
+                                    code.clone(),
+                                    RunwayAirportData {
+                                        icao: code.clone(),
+                                        runways,
+                                        ramps,
+                                        source_file: apt.display().to_string(),
+                                        source_mtime: file_mtime_secs(&apt),
+                                        found: true,
+                                    },
+                                );
+                                done_here.push(code.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                    for code in done_here {
+                        pending.remove(&code);
+                    }
+                }
+            }
+        }
+    }
+    targets
+        .iter()
+        .map(|code| {
+            hits.remove(code).unwrap_or(RunwayAirportData {
+                icao: code.clone(),
+                runways: Vec::new(),
+                ramps: Vec::new(),
+                source_file: String::new(),
+                source_mtime: 0,
+                found: false,
+            })
+        })
+        .collect()
+}
+
+// ── Comando Tauri ─────────────────────────────────────────────────────
+
+/// Geometría de varios ICAO con un solo escaneo por archivo.
+/// `icaos`: lista (se normaliza a mayúsculas, sin duplicados ni vacíos).
+#[tauri::command]
+pub fn get_runways_batch(
+    app: tauri::AppHandle,
+    icaos: Vec<String>,
+    xplane_root: Option<String>,
+) -> Result<Vec<RunwayAirportData>, String> {
+    let mut seen = HashSet::new();
+    let mut targets: Vec<String> = Vec::new();
+    for raw in icaos {
+        let code = raw.trim().to_uppercase();
+        if !code.is_empty() && seen.insert(code.clone()) {
+            targets.push(code);
+        }
+    }
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let roots = candidate_roots(xplane_root);
+    if roots.is_empty() {
+        return Err("no se localizó instalación de X-Plane (override manual o x-plane_install_12.txt)".into());
+    }
+    let cache_dir = app
+        .path()
+        .app_data_dir()
+        .map(|d| d.join("announs").join("apt_index"))
+        .ok();
+    Ok(batch_lookup(&targets, &roots, cache_dir.as_deref()))
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -963,6 +1303,55 @@ mod tests {
         .expect("GTWY debe resolverse");
         assert!(res.source_file.contains("Global Airports"), "{}", res.source_file);
         assert!((res.runways[0].width_m - 45.0).abs() < 1e-9, "ancho del gateway, no del global");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Fixture batch: un apt.dat con dos aeropuertos (uno con ident de
+    /// cabecera distinto al 1302, como ocurre en datos reales) más .ini.
+    fn batch_fixture(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("announs_runway_batch_{}", tag));
+        let _ = std::fs::remove_dir_all(&base);
+        write_apt(
+            &base.join("Custom Scenery").join("Global Airports").join("Earth nav data").join("apt.dat"),
+            "1  10 0 0 HDR1 First Field\n100 40.00 1 0 0.25 0 0 0 09 1.00000000 2.00000000 0.00 0.00 0 0 0 0 27 1.01000000 2.00000000 0.00 0.00 0 0 0 0\n1302 icao_code AAAA\n1  10 0 0 BBBB Second Field\n100 50.00 1 0 0.25 0 0 0 09 3.00000000 4.00000000 0.00 0.00 0 0 0 0 27 3.01000000 4.00000000 0.00 0.00 0 0 0 0\n99\n",
+        );
+        std::fs::write(
+            base.join("Custom Scenery").join("scenery_packs.ini"),
+            "SCENERY_PACK Custom Scenery/Global Airports/\n",
+        )
+        .unwrap();
+        base
+    }
+
+    #[test]
+    fn batch_resolves_two_icaos_with_one_pass() {
+        let base = batch_fixture("onepass");
+        let idx_dir = base.join("idx_sidecar");
+        let targets = vec!["AAAA".to_string(), "BBBB".to_string(), "ZZZZ".to_string()];
+        let out = batch_lookup(&targets, &[base.clone()], Some(&idx_dir));
+        assert_eq!(out.len(), 3);
+        // Orden preservado y 1302 manda sobre el ident de cabecera.
+        assert!(out[0].found && (out[0].runways[0].width_m - 40.0).abs() < 1e-9);
+        assert_eq!(out[0].icao, "AAAA");
+        assert!(out[1].found && (out[1].runways[0].width_m - 50.0).abs() < 1e-9);
+        assert!(!out[2].found && out[2].runways.is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn index_sidecar_survives_memory_drop() {
+        let base = batch_fixture("sidecar");
+        let idx_dir = base.join("idx_sidecar");
+        let apt = base.join("Custom Scenery").join("Global Airports").join("Earth nav data").join("apt.dat");
+        let first = resolve_file_index(&apt, Some(&idx_dir)).expect("construye índice");
+        assert!(first.entries.contains_key("AAAA") && first.entries.contains_key("BBBB"));
+        // Simula reinicio del proceso: sin memoria, el sidecar debe resolver.
+        mem_index().lock().unwrap().clear();
+        let second = resolve_file_index(&apt, Some(&idx_dir)).expect("lee sidecar");
+        assert_eq!(second.entries, first.entries);
+        // Y el batch sigue resolviendo desde el sidecar.
+        let out = batch_lookup(&["BBBB".to_string()], &[base.clone()], Some(&idx_dir));
+        assert!(out[0].found && (out[0].runways[0].width_m - 50.0).abs() < 1e-9);
         let _ = std::fs::remove_dir_all(&base);
     }
 }

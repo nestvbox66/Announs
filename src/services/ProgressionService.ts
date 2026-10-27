@@ -8,6 +8,7 @@
 import { supabase } from "../lib/supabase";
 import { ServiceResult, ok, fail } from "./ServiceResult";
 import { BONUS_LABELS } from "./XpBonusExplanations";
+import { localizeRows } from "./translationService";
 
 export interface XpBonus {
   /** Clave de columna en `flight_xp_breakdown` (para explicaciones). */
@@ -308,7 +309,7 @@ export class ProgressionService {
           .maybeSingle(),
         supabase
           .from("ranks_definition")
-          .select("rank_title,xp_required")
+          .select("id, rank_title,xp_required")
           .order("xp_required", { ascending: true }),
       ]);
       if (progRes.error) return fail(progRes.error.message);
@@ -324,7 +325,7 @@ export class ProgressionService {
         ? prog.current_level
         : Number(prog.current_level) || null;
 
-      const ladder = ((ladderRes.data ?? []) as Array<{ rank_title?: unknown; xp_required?: unknown }>)
+      const ladder = (await localizeRows("ranks_definition", ((ladderRes.data ?? []) as Array<Record<string, unknown>>), { fields: ["rank_title"] }))
         .map((row) => ({
           title: String(row.rank_title ?? "").trim(),
           xp: Number(row.xp_required) || 0,

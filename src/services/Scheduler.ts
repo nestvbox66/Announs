@@ -94,6 +94,11 @@ export class Scheduler {
   private currentPhase: string | null = null;
   private doorsClosed = false;
   private boardingStepsCompleted = false;
+  // Embarque REAL de pasajeros (boardedCount >= manifiesto), sincronizado
+  // por la vista. Por defecto true (fail-open) para los flujos que no lo
+  // sincronizan. Sin esto, con puertas siempre cerradas en X-Plane el
+  // cierre avanzaba a PRE_FLIGHT con pasajeros aun embarcando.
+  private passengersBoardingCompleted = true;
   private flightStartPreferences: FlightStartPreferences | null = null;
   private forceScenarioRefresh = false;
   private phaseAutoAdvanceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -921,6 +926,14 @@ export class Scheduler {
     // Cierre real: recién acá, limpieza total de timers y transición.
     try { this.narrativeOrchestrator.cancelPendingTimers(); } catch {}
 
+    // Puerta real de embarque: sin pasajeros a bordo no hay PRE_FLIGHT
+    // aunque la narrativa haya terminado (X-Plane reporta puertas
+    // cerradas siempre). La vista sincroniza el flag cada tick.
+    if (!this.passengersBoardingCompleted) {
+      console.warn("[Scheduler] Cierre de puertas bloqueado: embarque de pasajeros incompleto");
+      return;
+    }
+
     this.doorsClosed = true;
     logger.narrative("[Scheduler] Cierre de puertas (manual) -> PRE_FLIGHT");
     this.musicController.stopMusic();
@@ -967,11 +980,24 @@ export class Scheduler {
     // Cierre real: recién acá, limpieza total de timers y transición.
     try { this.narrativeOrchestrator.cancelPendingTimers(); } catch {}
 
+    // Puerta real de embarque: sin pasajeros a bordo no hay PRE_FLIGHT
+    // aunque la narrativa haya terminado (X-Plane reporta puertas
+    // cerradas siempre). La vista sincroniza el flag cada tick.
+    if (!this.passengersBoardingCompleted) {
+      console.warn("[Scheduler] Cierre de puertas bloqueado: embarque de pasajeros incompleto");
+      return;
+    }
+
     this.doorsClosed = true;
     logger.narrative("[Scheduler] Cierre de puertas detectado desde el simulador -> PRE_FLIGHT");
     fileLogger.log('[Scheduler] Cierre de puertas (simulador) -> PRE_FLIGHT', { boardingStepsCompleted: this.boardingStepsCompleted });
     this.musicController.stopMusic();
     void this.enterPhase(FlightPhase.PRE_FLIGHT, 'doors');
+  }
+
+  /** La vista informa si el embarque real de pasajeros esta completo. */
+  setPassengersBoardingCompleted(done: boolean): void {
+    this.passengersBoardingCompleted = done;
   }
 
   isBoardingStepsCompleted(): boolean {

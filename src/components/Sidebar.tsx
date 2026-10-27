@@ -7,10 +7,11 @@ import React from "react";
 import { useTranslation } from "react-i18next";
 // @ts-ignore
 import logoImg from "./Announs Logo.png";
-import { 
-  User, 
-  Settings, 
-  Plane, 
+import {
+  User,
+  Settings,
+  Plane,
+  FlaskConical,
   Terminal,
   ChevronsLeft,
   ChevronsRight,
@@ -43,10 +44,13 @@ export default function Sidebar({
   onToggleCollapsed,
 }: SidebarProps) {
   const { t } = useTranslation();
-  const menuItems = isLoggedIn 
+  const menuItems = isLoggedIn
     ? [
         { id: "hub", label: t("sidebar.hub"), icon: User },
         { id: "vuelo", label: t("sidebar.vuelo"), icon: Plane },
+        // TEMPORAL sandbox rediseño FLY (/fly-v2). Misma protección que `vuelo`:
+        // solo visible con sesión. Eliminar al promover o descartar el rediseño.
+        { id: "vuelo-v2", label: "FLY V2 • Sandbox", icon: FlaskConical },
         { id: "config", label: t("sidebar.config"), icon: Settings },
       ]
     : [
