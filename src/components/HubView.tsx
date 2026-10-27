@@ -3,9 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { supabase } from "../lib/supabase";
+import DesktopAuthCard from "./DesktopAuthCard";
 import { 
   Award, 
   Clock, 
@@ -23,12 +24,7 @@ import {
   Users,
   Calendar,
   Map,
-  Lock,
-  LogIn,
-  Mail,
-  Eye,
-  EyeOff,
-  Trophy
+  Trophy,
 } from "lucide-react";
 import { VueloReciente, Logro } from "../types";
 import { ProgressionService, LevelProgress } from "../services/ProgressionService";
@@ -40,8 +36,9 @@ import FlightDetailView from "./flight/FlightDetailView";
 import { FlightHistoryService, FlightHistoryEntry, FLIGHT_HISTORY_PAGE_SIZE } from "../services/FlightHistoryService";
 import { resolveAvatarDisplayUrl } from "../services/avatarUrl";
 import { PilotStatsService, PilotStats } from "../services/PilotStatsService";
+import type { SimulatorShare } from "../utils/flightSimulator";
 import { formatMinutes, formatNm, formatHours } from "../services/pilotStatsFormat";
-import { ResponsiveContainer, Treemap, Tooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid, Cell } from "recharts";
+import { ResponsiveContainer, Treemap, Tooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid, Cell, PieChart, Pie } from "recharts";
 
 /** Celda del treemap de flota (colores de la paleta, texto adaptativo). */
 function FleetTreemapCell(props: any) {
@@ -108,6 +105,34 @@ function FleetTreemapTip({ active, payload }: any) {
   );
 }
 
+/** Tooltip de la torta por simulador: etiqueta, vuelos y participación. */
+function SimPieTip({ active, payload }: any) {
+  const { t } = useTranslation();
+  if (!active || !payload || payload.length === 0) return null;
+  const node = payload[0]?.payload ?? {};
+  return (
+    <div
+      style={{
+        backgroundColor: "#00172e",
+        border: "1px solid rgba(69,175,255,0.4)",
+        borderRadius: 5,
+        padding: "8px 10px",
+        fontSize: 11,
+        fontFamily: "monospace",
+        color: "#fff",
+      }}
+    >
+      <div style={{ fontWeight: "bold", color: "#45AFFF", marginBottom: 4 }}>{node.label ?? "—"}</div>
+      <div>
+        {t("hub.stats.monthly_flights_label")}: <strong>{node.flights ?? 0}</strong>
+      </div>
+      <div>
+        {t("hub.stats.treemap_share")}: <strong>{Number(node.sharePct ?? 0).toFixed(1)}%</strong>
+      </div>
+    </div>
+  );
+}
+
 interface HubViewProps {
   vuelos: VueloReciente[];
   logros: Logro[];
@@ -115,6 +140,8 @@ interface HubViewProps {
   isLoggedIn?: boolean;
   onLogin?: () => void;
   onLogout?: () => void;
+  /** Pestaña inicial al entrar (p. ej. "account" desde el aviso de Pilot ID). */
+  initialSubView?: "overview" | "stats" | "passport" | "campaigns" | "account";
   /** Vuelo recién finalizado a abrir directamente en su detalle (una sola vez). */
   pendingDetailFlight?: VueloReciente | null;
   onDetailFlightConsumed?: () => void;
@@ -128,10 +155,16 @@ export default function HubView({
   onLogin,
   onLogout,
   pendingDetailFlight = null,
+  initialSubView = "overview",
   onDetailFlightConsumed
 }: HubViewProps) {
   const { t, i18n } = useTranslation();
-  const [subView, setSubView] = useState<"overview" | "stats" | "passport" | "campaigns" | "account">("overview");
+  const [subView, setSubView] = useState<"overview" | "stats" | "passport" | "campaigns" | "account">(initialSubView);
+  // Entradas dirigidas (p. ej. userhub/account desde Fly): aplican la pestaña
+  // pedida aunque el Hub siga montado.
+  useEffect(() => {
+    setSubView(initialSubView);
+  }, [initialSubView]);
   const [selectedFlight, setSelectedFlight] = useState<VueloReciente | null>(null);
   // Apertura directa del detalle del vuelo recién finalizado (botón
   // "Finalizar" en AT_GATE). Se consume una sola vez para no reabrirse al
@@ -159,11 +192,7 @@ export default function HubView({
   const [statsLoading, setStatsLoading] = useState(false);
   const [statsError, setStatsError] = useState<string | null>(null);
   const [statsReloadKey, setStatsReloadKey] = useState(0);
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [authError, setAuthError] = useState<string | null>(null);
+
   const [userProfile, setUserProfile] = useState<{ username: string; avatar: string; createdAt: string } | null>(null);
   // El avatar falla al cargar (URL pública no accesible/permiso): se intenta
   // una URL firmada y, si tampoco, se cae al icono genérico.
@@ -303,11 +332,14 @@ export default function HubView({
   // Análisis estadístico: datos reales vía RPC del usuario autenticado.
   // Progreso de nivel para la cabecera (XP total, nivel y barra al siguiente).
   const [levelProgress, setLevelProgress] = useState<LevelProgress | null>(null);
+  // Distribución por simulador (torta MSFS2024 vs XPLANE12, vuelos finalizados).
+  const [simShares, setSimShares] = useState<SimulatorShare[] | null>(null);
 
   useEffect(() => {
     if (!isLoggedIn) {
       setPilotStats(null);
       setLevelProgress(null);
+      setSimShares(null);
       setStatsError(null);
       setStatsLoading(false);
       return;
@@ -316,18 +348,21 @@ export default function HubView({
     const loadStats = async () => {
       setStatsLoading(true);
       setStatsError(null);
-      const [result, levelResult] = await Promise.all([
+      const [result, levelResult, simResult] = await Promise.all([
         PilotStatsService.loadPilotStats(),
         ProgressionService.loadLevelProgress(),
+        PilotStatsService.loadSimulatorDistribution(),
       ]);
       if (cancelled) return;
       if (result.success) {
         setPilotStats(result.data ?? null);
       } else {
         setStatsError(result.error ?? "No se pudieron cargar las estadísticas.");
+        setSimShares(null);
         setPilotStats(null);
       }
       setLevelProgress(levelResult.success ? levelResult.data ?? null : null);
+      setSimShares(simResult.success ? simResult.data ?? null : null);
       setStatsLoading(false);
     };
     void loadStats();
@@ -461,160 +496,7 @@ export default function HubView({
   };
 
   if (!isLoggedIn) {
-    const handleLocalLogin = async (e: React.FormEvent) => {
-      e.preventDefault();
-      setAuthError(null);
-      setLoading(true);
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
-      setLoading(false);
-      if (error) {
-        setAuthError(error.message);
-        return;
-      }
-      if (onLogin) onLogin();
-    };
-
-    return (
-      <div id="disconnected-hub-container" className="max-w-md mx-auto my-12 animate-fadeIn">
-        <div className="bg-[#2C6591]/20 border border-white/20 rounded-[5px] p-8 shadow-2xl space-y-6 relative overflow-hidden">
-          {/* Decorative neon corner accent */}
-          <div className="absolute top-0 right-0 w-24 h-24 bg-[#45AFFF]/5 rounded-bl-full pointer-events-none"></div>
-          
-          <div className="text-center space-y-2">
-            <div className="w-16 h-16 rounded-full bg-[#001b33]/60 border border-[#3B7EB2]/40 flex items-center justify-center mx-auto shadow-inner">
-              <Lock className="w-7 h-7 text-[#45AFFF] animate-pulse" />
-            </div>
-            <h2 className="font-display font-black text-lg tracking-wider text-[#45AFFF] uppercase mt-2">
-              {t("login.title")}
-            </h2>
-            <p className="text-[11px] text-white/60 font-mono max-w-xs mx-auto">
-              {t("login.description")}
-            </p>
-          </div>
-
-          <form onSubmit={handleLocalLogin} className="space-y-4">
-            {/* Campo correo */}
-            <div className="space-y-1.5">
-              <label className="text-[10px] text-white/70 font-mono font-bold uppercase tracking-wider block">
-                {t("login.email_label")}
-              </label>
-              <div className="relative">
-                <span className="absolute inset-y-0 left-0 flex items-center pl-3">
-                  <Mail className="w-3.5 h-3.5 text-[#45AFFF]/60" />
-                </span>
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  required
-                  className="w-full bg-[#00172e] text-white font-mono text-xs pl-9 pr-3 py-2.5 rounded border border-[#3B7EB2]/40 focus:outline-none focus:border-[#45AFFF] transition-all"
-                  placeholder={t("login.email_placeholder")}
-                />
-              </div>
-            </div>
-
-            {/* Campo contraseña */}
-            <div className="space-y-1.5">
-              <label className="text-[10px] text-white/70 font-mono font-bold uppercase tracking-wider block">
-                {t("login.password_label")}
-              </label>
-              <div className="relative">
-                <span className="absolute inset-y-0 left-0 flex items-center pl-3">
-                  <Lock className="w-3.5 h-3.5 text-[#45AFFF]/60" />
-                </span>
-                <input
-                  type={showPassword ? "text" : "password"}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                  className="w-full bg-[#00172e] text-white font-mono text-xs pl-9 pr-9 py-2.5 rounded border border-[#3B7EB2]/40 focus:outline-none focus:border-[#45AFFF] transition-all"
-                  placeholder={t("login.password_placeholder")}
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute inset-y-0 right-0 flex items-center pr-3 cursor-pointer"
-                  tabIndex={-1}
-                >
-                  {showPassword ? (
-                    <EyeOff className="w-3.5 h-3.5 text-[#45AFFF]/60 hover:text-[#45AFFF] transition-colors" />
-                  ) : (
-                    <Eye className="w-3.5 h-3.5 text-[#45AFFF]/60 hover:text-[#45AFFF] transition-colors" />
-                  )}
-                </button>
-              </div>
-            </div>
-
-            {/* Ingresar button */}
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-[#45AFFF] hover:bg-[#45AFFF]/85 active:scale-[0.98] text-[#00345C] border border-[#45AFFF]/30 py-3 rounded font-mono font-extrabold text-xs transition-all uppercase tracking-widest cursor-pointer shadow-md flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {loading ? (
-                <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                </svg>
-              ) : (
-                <LogIn className="w-4 h-4" />
-              )}
-              {loading ? t("login.authenticating") : t("login.login_button")}
-            </button>
-          </form>
-
-          {/* Separator block */}
-          <div className="flex items-center gap-3">
-            <div className="flex-1 h-[1px] bg-white/10"></div>
-            <span className="text-[9px] text-white/40 font-mono uppercase tracking-widest whitespace-nowrap">{t("login.or_continue_with")}</span>
-            <div className="flex-1 h-[1px] bg-white/10"></div>
-          </div>
-
-          {authError && (
-            <div className="bg-red-900/30 border border-red-500/40 rounded px-3 py-2 text-[11px] font-mono text-red-300 flex items-center gap-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-red-400 shrink-0"></span>
-              {authError}
-            </div>
-          )}
-
-          {/* Google SSO Login */}
-          <button
-            type="button"
-            disabled={loading}
-            onClick={async () => {
-              setAuthError(null);
-              setLoading(true);
-              const { error } = await supabase.auth.signInWithOAuth({ provider: "google" });
-              setLoading(false);
-              if (error) {
-                setAuthError(error.message);
-              }
-            }}
-            className="w-full bg-[#00172e]/60 hover:bg-[#00345C]/50 border border-[#3B7EB2]/40 hover:border-[#45AFFF]/40 text-white py-3 rounded font-mono font-bold text-xs transition-all uppercase tracking-widest cursor-pointer shadow-sm flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {loading ? (
-              <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-              </svg>
-            ) : (
-              <svg className="w-4 h-4" viewBox="0 0 24 24">
-                <path
-                  fill="#EA4335"
-                  d="M12.24 10.285V14.4h6.887c-.648 2.41-2.519 4.2-5.137 4.2a5.7 5.7 0 0 1-5.7-5.7 5.7 5.7 0 0 1 5.7-5.7c2.14 0 3.987.818 5.353 2.15l3.1-3.1C20.35 4.3 16.59 2.5 12.24 2.5a10 10 0 0 0-10 10 10 10 0 0 0 10 10c5.38 0 9.8-3.9 9.8-9.8 0-.6-.05-1.15-.16-1.715h-9.64z"
-                />
-              </svg>
-            )}
-            {loading ? t("login.authenticating") : t("login.google_button")}
-          </button>
-
-          {/* Secure disclaimer footer */}
-          <div className="text-[9px] text-white/45 font-mono text-center pt-2 leading-relaxed">
-                        {t("login.disclaimer")}
-          </div>
-        </div>
-      </div>
-    );
+    return <DesktopAuthCard onLogin={() => { if (onLogin) onLogin(); }} />;
   }
 
   return (
@@ -1095,6 +977,18 @@ export default function HubView({
         const FLEET_COLORS = ["#43E600", "#45AFFF", "#E600D2", "#E68B00", "#8B5CF6", "#14B8A6"];
         const totalDistHours = distribution.reduce((sum, item) => sum + item.hours, 0);
 
+        // Torta por simulador (misma librería que el treemap: recharts).
+        const SIM_COLORS: Record<string, string> = { MSFS2024: "#45AFFF", XPLANE12: "#E68B00" };
+        // Blindaje: si el payload no es un arreglo, degradar a vacío en vez de romper toda la vista.
+        const simList = Array.isArray(simShares) ? simShares : [];
+        const simTotal = simList.reduce((sum, s) => sum + s.flights, 0);
+        const simPieData = simList.map((s) => ({
+          ...s,
+          label: s.simulator === "MSFS2024" ? t("hub.stats.sim_msfs") : t("hub.stats.sim_xplane"),
+          fill: SIM_COLORS[s.simulator] ?? "#8a94a6",
+          sharePct: simTotal > 0 ? (s.flights / simTotal) * 100 : 0,
+        }));
+
         return (
           <div id="stats-dashboard-screen" className="space-y-6 animate-fadeIn">
             {/* Header / Volver bar */}
@@ -1223,8 +1117,10 @@ export default function HubView({
               </div>
             </div>
 
-            {/* Row 3: Distribution Graphs/Indicators - Treemap / Mapa de Árbol */}
-            <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-5 shadow-sm space-y-4">
+            {/* Row 3: Treemap (6/8) + Distribución por Simulador (2/8) */}
+            <div className="grid grid-cols-1 lg:grid-cols-8 gap-6">
+              <div className="lg:col-span-6 min-w-0 bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-5 shadow-sm space-y-4">
+
               <h4 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider border-b border-white/10 pb-1.5 flex items-center justify-between">
                 <span>{t("hub.stats.dist_title")}</span>
                 <span className="text-[9px] text-[#43E600] font-bold">{t("hub.stats.dist_sub")}</span>
@@ -1261,6 +1157,56 @@ export default function HubView({
               )}
             </div>
 
+              {/* Distribución por Simulador (torta, misma librería que el treemap: recharts) */}
+              <div className="bg-[#2C6591]/20 border border-white/10 rounded-[5px] p-5 shadow-sm space-y-4 lg:col-span-2 min-w-0">
+                <h4 className="text-xs font-mono text-[#45AFFF] uppercase tracking-wider border-b border-white/10 pb-1.5">
+                  {t("hub.stats.sim_title")}
+                </h4>
+                {simTotal <= 0 ? (
+                  <div className="text-center py-8 space-y-1">
+                    <p className="text-sm font-bold text-white/70">{t("hub.stats.sim_empty_title")}</p>
+                    <p className="text-[11px] font-mono text-white/45">{t("hub.stats.sim_empty_desc")}</p>
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ width: "100%", height: 200 }}>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <PieChart>
+                          <Pie
+                            data={simPieData}
+                            dataKey="flights"
+                            nameKey="label"
+                            innerRadius={45}
+                            outerRadius={75}
+                            paddingAngle={2}
+                            stroke="#00172e"
+                            strokeWidth={2}
+                          >
+                            {simPieData.map((entry) => (
+                              <Cell key={entry.simulator} fill={entry.fill} />
+                            ))}
+                          </Pie>
+                          <Tooltip content={<SimPieTip />} />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <div className="space-y-1.5">
+                      {simPieData.map((entry) => (
+                        <div key={entry.simulator} className="flex items-center justify-between gap-2 text-[11px] font-mono">
+                          <span className="inline-flex min-w-0 items-center gap-1.5 text-white/75">
+                            <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: entry.fill }} />
+                            <span className="truncate">{entry.label}</span>
+                          </span>
+                          <strong className="shrink-0 text-white">
+                            {entry.flights} · {entry.sharePct.toFixed(0)}%
+                          </strong>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
             {/* Row 4: Rutas más realizadas & Actividad Mensual Bar Chart */}
             <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
               {/* Rutas más realizadas */}
