@@ -6,8 +6,10 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { supabase } from "../lib/supabase";
+import { getEnabledStockIds } from "../services/voiceService";
 import { generateManifest, getRegionFromICAO } from "../engine/PassengerManifest";
 import { getAirportName, parseMETAR, getAirportTimezone, formatLocalHHMM } from "../utils/airportMapping";
+import { extractAirlineCode } from "../utils/ofResolvers";
 import { getAirlineName } from "../utils/airlineMapping";
 import { getAirportByIcao, getAirportUtcOffsetHours, type CachedAirport } from "../services/airportService";
 import { useToast } from "./Toast";
@@ -114,6 +116,7 @@ import { BoardingMusicService, BoardingMusicTrack } from "../services/BoardingMu
 import { musicController, RANDOM_MUSIC_ID } from "../services/MusicController";
 import { fileLogger } from "../services/FileLogger";
 import { secondsToHHMM } from "../utils/timeUtils";
+import { resolveFlightSimulator } from "../utils/flightSimulator";
 import { isInternationalFlight, getCountryKey, resolveCruiseTimeSeconds, resolveTotalDistanceNm } from "../utils/flightUtils";
 import {
   BOARDING_PACE_DEFAULT_PPM,
@@ -1328,6 +1331,7 @@ export default function VueloActualView({
           departureMs: takeoffMs,
           arrivalMs: touchdownMs,
           flightStatus: status,
+          simulator: resolveFlightSimulator(getEffectiveSimProvider()),
         };
         console.log(`${tag} UPDATE flights → payload`, { flightId: id, ...summaryPayload });
         fileLogger.log(`${tag} UPDATE flights`, { flightId: id, ...summaryPayload });
@@ -2352,15 +2356,10 @@ export default function VueloActualView({
       setVoicesLoading(true);
       if (!userId) return;
       try {
-        const { data: userVoices, error: voicesError } = await supabase
-          .from('voices')
-          .select('voicestock_id')
-          .eq('user_id', userId)
-          .eq('voice_enabled', true);
-        if (voicesError) throw voicesError;
+        // Solo voces habilitadas por el usuario; sin registros, alta
+        // inicial con todas las públicas.
+        const stockIds = await getEnabledStockIds(userId);
         if (cancelled) return;
-
-        const stockIds = (userVoices || []).map((v: any) => v.voicestock_id);
 
         let mapped: VoiceOption[] = [];
         if (stockIds.length > 0) {
@@ -3049,6 +3048,7 @@ export default function VueloActualView({
 
       const flightUpdatePayload: Record<string, any> = {
         flight_status: "started",
+        simulator: resolveFlightSimulator(getEffectiveSimProvider()),
         scenario_key: selectedScenarioKey,
         lang_primary_id: captainPrimaryLang,
         lang_secondary_id: captainSecondaryLang === LANG_NONE || captainSecondaryLang === "" ? null : captainSecondaryLang,
@@ -3201,18 +3201,21 @@ export default function VueloActualView({
         },
       });
       // Vía paridad onAnyRunway (X-Plane): configurar salida+destino y pista
-      // planificada (`origin.plan_rwy` del OFP, si existe) y precargar la
-      // geometría antes de conectar. Para otros proveedores es no-op.
+      // Geometría onAnyRunway (X-Plane): salida+destino y pista planificada
+      // (`origin.plan_rwy` del OFP, si existe), precargada antes de conectar.
+      // Solo X-Plane o modo test (verificación): MSFS/Mock no usan apt.dat.
       try {
         const planRwy =
           (simbriefRawData as any)?.origin?.plan_rwy ??
           (simbriefRawData as any)?.origin?.planRwy ??
           null;
-        runwayProximityRef.current?.configureFlight({
-          departIcao: originICAO,
-          arriveIcao: destICAO,
-          planRwy: typeof planRwy === "string" ? planRwy : null,
-        });
+        if (getEffectiveSimProvider() === "xplane" || mode === "test") {
+          runwayProximityRef.current?.configureFlight({
+            departIcao: originICAO,
+            arriveIcao: destICAO,
+            planRwy: typeof planRwy === "string" ? planRwy : null,
+          });
+        }
       } catch {}
       // Iniciar el FlightController (autoStart: false → solo al hacer clic en "Iniciar Vuelo")
       if (flightControllerRef.current && !flightControllerRef.current.isConnected()) {
@@ -3581,6 +3584,7 @@ export default function VueloActualView({
         passengers_count: w.pax_count ? parseInt(w.pax_count) : 0,
         crew_count: 2,
         flight_status: "pending",
+        simulator: resolveFlightSimulator(getEffectiveSimProvider()),
         flight_services_config: defaultServices,
         simbrief_snapshot: data,
         // Preservar el escenario seleccionado en la UI (si no, el default).
@@ -3710,7 +3714,7 @@ export default function VueloActualView({
         vueloCodigo: data.general?.flight_number || "",
         origen: data.origin?.icao_code || "",
         destino: data.destination?.icao_code || "",
-        aerolinea: data.general?.icao_airline || data.general?.airline || "",
+        aerolinea: extractAirlineCode(data),
         avion: data.aircraft?.name || "",
         cruisingAltitude: data.general?.route_altitude || "",
         blockTime: data.times?.est_block ? `${Math.round(parseFloat(data.times.est_block) * 60)} minutos` : "",

@@ -23,6 +23,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { ArrowLeft, Crosshair, Minus, Plus } from "lucide-react";
 import { haversineNm } from "../../services/flightHistoryFormat";
+import { getAirportTimezone } from "../../utils/airportMapping";
 import { IFE_BRAND } from "./IfeChrome";
 
 const MAGENTA = "#C92C5D";
@@ -104,9 +105,22 @@ function bearingDeg(a: [number, number], b: [number, number]): number {
   return (toDeg(Math.atan2(y, x)) + 360) % 360;
 }
 
-function formatClock(ms: number): string {
-  const d = new Date(ms);
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+/**
+ * Hora del reloj en el huso del aeropuerto de destino (como el IFE real,
+ * que anuncia el arribo en hora local de destino, no UTC ni hora del PC).
+ */
+function formatClock(ms: number, destIcao: string): string {
+  try {
+    return new Date(ms).toLocaleTimeString("es-ES", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+      timeZone: getAirportTimezone(destIcao),
+    });
+  } catch {
+    const d = new Date(ms);
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  }
 }
 
 /** Mock: interpola LTAF→LTAC en un ciclo de 180 s para probar sin simulador. */
@@ -272,7 +286,7 @@ export default function IfeFlightMapView({
         altitude: Math.round(tel.altitude || 0),
         groundspeed: Math.round(gs),
         distance: Math.round(dist),
-        eta: Number.isFinite(etaMin) ? formatClock(Date.now() + etaMin * 60000) : "—",
+        eta: Number.isFinite(etaMin) ? formatClock(Date.now() + etaMin * 60000, destIcao) : "—",
         heading: Math.round((tel.heading || 0) % 360),
       });
     };

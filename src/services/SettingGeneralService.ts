@@ -12,6 +12,12 @@ export interface FlightCrewPreferences {
   gate_agent_voice_id: string | null;
 }
 
+/** PostgREST rechaza `""` en columnas UUID: se persiste como `NULL`. */
+function toNullableId(value: string | null | undefined): string | null {
+  const trimmed = (value ?? "").trim();
+  return trimmed === "" ? null : trimmed;
+}
+
 export class SettingGeneralService {
   /**
    * Carga preferencias de idioma/voces desde setting_general para un usuario.
@@ -31,10 +37,10 @@ export class SettingGeneralService {
       }
       if (!data) return null;
       return {
-        language_id: data.language_id ?? null,
-        captain_voice_id: data.captain_voice_id ?? null,
-        crew_voice_id: data.crew_voice_id ?? null,
-        gate_agent_voice_id: data.gate_agent_voice_id ?? null,
+        language_id: toNullableId(data.language_id),
+        captain_voice_id: toNullableId(data.captain_voice_id),
+        crew_voice_id: toNullableId(data.crew_voice_id),
+        gate_agent_voice_id: toNullableId(data.gate_agent_voice_id),
       };
     } catch (err) {
       console.warn("[SettingGeneralService] load catch:", err);
@@ -52,10 +58,10 @@ export class SettingGeneralService {
     try {
       const payload: Record<string, unknown> = {
         user_id: userId,
-        ...(prefs.language_id !== undefined ? { language_id: prefs.language_id } : {}),
-        ...(prefs.captain_voice_id !== undefined ? { captain_voice_id: prefs.captain_voice_id } : {}),
-        ...(prefs.crew_voice_id !== undefined ? { crew_voice_id: prefs.crew_voice_id } : {}),
-        ...(prefs.gate_agent_voice_id !== undefined ? { gate_agent_voice_id: prefs.gate_agent_voice_id } : {}),
+        ...(prefs.language_id !== undefined ? { language_id: toNullableId(prefs.language_id) } : {}),
+        ...(prefs.captain_voice_id !== undefined ? { captain_voice_id: toNullableId(prefs.captain_voice_id) } : {}),
+        ...(prefs.crew_voice_id !== undefined ? { crew_voice_id: toNullableId(prefs.crew_voice_id) } : {}),
+        ...(prefs.gate_agent_voice_id !== undefined ? { gate_agent_voice_id: toNullableId(prefs.gate_agent_voice_id) } : {}),
       };
 
       console.log("[SettingGeneralService] saving:", payload);

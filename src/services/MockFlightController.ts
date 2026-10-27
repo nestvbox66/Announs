@@ -180,10 +180,15 @@ export class MockFlightController implements FlightController {
     return this.elapsedTime;
   }
 
-  /** Fuerza el cierre de puertas de forma manual (para tests / UI). */
+  /** Cierre de puertas manual desde la UI: libera BOARDING y salta a PRE_FLIGHT. */
   simulateDoorsClosed(): void {
+    this.boardingHold = false;
+    if (this.state.phase === FlightPhase.BOARDING) {
+      this.elapsedTime = 180;
+      this.updateStateFromTimeline(this.elapsedTime);
+    }
     this.state.doorsClosed = true;
-    console.log("[MockFlightController] simulateDoorsClosed() → doorsClosed=true");
+    console.log("[MockFlightController] simulateDoorsClosed() -> doorsClosed=true");
     this.emit();
   }
 
@@ -230,12 +235,6 @@ export class MockFlightController implements FlightController {
         return;
       }
     }
-    // BOARDING: esperar puertas cerradas (PRE_FLIGHT) — mantener BOARDING hasta que el
-    // simulador detecte doorsClosed (vía telemetry). El timeline ya mantiene puertas
-    // abiertas en BOARDING; la transición a PRE_FLIGHT ocurrirá cuando el Scheduler
-    // detecte doorsClosed, pero el Mock no forzará el avance hasta que el tiempo lo indique.
-    // Para pruebas con autoTransition, el timeline avanza solo; para validación manual,
-    // el Mock respeta boardingHold hasta que se libere (vía notifyDoorsClosed interno).
 
     // Aplicar multiplicador de velocidad
     const intervalMs = this.opts.intervalMs ?? 1000;
@@ -244,6 +243,13 @@ export class MockFlightController implements FlightController {
     this.elapsedTime += delta;
     // Cap a TOTAL_DURATION (fin de timeline 1170s)
     if (this.elapsedTime > TOTAL_DURATION) this.elapsedTime = TOTAL_DURATION;
+
+    if (this.boardingHold && this.state.phase === FlightPhase.BOARDING && this.elapsedTime >= 179) {
+      this.elapsedTime = 179.9;
+      this.updateStateFromTimeline(this.elapsedTime);
+      this.emit();
+      return;
+    }
 
     console.log("[MockFlightController] ⏱️ Simulación con speedMultiplier:", {
       speedMultiplier,

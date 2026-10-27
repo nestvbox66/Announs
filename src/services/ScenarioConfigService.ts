@@ -11,12 +11,14 @@
 import { config } from "../config";
 import { supabase } from "../lib/supabase";
 import { ServiceResult, ok, fail } from "./ServiceResult";
+import { localizeRow, localizeRows } from "./translationService";
 import {
   NORMAL_SCENARIO_KEY,
   SCENARIO_DESIGNER_PHASES,
-  scenarioPhaseLabel,
   isConfigurableEvent,
 } from "./eventConfigConstants";
+import { resolveScenarioPhaseName } from "../utils/scenarioPhaseNames";
+import { getCurrentContentLanguage } from "./translationService";
 
 export interface ScenarioOption {
   id: string;
@@ -77,6 +79,7 @@ interface ScenarioVersionRow {
 }
 
 interface EdgeEventRow {
+  id: string;
   event_key: string;
   display_name: string;
   description: string | null;
@@ -97,12 +100,15 @@ export class ScenarioConfigService {
 
       if (error) return fail(error.message);
 
-      const options: ScenarioOption[] = (data ?? []).map((row) => ({
-        id: row.id,
-        key: row.key,
-        name: row.name,
-        description: row.description ?? null,
-        defaultPhase: row.default_phase ?? null,
+      const localized = await localizeRows("scenarios", (data ?? []) as Array<Record<string, unknown>>, {
+        fields: ["name", "description"],
+      });
+      const options: ScenarioOption[] = localized.map((row) => ({
+        id: String(row.id ?? ""),
+        key: String(row.key ?? ""),
+        name: String(row.name ?? ""),
+        description: row.description != null ? String(row.description) : null,
+        defaultPhase: row.default_phase != null ? String(row.default_phase) : null,
       }));
 
       return ok(options);
@@ -124,12 +130,16 @@ export class ScenarioConfigService {
       if (error) return fail(error.message);
       if (!data) return ok(null);
 
+      const localized = await localizeRow("scenarios", data as unknown as Record<string, unknown>, {
+        fields: ["name", "description"],
+      });
+      const row = (localized ?? {}) as Record<string, unknown>;
       return ok({
-        id: data.id,
-        key: data.key,
-        name: data.name,
-        description: data.description ?? null,
-        defaultPhase: data.default_phase ?? null,
+        id: String(row.id ?? ""),
+        key: String(row.key ?? ""),
+        name: String(row.name ?? ""),
+        description: row.description != null ? String(row.description) : null,
+        defaultPhase: row.default_phase != null ? String(row.default_phase) : null,
       });
     } catch (err) {
       return fail(err instanceof Error ? err.message : String(err));
@@ -203,7 +213,7 @@ export class ScenarioConfigService {
       const phasesRaw = snapshot.phases ?? [];
 
       const phases: ScenarioPhaseConfig[] = phasesRaw.map((phase) => {
-        const phaseName = phase.name || scenarioPhaseLabel(phase.key);
+        const phaseName = resolveScenarioPhaseName(phase.key, getCurrentContentLanguage());
         const events = (phase.steps ?? [])
           .filter((step) => isConfigurableEvent(step.event_key))
           .map((step): ScenarioEventConfig => ({
@@ -288,7 +298,7 @@ export class ScenarioConfigService {
       if (!result?.success || !result?.data?.phase) return null;
 
       const phase = result.data.phase;
-      const name = phase.name || scenarioPhaseLabel(phaseKey);
+      const name = resolveScenarioPhaseName(phaseKey, getCurrentContentLanguage());
 
       const events: ScenarioEventConfig[] = (phase.steps ?? [])
         .filter((step: any) => isConfigurableEvent(step.event?.key ?? step.event_key))
@@ -362,13 +372,19 @@ export class ScenarioConfigService {
     try {
       const { data, error } = await supabase
         .from("events")
-        .select("event_key, display_name, description, speaker_role")
+        .select("id, event_key, display_name, description, speaker_role")
         .in("event_key", eventKeys);
 
       if (error || !data) return ok(snapshot);
 
+      // Overlay de traducciones (display_name/description) por id de evento.
+      // La clave de búsqueda `event_key` nunca se reemplaza.
+      const localizedEvents = await localizeRows("events", data as EdgeEventRow[], {
+        fields: ["display_name", "description"],
+      });
+
       const byKey = new Map<string, EdgeEventRow>();
-      for (const row of data as EdgeEventRow[]) {
+      for (const row of localizedEvents) {
         byKey.set(row.event_key, row);
       }
 
